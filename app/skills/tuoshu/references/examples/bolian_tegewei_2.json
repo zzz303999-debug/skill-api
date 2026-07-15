@@ -1,0 +1,57 @@
+{
+  "doc_type": "BOOKING_NOTE",
+  "booking_no": null,
+  "customer_ref": null,
+  "mbl_no": "177MSHSHS40521",
+  "hbl_no": null,
+
+  "vessel": "MAERSK HALIFAX",
+  "voyage": "205W",
+  "carrier": "MSK",
+
+  "pol": null,
+  "pod": "TRIESTE",
+  "transit_port": null,
+  "terminal": null,
+
+  "etd": null,
+  "si_cutoff": "2022-02-12T10:00:00",
+  "customs_cutoff": "2022-02-13T12:00:00",
+  "loading_time": null,
+
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": null,
+      "gross_weight_kg": null,
+      "volume_cbm": null,
+      "po_no": "100886/887/888/889",
+      "mbl_no": "177MSHSHS40521",
+      "remark": "加拼关单号：主单号+A,B……"
+    }
+  ],
+
+  "factory": {
+    "name": "特格威",
+    "address": "常州武进区XX路66号武进综合保税区保税仓库3号库",
+    "contact": "张三",
+    "phone": "13800000001"
+  },
+
+  "shipper_agent": null,
+
+  "remark": "2-12截单 不开港就预提，开港就做箱  代理放箱；倍联业务编号：待定（无有效值）；客户名称：特格威（备注在账单上）；报关员联系电话：李四 13800000002；中转港代码原文出现两次（ITTRS 与 见设备单），按'见设'规则取 null",
+
+  "source": {
+    "file": "2-12  托书 特格威 177MSHSHS40521.docx",
+    "doc_format": "docx",
+    "template_hint": "bolian_tegewei",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "2-12截单 不开港就预提，开港就做箱  代理放箱 | 倍联业务编号：待定 | 客户名称：特格威 | 提货地址：常州武进区XX路66号武进综合保税区保税仓库3号库 | 177MSHSHS40521 | MAERSK HALIFAX 205W | 中转港代码：ITTRS | 目的港：TRIESTE | 02/12 10:00 截 SI&VGM | 02/13 12:00 截关 | 1*40HC | 中转港代码：见设备单"
+}

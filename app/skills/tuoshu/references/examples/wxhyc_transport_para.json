@@ -1,0 +1,122 @@
+{
+  "doc_type": "TRANSPORT_ORDER",
+  "booking_no": "WXHYC22020066",
+  "customer_ref": null,
+  "mbl_no": "292340329",
+  "hbl_no": null,
+
+  "vessel": "MSC AQUARIUS",
+  "voyage": "207E",
+  "carrier": null,
+
+  "pol": null,
+  "pod": "LONGVIEW",
+  "transit_port": null,
+  "terminal": null,
+
+  "etd": null,
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2022-01-19",
+
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 2300,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 5750,
+      "volume_cbm": 69.018,
+      "po_no": null,
+      "mbl_no": "292340329",
+      "remark": "柜1：A 工厂整柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 2300,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 5750,
+      "volume_cbm": 69.018,
+      "po_no": null,
+      "mbl_no": "292340329",
+      "remark": "柜2：A 工厂整柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 2300,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 5750,
+      "volume_cbm": 69.018,
+      "po_no": null,
+      "mbl_no": "292340329",
+      "remark": "柜3：A 工厂整柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 2299,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 5747.5,
+      "volume_cbm": 68.988,
+      "po_no": null,
+      "mbl_no": "292340329",
+      "remark": "柜4：A 工厂整柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 1703,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 6594.5,
+      "volume_cbm": 62.337,
+      "po_no": null,
+      "mbl_no": "292340329C",
+      "remark": "B 工厂整柜装柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": null,
+      "volume_cbm": null,
+      "po_no": null,
+      "mbl_no": null,
+      "remark": "拼箱：先 B 工厂后 A 工厂；292340329A 100CTNS 550KGS 5.115CBM (PO#D0821)；292340329B 1327CTNS 6183KGS 60CBM"
+    }
+  ],
+
+  "factory": {
+    "name": "A 工厂",
+    "address": "无锡市惠山区玉祁XX路127号",
+    "contact": "李四",
+    "phone": "13800000002"
+  },
+
+  "shipper_agent": null,
+
+  "remark": "6*40HC；4 柜 A 工厂整装 + 1 柜 B 工厂整装 + 1 柜拼箱；B 工厂地址：句容XX路88号，赵六 13800000004；A 工厂第二联系人：王五 13800000003；备注：RMB2500*4+2600RMB+；请于2月9日上午9点提供箱封号",
+
+  "source": {
+    "file": "2-9 运输委托书 292340329.docx",
+    "doc_format": "docx",
+    "template_hint": "wxhyc_transport_para",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "运输委托书 | TO：A 公司 | FM：小张 | 我司编号：WXHYC22020066 | 主提单号：292340329 | 船名航次：MSC AQUARIUS 207E | 中转港：见设备交接单 | 目的港：LONGVIEW | 箱型箱量：6*40HC | 柜1-柜4 A 工厂整装 | 292340329A/B 拼箱 | 292340329C B 工厂整柜 | 拆装箱日期：1月19日"
+}

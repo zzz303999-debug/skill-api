@@ -1,0 +1,57 @@
+{
+  "doc_type": "PACKING_NOTICE",
+  "booking_no": "YHHY1711010",
+  "customer_ref": "17HZY0262",
+  "mbl_no": "SITGSHHPC56607",
+  "hbl_no": null,
+
+  "vessel": "RESURGENCE",
+  "voyage": "1728S",
+  "carrier": "SITC",
+
+  "pol": "SHANGHAI",
+  "pod": "HAIPHONG",
+  "transit_port": "VNHPH",
+  "terminal": null,
+
+  "etd": null,
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2017-11-15T09:00:00",
+
+  "containers": [
+    {
+      "type": "20GP",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": "PACKAGES",
+      "gross_weight_kg": 12000,
+      "volume_cbm": null,
+      "po_no": "17HZY0262",
+      "mbl_no": "SITGSHHPC56607",
+      "remark": "备注栏 订单号17HZY0262；原文毛重 12吨（换算 12000 KG）"
+    }
+  ],
+
+  "factory": {
+    "name": "江苏XX工贸",
+    "address": "江苏省盐城市XX区XX镇XX北路11号",
+    "contact": "张三",
+    "phone": "13800000001"
+  },
+
+  "shipper_agent": "上海育海国际货运有限公司",
+
+  "remark": "抬头字符间加空格：'上 海 育 海 国 际 货 运 有 限 公 司' 归一去空格；我司配载 2017 年 11 月 17 日 上海至 HAIPHONG(DINH VU),VIET NAM 的 20GPX1（订舱日非船期，etd=null）；装箱安排 11月15日上午9点到厂，有人监装；备注栏 订单号17HZY0262",
+
+  "source": {
+    "file": "13.docx",
+    "doc_format": "docx",
+    "template_hint": "yuhai_table",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "上 海 育 海 国 际 货 运 有 限 公 司 | 装箱通知 | 育海编号：YHHY1711010 | 我司配载 2017 年 11 月 17 日 上海至 HAIPHONG(DINH VU),VIET NAM 的 20GPX1 | 船名航次 RESURGENCE V.1728S | 提单号 SITGSHHPC56607 | 中转港 VNHPH | 件数为 PACKAGES | 毛重为 12吨 | 体积为 CBM | 备注栏 订单号17HZY0262 | 装箱安排 11月15日上午9点到厂"
+}

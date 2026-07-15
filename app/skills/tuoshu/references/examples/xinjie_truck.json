@@ -1,0 +1,57 @@
+{
+  "doc_type": "TRUCKING_ORDER",
+  "booking_no": null,
+  "customer_ref": "GQWF2022009",
+  "mbl_no": "SITGSHSGQ119789",
+  "hbl_no": null,
+
+  "vessel": "SITC FUJIAN",
+  "voyage": "2204S",
+  "carrier": "SITC",
+
+  "pol": "SHANGHAI",
+  "pod": "HOCHIMINH",
+  "transit_port": "VNSGN",
+  "terminal": null,
+
+  "etd": null,
+  "si_cutoff": "2022-03-02T10:00:00",
+  "customs_cutoff": null,
+  "loading_time": "2022-03-02T10:00:00",
+
+  "containers": [
+    {
+      "type": "20GP",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 7,
+      "packages_unit": null,
+      "gross_weight_kg": 5479,
+      "volume_cbm": 17.5,
+      "po_no": "GQWF2022009",
+      "mbl_no": "SITGSHSGQ119789",
+      "remark": "3.2 10点截单，靠外四"
+    }
+  ],
+
+  "factory": {
+    "name": null,
+    "address": "桐乡市XX镇XX大道XX号（东大门进）",
+    "contact": null,
+    "phone": "0573-88888888"
+  },
+
+  "shipper_agent": "嘉兴新捷国际货运代理有限公司",
+
+  "remark": "TO: 空 / FM: 张三；装箱时间 2022-03-02 10:00:00 前请务必准时；靠外四；工厂3点不到就下班；装箱当天上午9点前将箱封号及进港装箱单传我公司",
+
+  "source": {
+    "file": "3.2装桐乡1小 SITGSHSGQ119789_嘉兴新捷车队托书.xls",
+    "doc_format": "xls",
+    "template_hint": "xinjie_truck",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "嘉兴新捷国际货运代理有限公司车队装箱通知单 | TO: | FM: 张三 | 装货港 SHANGHAI | 中转港代码 VNSGN | 船名/航次 SITC FUJIAN/2204S | 目的地 HOCHIMINH | 编号 1 | 提单号 SITGSHSGQ119789 | PO# GQWF2022009 | 件数 7 | 毛重 5479 | 体积 17.5 | 箱型箱量 1*20GP | 装箱日期 2022-03-02 | 备注 3.2 10点截单，靠外四 | 装箱时间 2022-03-02 10:00:00 | 装箱地点:桐乡市XX镇XX大道XX号（东大门进） 0573-88888888"
+}

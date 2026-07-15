@@ -1,0 +1,57 @@
+{
+  "doc_type": "BOOKING_NOTE",
+  "booking_no": "BLCC20200001",
+  "customer_ref": null,
+  "mbl_no": "177MSHSHS63702",
+  "hbl_no": null,
+
+  "vessel": "MAERSK HORSBURGH",
+  "voyage": "152W",
+  "carrier": "MSK",
+
+  "pol": null,
+  "pod": "TRIESTE",
+  "transit_port": "ITTRS",
+  "terminal": null,
+
+  "etd": null,
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": null,
+
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": null,
+      "gross_weight_kg": null,
+      "volume_cbm": null,
+      "po_no": "100874/100875",
+      "mbl_no": "177MSHSHS63702",
+      "remark": null
+    }
+  ],
+
+  "factory": {
+    "name": "特格威",
+    "address": "常州武进区XX路66号武进综合保税区保税仓库3号库",
+    "contact": "张三",
+    "phone": "13800000001"
+  },
+
+  "shipper_agent": null,
+
+  "remark": "1-8 截单 不开港就预提，开港就做箱；客户名称：特格威（备注在账单上）；预配；报关员联系电话：李四 13800000002；司机手上的装箱单上，标注出客户的订单号:100874/100875；早上8点半前到保税区",
+
+  "source": {
+    "file": "1-8  托书 特格威 BLJC20210124 177MSHSH63702.docx",
+    "doc_format": "docx",
+    "template_hint": "bolian_tegewei",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "1-8 截单 不开港就预提，开港就做箱 | 倍联业务编号：BLCC20200001 客户名称：特格威 | 提货地址：常州武进区XX路66号武进综合保税区保税仓库3号库，联系人张三13800000001 | 预配 | 177MSHSHS63702 | MAERSK HORSBURGH 152W | 目的港:TRIESTE | 中转港代码：ITTRS | 1*40HC | 客户订单号:100874/100875"
+}

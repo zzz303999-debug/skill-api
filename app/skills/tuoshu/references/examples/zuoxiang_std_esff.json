@@ -1,0 +1,57 @@
+{
+  "doc_type": "PACKING_NOTICE",
+  "booking_no": "ESFF21030474",
+  "customer_ref": "8650135793",
+  "mbl_no": "ONEYSH1AC9779502",
+  "hbl_no": null,
+
+  "vessel": "MSC GAYANE",
+  "voyage": "FI111A",
+  "carrier": "ONE",
+
+  "pol": null,
+  "pod": "SANTOS",
+  "transit_port": null,
+  "terminal": "洋一",
+
+  "etd": "2021-03-23",
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2021-03-19",
+
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 1468,
+      "packages_unit": null,
+      "gross_weight_kg": 19784,
+      "volume_cbm": 62.14,
+      "po_no": null,
+      "mbl_no": "ONEYSH1AC9779502",
+      "remark": null
+    }
+  ],
+
+  "factory": {
+    "name": "常州XX电动工具有限公司",
+    "address": "常州市遥观镇XX工业园",
+    "contact": "张三",
+    "phone": "13800000001"
+  },
+
+  "shipper_agent": null,
+
+  "remark": "10点截单,提供箱封号；主单是ONEYSH1AC9779500",
+
+  "source": {
+    "file": "03.19 ESFF21030474 XX托书.xlsx",
+    "doc_format": "xlsx",
+    "template_hint": "zuoxiang_std_esff",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "做箱通知书 | 做箱时间：2021/3/19 主单是ONEYSH1AC9779500 | 我司业务编号 ESFF21030474 | 客户编号 8650135793 | 船名航次 MSC GAYANE FI111A | 提单号 ONEYSH1AC9779502 | 目的港 SANTOS | 中转港 见设 | 港区 洋一 | 船期 2021-03-23 | 件数 1468 | 毛重 19784 | 体积 62.14 | 箱型箱量 1*40HC | 备注：10点截单,提供箱封号"
+}

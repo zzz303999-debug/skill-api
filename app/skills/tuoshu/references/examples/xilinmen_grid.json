@@ -1,0 +1,57 @@
+{
+  "doc_type": "PACKING_NOTICE",
+  "booking_no": "CNRX025055",
+  "customer_ref": "PO 881",
+  "mbl_no": "CNRX025055",
+  "hbl_no": null,
+
+  "vessel": "BALLENITA",
+  "voyage": "0PPT4E",
+  "carrier": null,
+
+  "pol": "SHANGHAI",
+  "pod": "LAZARO CARDENAS",
+  "transit_port": null,
+  "terminal": null,
+
+  "etd": "2022-02-20",
+  "si_cutoff": "2022-02-16T00:00:00",
+  "customs_cutoff": null,
+  "loading_time": null,
+
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 4,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": null,
+      "gross_weight_kg": null,
+      "volume_cbm": null,
+      "po_no": "PO 881",
+      "mbl_no": "CNRX025055",
+      "remark": null
+    }
+  ],
+
+  "factory": {
+    "name": "喜临门家具",
+    "address": "浙江省绍兴市越城区XX路13-1号",
+    "contact": "张三",
+    "phone": "13800000001"
+  },
+
+  "shipper_agent": "浙江经茂国际货运代理有限公司",
+
+  "remark": "箱单备注：无异味，无破损的箱子；注意 工厂要求比较高 请准时到厂；操作联系人：徐 13800000005",
+
+  "source": {
+    "file": "2-11 CNRX025055  喜临门 装箱托书.xlsx",
+    "doc_format": "xlsx",
+    "template_hint": "xilinmen_grid",
+    "extracted_at": null
+  },
+
+  "raw_text_snippet": "浙江经茂国际货运代理有限公司 | 做箱通知 | 船名航次 BALLENITA/0PPT4E | 关单号 CNRX025055 | 起运港 上海 | 目的港 LAZARO CARDENAS | 船期 2022-02-20 | 截信息 2022-02-16 | 箱量 4 * 40HQ | 装箱工厂 喜临门家具 | 工厂合同号 PO 881 | 提单号 CNRX025055 | 箱型 40HQ"
+}
