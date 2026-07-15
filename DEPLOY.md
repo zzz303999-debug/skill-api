@@ -82,14 +82,6 @@ HTTP 200 表示正常。K8s liveness/readiness probe 都用这个。
 
 ## 部署方式建议
 
-### K8s（推荐）
-
-- Deployment + Service + Ingress
-- ConfigMap 存普通变量
-- Secret 存 `OPENCLAW_API_KEY` 和 `API_KEY`
-- liveness/readiness probe 打 `/healthz`
-- 副本数 1-2 起步（服务无状态，可以随意扩）
-
 ### Docker Compose（简易内网单机）
 
 仓库根目录有 `docker-compose.yml`，改一下 `env_file` 或直接写 `environment:` 也行。
@@ -117,6 +109,3 @@ HTTP 200 表示正常。K8s liveness/readiness probe 都用这个。
 - LLM 抽取本身耗时 10-60s 属正常
 - 反向代理 / Ingress 的超时时间要 >= 180s，否则会被截断
 
-## 联系
-
-代码问题：仓库 issues 或直接找当前维护者
