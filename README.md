@@ -64,6 +64,20 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+### 龙虾环境按版本部署
+
+GitHub 推送 `v*` tag 后，Actions 会构建并发布 GHCR 镜像。龙虾不需要 Git，使用
+只读的 GitHub Packages Token 登录一次，然后按明确版本部署：
+
+```bash
+export SKILL_API_IMAGE=ghcr.io/zzz303999-debug/skill-api:v0.1.0
+docker compose -f docker-compose.deploy.yml pull
+docker compose -f docker-compose.deploy.yml up -d
+```
+
+生产环境不要使用 `latest`；回滚时把 `SKILL_API_IMAGE` 改回上一个版本并重新执行
+`up -d`。`.env` 始终由龙虾环境维护，不进入 GitHub。
+
 ### 交付给部署平台（如"龙虾" Agent）
 
 把整个 repo 目录打包交付即可。平台需要知道的信息：
@@ -100,9 +114,17 @@ docker compose logs -f
   "skill": "tuoshu",
   "version": "0.1.0",
   "data": { /* skill 自己的 output_model */ },
-  "meta": { "model": "deepseek-v4-flash", "usage": {...} }
+  "meta": { "model": "openclaw", "usage": {...} }
 }
 ```
+
+### `POST /skills/{skill_name}/batch-extract`
+
+一次上传多个文件。服务会在全局并发限制内执行，逐文件返回 `result` 或结构化
+`error`，单个文件失败不会中断其他文件。
+
+上传限制由 `API_MAX_UPLOAD_BYTES`、`API_BATCH_MAX_FILES` 控制，Skill/LLM 总并发由
+`SKILL_MAX_CONCURRENCY` 控制。
 
 ## 添加新 skill
 
@@ -123,7 +145,11 @@ docker compose logs -f
 
 | 变量 | 说明 |
 |------|------|
-| `OPENCLAW_BASE_URL` | 网关地址，默认 `http://192.168.0.130:18789/v1` |
+| `OPENCLAW_BASE_URL` | 龙虾网关地址，由部署环境注入；本地默认 `http://127.0.0.1:18789/v1` |
 | `OPENCLAW_API_KEY` | 网关 Bearer Token |
-| `LLM_MODEL_DEFAULT` | 默认模型，`deepseek-v4-flash` |
+| `LLM_MODEL_DEFAULT` | 龙虾网关模型或 agent 名，默认 `openclaw` |
 | `API_KEY` | 客户端调用需要的 `X-API-Key` |
+| `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
+| `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
+| `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
+| `VISION_MAX_PDF_PAGES` | 扫描 PDF 最多渲染页数，默认 3 |

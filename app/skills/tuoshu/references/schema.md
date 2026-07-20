@@ -7,7 +7,7 @@
 ```json
 {
   "doc_type": "PACKING_NOTICE",
-  "booking_no": "ESFF21030474",
+  "customs_declaration_no": "ESFF21030474",
   "customer_ref": "8650135793",
   "mbl_no": "ONEYSH1AC9779502",
   "hbl_no": null,
@@ -51,6 +51,11 @@
 
   "shipper_agent": null,
 
+  "recipient": "俊泰",
+  "doc_date": "2021-12-30",
+  "sender": "江苏倍联",
+  "sender_contact": "陈俐玲",
+
   "remark": "10点截单,提供箱封号",
 
   "source": {
@@ -71,7 +76,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `doc_type` | enum | ✓ | 见下方枚举 |
-| `booking_no` | string \| null | | 我方业务编号 / 我司编号 / 关单号（首选） |
+| `customs_declaration_no` | string \| null | | 关单号 / 我方业务编号 / 我司编号 |
 | `customer_ref` | string \| null | | 客户编号 / PO / 客户订单号 |
 | `mbl_no` | string \| null | | 主提单号（Master B/L） |
 | `hbl_no` | string \| null | | 分提单号（House B/L） |
@@ -89,6 +94,10 @@
 | `containers` | array | ✓ | 见下方 |
 | `factory` | object \| null | | 做箱工厂信息 |
 | `shipper_agent` | string \| null | | 我方公司/发件方（如"倍联"/"欣一捷"） |
+| `recipient` | string \| null | | 收件方（TO 字段） |
+| `doc_date` | string \| null | | 文档日期（DATE 字段），格式 `YYYY-MM-DD` |
+| `sender` | string \| null | | 发货方（FROM 字段） |
+| `sender_contact` | string \| null | | 发货联系人（FROM 后面的联系人姓名） |
 | `remark` | string \| null | | 汇总备注 |
 | `source` | object | ✓ | 元数据 |
 | `raw_text_snippet` | string \| null | | 原文首 200 字符（溯源） |
@@ -143,7 +152,7 @@
 
 以下字段必须**从原文逐字符复制**，不得改写字符/大小写：
 
-- `booking_no`, `customer_ref`, `mbl_no`, `hbl_no`, `po_no`, `container_no`, `seal_no`
+- `customs_declaration_no`, `customer_ref`, `mbl_no`, `hbl_no`, `po_no`, `container_no`, `seal_no`
 
 原因：一个字符错误（O vs 0、I vs 1、B vs 8）就是业务事故。
 

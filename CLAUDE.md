@@ -22,6 +22,20 @@ Skill 层    →  app/skills/<name>/
 LLM 层      →  app/llm/openclaw.py（唯一出口）
 ```
 
+### 龙虾运行环境
+
+本服务部署在龙虾 / OpenClaw 环境中，通过 OpenAI 兼容协议调用同环境提供的
+OpenClaw 网关。网关地址、API Key、并发数等必须通过部署环境变量注入，不要把
+真实凭证或固定环境地址写进代码和 `.env.example`。
+
+`SkillBase.run()` 保持同步契约，但 FastAPI handler **不得直接调用同步 run()**。
+`app/main.py` 会统一把 Skill 放进有界线程池执行：
+
+- 避免文件转换和最长数分钟的 LLM 请求阻塞 asyncio 事件循环
+- `SKILL_MAX_CONCURRENCY` 限制单进程同时运行的 Skill 数量
+- 新接口应复用 `_run_skill()`，不要自行创建无限制线程池或 `asyncio.gather`
+- `.venv` 是运行环境产物，不跨机器复制，不纳入项目交付
+
 **LLM 调用必须走 `app.llm` 模块**。禁止在 skill 里直接 `import openai` 或写 http 请求。这样：
 - 模型/网关/超时/重试策略集中调整
 - 日志和用量统计统一
@@ -40,6 +54,14 @@ app/skills/<skill_name>/
 ```
 
 **启动流程**：`registry.discover()` 扫描 `app.skills.*` 包，import 触发每个子包的 `__init__.py` 里的 `register()`。然后 `main.py` 为每个已注册 skill 挂 `POST /skills/{name}/extract`。
+
+每个 Skill 同时会挂载：
+
+- `POST /skills/{name}/extract`：单文件抽取，返回强类型统一响应
+- `POST /skills/{name}/batch-extract`：多文件抽取，逐文件返回结果或结构化错误
+
+上传限制由 `API_MAX_UPLOAD_BYTES`、`API_BATCH_MAX_FILES` 控制。批量接口的并发仍受
+全局 `SKILL_MAX_CONCURRENCY` 约束，禁止绕过限制直接并发调用 LLM。
 
 ## 新增 skill 的标准流程
 
@@ -99,6 +121,14 @@ class FreightRateSkill(SkillBase):
         return {"result": validated.model_dump(), "meta": meta}
 ```
 
+注意：`run()` 的参数是 keyword-only。任何框架层调用都必须写成：
+
+```python
+skill.run(file_bytes=content, filename=filename, options=None)
+```
+
+禁止以位置参数调用，否则所有 Skill 都会触发 `TypeError`。
+
 ### 4. 写 `__init__.py`
 
 ```python
@@ -135,6 +165,9 @@ class SkillBase:
 - `run` 抛 `app.errors.*` 里的异常，会被 FastAPI 全局处理器转成对应状态码
 - 不要在 `run` 里做 I/O 写文件（要写走 `settings.storage_dir`）
 - 结果必须过 `output_model.model_validate()` 校验
+- `model_validate()` 的 `ValidationError` 必须转换为 `ParseError`，不要让原始异常变成 500
+- LLM JSON 顶层必须是 object；数组、字符串、null 都视为 `ParseError`
+- 批量响应禁止直接返回 `str(exception)`，避免泄露网关地址、凭证或内部实现
 
 ## LLM 使用
 
@@ -155,7 +188,19 @@ messages = [
 ]
 ```
 
-模型默认从 `LLM_MODEL_DEFAULT`（`deepseek-v4-flash`，1M context + vision）。需要更强推理时传 `model=settings.llm_model_reasoning`。
+模型默认名以 `app/config.py` 和部署环境的 `LLM_MODEL_DEFAULT` 为准。
+文档中不要假定具体底层供应商模型，因为龙虾网关可能按 agent 或环境路由。
+需要指定其他模型时向 `chat()` / `chat_json()` 传 `model=`，不要直接读取不存在的配置项。
+
+### 图片与扫描 PDF
+
+- 普通图片直接转 data URL 走 vision
+- 带文本层的 PDF 先转 Markdown
+- 文本层过短的扫描 PDF 会渲染前 `VISION_MAX_PDF_PAGES` 页为 PNG，再作为多图 vision 输入
+- `VISION_PDF_RENDER_SCALE` 控制渲染清晰度和内存占用
+- `.doc` 无法通过 LibreOffice 转换时返回 `ConvertError`，不要只把 `SCAN_OR_IMAGE_HINT` 文本交给 LLM
+
+多页视觉输入必须受页数和上传大小限制，禁止把无限页 PDF 全量展开进模型上下文。
 
 ## 错误处理
 
@@ -168,6 +213,9 @@ messages = [
 - `LLMError` (502) — 网关/模型问题
 - `ParseError` (502) — 模型输出无法解析
 
+批量接口对单文件错误使用同样的 `code/message/details` 结构，但整体请求可以继续处理
+其他文件。意外异常只记录服务端日志，对外统一返回 `internal_error`，不得暴露原始堆栈。
+
 全局 handler 已在 `main.py` 注册，抛出即可。
 
 ## 不做什么
@@ -176,8 +224,8 @@ messages = [
 - **不共享 skill 之间的 references**：每个 skill 的知识库放在自己目录，避免耦合
 - **不做 per-template 的 if/else 硬编码**：模板变化交给 LLM + few-shot
 - **不合并多柜/多行**：一票多条时展开为数组
-- **不打包 OCR 依赖**：图片直接走 vision 模型；如需专门 OCR skill，另建子包
-- **不在同步接口里做 >60s 的重任务**：太长的活儿等异步方案落地
+- **不打包独立 OCR 引擎**：图片和扫描 PDF 直接走 vision 模型；如需专门 OCR skill，另建子包
+- **不在同步接口里扩展超长任务**：现有 LLM 请求由有界线程池承载；需要多阶段、长批次处理时另建异步任务方案
 
 ## 后续路线
 

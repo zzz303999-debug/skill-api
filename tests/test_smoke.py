@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("OPENCLAW_API_KEY", "dummy")
-
+import pytest
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.main import app
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _fixed_api_key(monkeypatch):
+    monkeypatch.setattr(settings, "api_key", "test-key")
 
 
 def test_healthz():
@@ -29,7 +32,7 @@ def test_list_skills():
 
 
 def test_unauthorized_extract():
-    # 无 X-API-Key，默认 API_KEY=change-me-in-prod（从 config.py 默认）
+    # 无 X-API-Key
     r = client.post(
         "/skills/tuoshu/extract",
         files={"file": ("a.xlsx", b"fake", "application/octet-stream")},
@@ -41,6 +44,6 @@ def test_unknown_skill():
     r = client.post(
         "/skills/does-not-exist/extract",
         files={"file": ("a.xlsx", b"fake", "application/octet-stream")},
-        headers={"X-API-Key": "change-me"},
+        headers={"X-API-Key": "test-key"},
     )
     assert r.status_code == 404

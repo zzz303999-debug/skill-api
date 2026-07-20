@@ -61,3 +61,39 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def render_pdf_pages(
+    file_bytes: bytes,
+    *,
+    max_pages: int,
+    scale: float,
+) -> list[bytes]:
+    """把扫描 PDF 的前几页渲染成 PNG，供 vision 模型识别。"""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(file_bytes)
+        images: list[bytes] = []
+        try:
+            for page_index in range(min(len(pdf), max_pages)):
+                page = pdf[page_index]
+                bitmap = None
+                try:
+                    bitmap = page.render(scale=scale)
+                    image = bitmap.to_pil()
+                    buf = io.BytesIO()
+                    image.save(buf, format="PNG")
+                    images.append(buf.getvalue())
+                finally:
+                    if bitmap is not None:
+                        bitmap.close()
+                    page.close()
+        finally:
+            pdf.close()
+    except Exception as e:
+        raise ConvertError(f"scan PDF render failed: {e.__class__.__name__}: {e}") from e
+
+    if not images:
+        raise ConvertError("scan PDF has no renderable pages")
+    return images

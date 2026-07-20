@@ -19,7 +19,7 @@ DocType = Literal[
 
 
 class ContainerItem(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     type: str | None = Field(None, description="归一后的箱型：20GP/40GP/40HC/45HC 等")
     qty: int | None = 1
@@ -35,7 +35,7 @@ class ContainerItem(BaseModel):
 
 
 class Factory(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     name: str | None = None
     address: str | None = None
@@ -44,7 +44,7 @@ class Factory(BaseModel):
 
 
 class Source(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     file: str
     doc_format: str
@@ -55,10 +55,10 @@ class Source(BaseModel):
 class TuoshuOutput(BaseModel):
     """托书统一抽取结果。"""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     doc_type: DocType = "UNKNOWN"
-    booking_no: str | None = None
+    customs_declaration_no: str | None = None
     customer_ref: str | None = None
     mbl_no: str | None = None
     hbl_no: str | None = None
@@ -81,6 +81,12 @@ class TuoshuOutput(BaseModel):
 
     factory: Factory | None = None
     shipper_agent: str | None = None
+
+    # 展示层扩展字段
+    recipient: str | None = Field(None, description="收件方（TO）")
+    doc_date: str | None = Field(None, description="文档日期（DATE）")
+    sender: str | None = Field(None, description="发货方（FROM）")
+    sender_contact: str | None = Field(None, description="发货联系人")
 
     remark: str | None = None
     source: Source
