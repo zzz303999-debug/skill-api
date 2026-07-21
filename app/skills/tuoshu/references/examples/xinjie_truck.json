@@ -1,5 +1,6 @@
 {
   "doc_type": "TRUCKING_ORDER",
+  "internal_ref": null,
   "customs_declaration_no": null,
   "customer_ref": "GQWF2022009",
   "mbl_no": "SITGSHSGQ119789",

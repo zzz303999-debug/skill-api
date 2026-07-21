@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.config import settings
 from app.core import registry
 from app.errors import LLMError, ParseError
 from app.llm.openclaw import chat_json
 from app.main import app
+from app.skills.tuoshu.chinese_schema import to_chinese
+from app.skills.tuoshu.normalizer import normalize_llm_output
+from app.skills.tuoshu.postprocessor import finalize_extraction
 from app.skills.tuoshu.prompt import format_to_chat_text
 from app.skills.tuoshu.schema import TuoshuOutput
 from app.skills.tuoshu.skill import TuoshuSkill, _clean_json_schema
@@ -24,9 +28,17 @@ def test_nullable_object_schema_keeps_object_shape():
     assert "address" in factory["properties"]
 
 
+def test_business_dates_are_constrained_in_json_schema():
+    schema = _clean_json_schema(TuoshuOutput.model_json_schema())
+
+    assert schema["properties"]["etd"]["pattern"] == r"^\d{4}-\d{2}-\d{2}$"
+    assert "T\\d{2}:\\d{2}:\\d{2}" in schema["properties"]["loading_time"]["pattern"]
+
+
 def test_chat_text_contains_every_container():
     text = format_to_chat_text(
         {
+            "source": {"file": "test.docx", "doc_format": "docx"},
             "containers": [
                 {"type": "40HC", "container_no": "CONT001"},
                 {"type": "20GP", "container_no": "CONT002"},
@@ -137,3 +149,364 @@ def test_chat_json_rejects_non_object(monkeypatch):
 
     with pytest.raises(ParseError, match="JSON object"):
         chat_json([])
+
+
+def test_business_number_and_customs_number_are_not_conflated():
+    result = normalize_llm_output(
+        {
+            "我司业务编号": "WXHYC22010107",
+            "报关单号": "223120220000123456",
+        }
+    )
+
+    assert result["internal_ref"] == "WXHYC22010107"
+    assert result["customs_declaration_no"] == "223120220000123456"
+
+
+def test_chinese_combined_fields_are_normalized_to_schema():
+    result = normalize_llm_output(
+        {
+            "船名航次": "RESURGENCE V.1728S",
+            "开航时间": "2026-07-21",
+            "开港时间": "2026-07-20",
+            "拆装箱日期": "2026-07-19",
+            "箱型箱量": "3*40HC",
+            "件数": "2,150 CTNS",
+            "毛重": "5,375.0 KGS",
+            "体积": "64.518 CBM",
+            "门点地址": "无锡市惠山区示例路1号",
+            "工厂联系人": "范颖晔",
+            "工厂电话": "13800000000",
+            "发货人公司": "无锡某进出口有限公司",
+            "备注": "原备注",
+        }
+    )
+
+    assert result["vessel"] == "RESURGENCE"
+    assert result["voyage"] == "1728S"
+    assert result["etd"] == "2026-07-21"
+    assert result["loading_time"] == "2026-07-19"
+    assert result["remark"] == "原备注；开港时间：2026-07-20"
+    assert result["containers"] == [
+        {
+            "type": "40HC",
+            "qty": 3,
+            "packages": 2150,
+            "gross_weight_kg": 5375.0,
+            "volume_cbm": 64.518,
+            "packages_unit": "CTNS",
+        }
+    ]
+    assert result["factory"] == {
+        "address": "无锡市惠山区示例路1号",
+        "contact": "范颖晔",
+        "phone": "13800000000",
+    }
+    assert result["shipper_company"] == "无锡某进出口有限公司"
+
+
+def test_slash_vessel_voyage_is_split():
+    result = normalize_llm_output({"船名航次": "BALLENITA/0PPT4E"})
+
+    assert result["vessel"] == "BALLENITA"
+    assert result["voyage"] == "0PPT4E"
+
+
+def test_finalize_preserves_transit_lookup_and_builds_order_mapping():
+    result = finalize_extraction(
+        {
+            "internal_ref": "WXHYC22010107",
+            "transit_port": None,
+            "shipper_company": "无锡某进出口有限公司",
+            "factory": {"name": "宜兴门点"},
+            "containers": [{"po_no": "D0483/0908"}],
+            "remark": "下单前核对船期",
+        },
+        source_text="我司业务编号：WXHYC22010107\n中转港：见设备交接单\nPO：D0483/0908",
+    )
+
+    assert result["transit_port"] == "见设备交接单"
+    assert result["order_mapping"] == {
+        "c_sn": "WXHYC22010107",
+        "mbl_no": None,
+        "hbl_no": None,
+        "c_title": "无锡某进出口有限公司",
+        "factory_name": "宜兴门点",
+        "c_note": "下单前核对船期；PO号：D0483/0908",
+    }
+    assert result["ready_for_order"] is True
+
+
+def test_child_bill_aliases_never_fall_back_to_master_bill():
+    normalized = normalize_llm_output({"子提单号": "HBL240001"})
+
+    assert normalized["hbl_no"] == "HBL240001"
+    assert normalized.get("mbl_no") is None
+
+    result = finalize_extraction(
+        {
+            "mbl_no": "HBL240001",
+            "hbl_no": None,
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text="子提单号：HBL240001",
+    )
+
+    assert result["mbl_no"] is None
+    assert result["hbl_no"] == "HBL240001"
+    assert result["order_mapping"]["mbl_no"] is None
+    assert result["order_mapping"]["hbl_no"] == "HBL240001"
+    assert any(issue["code"] == "hbl_misclassified_as_mbl" for issue in result["review_issues"])
+    assert result["ready_for_order"] is False
+
+
+def test_explicit_master_and_child_bills_are_both_preserved():
+    result = finalize_extraction(
+        {
+            "mbl_no": "MBL240001",
+            "hbl_no": "HBL240001",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text="主提单号：MBL240001\n子提单号：HBL240001",
+    )
+
+    assert result["mbl_no"] == "MBL240001"
+    assert result["hbl_no"] == "HBL240001"
+    assert result["order_mapping"]["mbl_no"] == "MBL240001"
+    assert result["order_mapping"]["hbl_no"] == "HBL240001"
+    assert not any(
+        issue["code"] == "hbl_misclassified_as_mbl" for issue in result["review_issues"]
+    )
+
+
+def test_finalize_blocks_non_verbatim_person_and_missing_order_fields():
+    result = finalize_extraction(
+        {
+            "sender_contact": "范颖晰",
+            "factory": {"name": None, "contact": "范颖晰"},
+            "containers": [],
+        },
+        source_text="发货联系人：范颖晔",
+    )
+
+    issue_keys = {(issue["code"], issue["field"]) for issue in result["review_issues"]}
+    assert ("person_name_not_verbatim", "sender_contact") in issue_keys
+    assert ("person_name_not_verbatim", "factory.contact") in issue_keys
+    assert ("missing_shipper_company", "shipper_company") in issue_keys
+    assert ("missing_factory_name", "factory.name") in issue_keys
+    assert result["order_mapping"]["c_title"] is None
+    assert result["order_mapping"]["factory_name"] is None
+    assert result["ready_for_order"] is False
+    assert result["raw_text_snippet"] == "发货联系人：范颖晔"
+
+
+def test_carrier_prefix_wins_and_indexed_remark_stays_with_container():
+    result = finalize_extraction(
+        {
+            "mbl_no": "HLCUSHA12345678",
+            "carrier": "HMM",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+            "containers": [{"remark": None}],
+            "remark": "柜1备注：博特装柜；下单前核对",
+        },
+        source_text="提单号：HLCUSHA12345678\n柜1：博特装柜",
+    )
+
+    assert result["carrier"] == "HLC"
+    assert result["containers"][0]["remark"] == "博特装柜"
+    assert any(issue["code"] == "carrier_prefix_mismatch" for issue in result["review_issues"])
+    assert result["ready_for_order"] is False
+
+
+def test_visual_person_name_is_blocked_when_verbatim_check_is_unavailable():
+    result = finalize_extraction(
+        {
+            "sender_contact": "范颖晰",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=None,
+    )
+
+    assert result["raw_text_snippet"] is None
+    assert any(issue["code"] == "person_name_unverified" for issue in result["review_issues"])
+    assert result["ready_for_order"] is False
+
+
+def test_finalize_blocks_container_data_conflict_left_in_remark():
+    conflict = "主值 2150 CTNS / 5375.0 KGS / 64.518 CBM；另有记录 2149 / 5372.5 / 64.487"
+    result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+            "containers": [{"packages": 2150, "remark": conflict}],
+        },
+        source_text=conflict,
+    )
+
+    assert any(issue["code"] == "conflicting_container_data" for issue in result["review_issues"])
+    assert result["ready_for_order"] is False
+
+
+def test_review_issues_are_single_source_for_missing_measurements_and_renderer():
+    result = finalize_extraction(
+        {
+            "mbl_no": "COSU6886686750",
+            "carrier": "OOCL",
+            "factory": {"name": "江西杰盛医疗制品有限公司"},
+            "containers": [
+                {
+                    "type": "40HC",
+                    "qty": 1,
+                    "packages": None,
+                    "volume_cbm": None,
+                }
+            ],
+        },
+        source_text="提单号：COSU6886686750 承运人：OOCL 件数： 体积：",
+    )
+
+    assert {
+        issue["code"] for issue in result["review_issues"]
+    } == {
+        "carrier_prefix_mismatch",
+        "missing_shipper_company",
+        "missing_container_measurements",
+    }
+    assert len(result["review_issues"]) == 3
+
+    rendered = format_to_chat_text(
+        {
+            **result,
+            "source": {"file": "test.pdf", "doc_format": "pdf"},
+        }
+    )
+    assert rendered.count("复核项:") == len(result["review_issues"])
+    assert "集装箱数据不完整" not in rendered
+    assert "集装箱件数和体积为空，需人工确认" in rendered
+
+
+def test_known_conflict_cannot_disable_blocking():
+    result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+            "review_issues": [
+                {
+                    "code": "conflicting_container_data",
+                    "field": "containers[2]",
+                    "message": "柜3有两组数据",
+                    "blocking": False,
+                }
+            ],
+        },
+        source_text=None,
+    )
+
+    assert result["review_issues"][0]["blocking"] is True
+    assert result["ready_for_order"] is False
+
+
+def test_chat_text_surfaces_blocking_review_issues():
+    text = format_to_chat_text(
+        {
+            "source": {"file": "test.docx", "doc_format": "docx"},
+            "review_issues": [
+                {
+                    "code": "conflicting_container_data",
+                    "field": "containers[2]",
+                    "message": "同一柜存在两组数据，需人工裁决",
+                    "source_values": ["2150/5375.0/64.518", "2149/5372.5/64.487"],
+                    "blocking": True,
+                }
+            ]
+        }
+    )
+
+    assert "下单校验: 需人工复核" in text
+    assert "2149/5372.5/64.487" in text
+
+
+def test_chat_text_only_uses_present_json_content():
+    text = format_to_chat_text(
+        {
+            "doc_type": "TRANSPORT_ORDER",
+            "internal_ref": "WXHYC22010107",
+            "vessel": "RESURGENCE",
+            "voyage": None,
+            "containers": [{"type": "40HC", "qty": 3}],
+            "raw_text_snippet": "不应重新展示的原文",
+            "source": {"file": "test.docx", "doc_format": "docx"},
+        }
+    )
+
+    assert text == "我司业务编号: WXHYC22010107\n船名: RESURGENCE\n箱型: 40HC\n箱量: 3"
+
+
+def test_display_renderers_reject_incomplete_json():
+    with pytest.raises(ValidationError):
+        format_to_chat_text({"carrier": "HLC"})
+    with pytest.raises(ValidationError):
+        to_chinese({"carrier": "HLC"})
+
+
+def test_extract_response_has_no_independent_summary(monkeypatch):
+    import app.skills.tuoshu.skill as skill_module
+
+    monkeypatch.setattr(settings, "api_key", "test-key")
+    monkeypatch.setattr(
+        skill_module,
+        "convert_to_markdown",
+        lambda _file_bytes, _filename: (
+            "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
+        ),
+    )
+    monkeypatch.setattr(
+        skill_module,
+        "chat_json",
+        lambda _messages, **_kwargs: (
+            {
+                "mbl_no": "HLCUSHA12345678",
+                "carrier": "HMM",
+                "shipper_company": "某托运人公司",
+                "factory": {"name": "某门点"},
+                "containers": [{"type": "40HC", "qty": 1, "remark": None}],
+                "remark": "柜1备注：博特装柜",
+                "raw_text_snippet": "模型生成的摘要不得采用",
+                "source": {},
+            },
+            {
+                "model": "fake",
+                "usage": None,
+                "chat_text": "承运人: HMM\n做箱工厂: 错误工厂",
+                "summary": "模型二次摘要",
+            },
+        ),
+    )
+
+    response = client.post(
+        "/skills/tuoshu/extract",
+        files={"file": ("order.docx", b"fake-docx", "application/octet-stream")},
+        headers={"X-API-Key": "test-key"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    data = body["data"]
+    assert body["meta"] == {"model": "fake", "usage": None}
+    assert "carrier" in data and "承运人" not in data
+    assert data["carrier"] == "HLC"
+    assert data["factory"]["name"] == "某门点"
+    assert data["containers"][0]["remark"] == "博特装柜"
+    assert data["raw_text_snippet"].startswith("提单号：HLCUSHA12345678")
+
+    rendered = format_to_chat_text(data)
+    assert "承运人: HLC" in rendered
+    assert "承运人: HMM" not in rendered
+    assert "原文候选：HMM / HLC" in rendered
+    assert "做箱工厂: 某门点" in rendered
+    assert "错误工厂" not in rendered
+    assert "箱型备注: 博特装柜" in rendered

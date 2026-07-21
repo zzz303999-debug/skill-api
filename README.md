@@ -153,3 +153,20 @@ docker compose -f docker-compose.deploy.yml up -d
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 最多渲染页数，默认 3 |
+| `MINERU_ENABLED` | 是否让 PDF 优先使用 MinerU，默认 `false` |
+| `MINERU_BASE_URL` | MinerU HTTP 服务地址 |
+| `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
+
+### 可选：接入 MinerU
+
+本服务兼容提供 `POST /file_parse` 的 MinerU HTTP 服务。启动 MinerU 后配置：
+
+```env
+MINERU_ENABLED=true
+MINERU_BASE_URL=http://host.docker.internal:8000
+```
+
+PDF 会优先由 MinerU 转成 Markdown；调用失败、超时或响应中没有 Markdown 时，自动
+回退到原来的 `pdfplumber`，扫描 PDF 仍可继续回退到 vision。Excel、Word 和图片的
+原有处理方式不变，`data` 中的业务 JSON schema 也不变。PDF 响应的 `meta.parser`
+会标识实际使用的 `mineru`、`pdfplumber` 或 `vision`。

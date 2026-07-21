@@ -15,15 +15,21 @@
 7. 箱型箱量从 containers 数组中取第一个元素展示
 8. 所有数值字段保持原数值，为0时显示"0"
 9. 多柜时展示第一个柜的箱型箱量，其余在备注中说明
+10. 只输出最终 JSON 中实际存在的字段内容，不添加开场语、解释、总结、推断或另一份 JSON
+11. 中文值只能来自最终校验后的 JSON，不得重新抽取或改写
+12. API 不返回独立摘要字符串；审核界面禁止调用模型二次生成，必须逐字段渲染 API 返回的同一个英文 JSON 对象
+13. 柜级备注只从 `containers[].remark` 渲染，不得从顶层 `remark` 猜测或另写一份
+14. 复核摘要只遍历 `review_issues`；不根据 `containers` 或其他字段另行推断问题，展示条数与 JSON 数组条数一致
 
 ## 字段标签映射（严格按 schema.md 说明）
 
 | JSON字段 | schema说明 | 展示标签 |
 |---------|-----------|---------|
-| customs_declaration_no | 关单号 / 我方业务编号 / 我司编号 | 关单号 |
+| internal_ref | 我司业务编号 / 我司编号 | 我司业务编号 |
+| customs_declaration_no | 海关报关单号 / 关单号 | 报关单号 |
 | customer_ref | 客户编号 / PO / 客户订单号 | 客户编号 |
 | mbl_no | 主提单号（Master B/L） | 主提单号 |
-| hbl_no | 分提单号（House B/L） | 分提单号 |
+| hbl_no | 子提单号 / 分提单号（House B/L） | 子提单号 |
 | vessel | 船名，全大写 | 船名 |
 | voyage | 航次 | 航次 |
 | carrier | 船公司缩写 | 承运人 |
@@ -35,6 +41,7 @@
 | si_cutoff | 截 SI / 截单时间 | 截单时间 |
 | customs_cutoff | 截关 / 截报关 | 截关时间 |
 | loading_time | 做箱/装箱时间 | 做箱/装箱时间 |
+| shipper_company | 托运人公司 | 托运人公司 |
 | shipper_agent | 我方公司/发件方 | 委托公司 |
 | recipient | 收件方（TO 字段） | 收件方 |
 | doc_date | 文档日期（DATE 字段） | 日期 |

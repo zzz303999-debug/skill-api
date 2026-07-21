@@ -1,6 +1,7 @@
 {
   "doc_type": "PACKING_NOTICE",
-  "customs_declaration_no": "YHHY1711010",
+  "internal_ref": "YHHY1711010",
+  "customs_declaration_no": null,
   "customer_ref": "17HZY0262",
   "mbl_no": "SITGSHHPC56607",
   "hbl_no": null,

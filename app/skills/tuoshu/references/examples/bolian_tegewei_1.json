@@ -1,6 +1,7 @@
 {
   "doc_type": "BOOKING_NOTE",
-  "customs_declaration_no": "BLCC20200001",
+  "internal_ref": "BLCC20200001",
+  "customs_declaration_no": null,
   "customer_ref": null,
   "mbl_no": "177MSHSHS63702",
   "hbl_no": null,

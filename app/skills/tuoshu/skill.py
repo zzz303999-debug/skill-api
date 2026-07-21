@@ -16,12 +16,12 @@ from app.logging_conf import get_logger
 
 from .convert_service import convert_to_markdown, is_image, render_pdf_pages
 from .normalizer import normalize_llm_output
+from .postprocessor import finalize_extraction
 from .prompt import (
     build_few_shot_messages,
     build_system_prompt,
     build_user_message_text,
     build_user_message_vision,
-    format_to_chat_text,
 )
 from .schema import TuoshuOutput
 
@@ -95,6 +95,8 @@ class TuoshuSkill(SkillBase):
 
         doc_format = ext.lstrip(".") if not is_image(ext) else "image"
         extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+        source_text: str | None = None
+        conversion_meta: dict = {}
 
         system = build_system_prompt()
         few_shot = build_few_shot_messages()
@@ -110,6 +112,12 @@ class TuoshuSkill(SkillBase):
                         {"role": "user", "content": user_content}]
         else:
             markdown = convert_to_markdown(file_bytes, filename)
+            parser = getattr(markdown, "parser", None)
+            if parser:
+                conversion_meta = {
+                    "parser": parser,
+                    "parser_fallback": bool(getattr(markdown, "parser_fallback", False)),
+                }
             if markdown.startswith("SCAN_OR_IMAGE_HINT:"):
                 if ext != ".pdf":
                     raise ConvertError(
@@ -121,6 +129,8 @@ class TuoshuSkill(SkillBase):
                     scale=settings.vision_pdf_render_scale,
                 )
                 data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
+                if conversion_meta:
+                    conversion_meta["parser"] = "vision"
                 user_content = build_user_message_vision(
                     data_urls,
                     filename=filename,
@@ -133,6 +143,7 @@ class TuoshuSkill(SkillBase):
                     {"role": "user", "content": user_content},
                 ]
             else:
+                source_text = markdown
                 user_text = build_user_message_text(
                     markdown, filename=filename, doc_format=doc_format, extracted_at=extracted_at
                 )
@@ -150,6 +161,7 @@ class TuoshuSkill(SkillBase):
 
         # 字段名归一化（兜底：网关不支持 json_schema 时仍能矫正中文 key）
         data = normalize_llm_output(data)
+        data = finalize_extraction(data, source_text=source_text)
 
         # 确保 source 字段齐全（若模型漏填）
         src = data.get("source")
@@ -168,5 +180,6 @@ class TuoshuSkill(SkillBase):
                 details={"errors": e.errors(include_input=False)},
             ) from e
         result_dict = validated.model_dump()
-        meta["chat_text"] = format_to_chat_text(result_dict)
-        return {"result": result_dict, "meta": meta}
+        safe_meta = {key: meta.get(key) for key in ("model", "usage") if key in meta}
+        safe_meta.update(conversion_meta)
+        return {"result": result_dict, "meta": safe_meta}

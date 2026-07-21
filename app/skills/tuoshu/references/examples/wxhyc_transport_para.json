@@ -1,6 +1,7 @@
 {
   "doc_type": "TRANSPORT_ORDER",
-  "customs_declaration_no": "WXHYC22020066",
+  "internal_ref": "WXHYC22020066",
+  "customs_declaration_no": null,
   "customer_ref": null,
   "mbl_no": "292340329",
   "hbl_no": null,
@@ -11,7 +12,7 @@
 
   "pol": null,
   "pod": "LONGVIEW",
-  "transit_port": null,
+  "transit_port": "见设备交接单",
   "terminal": null,
 
   "etd": null,
@@ -107,6 +108,7 @@
     "phone": "13800000002"
   },
 
+  "shipper_company": null,
   "shipper_agent": null,
 
   "remark": "6*40HC；4 柜 A 工厂整装 + 1 柜 B 工厂整装 + 1 柜拼箱；B 工厂地址：句容XX路88号，赵六 13800000004；A 工厂第二联系人：王五 13800000003；备注：RMB2500*4+2600RMB+；请于2月9日上午9点提供箱封号",
