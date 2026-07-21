@@ -1,12 +1,15 @@
 # skill-api
 
-统一的 skill 抽取 API 服务。把散落的 Claude/OpenCode skill 封装成 HTTP 接口，供业务系统调用。
+统一的 skill 抽取 API 服务。把散落的 Claude/OpenCode skill 封装成带强类型契约的
+HTTP 接口，供业务系统调用。目前内置海运托书抽取，并支持通过 MinerU 增强 PDF
+结构化解析。
 
 ## 特性
 
 - **多 skill 可扩展**：每个 skill 一个子目录，启动自动发现并挂路由
 - **每个 skill 独立强类型契约**：OpenAPI 文档里能看到各 skill 精确的输入输出 schema
 - **统一 LLM 出口**：所有 skill 通过 `app.llm` 调 OpenClaw 网关（OpenAI 兼容协议）
+- **PDF 多级解析**：可选 MinerU，失败时按配置降级到 `pdfplumber` 和视觉模型
 - **同步 API**：先跑可行版本，后续可无缝加异步任务队列
 - **Docker 部署**：`docker compose up -d` 一键起
 
@@ -21,6 +24,8 @@ skill-api/
 │   ├── errors.py                # 统一错误类型
 │   ├── logging_conf.py          # JSON 日志
 │   ├── llm/openclaw.py          # OpenClaw 网关客户端（唯一 LLM 出口）
+│   ├── document_parsers/
+│   │   └── mineru.py            # MinerU HTTP 客户端与响应解析
 │   ├── core/
 │   │   ├── skill_base.py        # SkillBase 抽象
 │   │   └── registry.py          # 注册中心 + 自动发现
@@ -33,7 +38,6 @@ skill-api/
 │           ├── convert_service.py  # bytes → markdown 包装层
 │           ├── converter.py     # 从 tuoshu-extractor 复用的转换器
 │           └── references/      # 业务知识 + few-shot
-├── scripts/deploy.sh
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile
@@ -52,6 +56,7 @@ make dev                         # uvicorn --reload
 ```
 
 访问：
+
 - `http://localhost:8080/docs`  — Swagger UI
 - `http://localhost:8080/healthz`
 - `http://localhost:8080/skills` — 已注册的 skill 列表
@@ -90,7 +95,8 @@ docker compose -f docker-compose.deploy.yml up -d
 | 需注入的环境变量 | 见 `.env.example`（`OPENCLAW_*` 和 `API_KEY` 必填） |
 | 持久化目录（可选） | `/app/storage` |
 
-**敏感变量**（走平台 Secret）：`OPENCLAW_API_KEY`、`API_KEY`
+**敏感变量**（走平台 Secret）：`OPENCLAW_API_KEY`、`API_KEY`、`MINERU_API_KEY`（如启用）
+
 **普通变量**（走 ConfigMap / 环境变量）：其余
 
 ## 接口
@@ -105,18 +111,35 @@ docker compose -f docker-compose.deploy.yml up -d
 运行指定 skill，返回结构化 JSON。
 
 请求：`multipart/form-data`
+
 - `file`：上传文件
 - header：`X-API-Key: <API_KEY>`
 
+示例：
+
+```bash
+curl -X POST http://localhost:8080/skills/tuoshu/extract \
+  -H "X-API-Key: change-me-in-prod" \
+  -F "file=@./order.pdf"
+```
+
 响应：
+
 ```json
 {
   "skill": "tuoshu",
   "version": "0.1.0",
-  "data": { /* skill 自己的 output_model */ },
-  "meta": { "model": "openclaw", "usage": {...} }
+  "data": {},
+  "meta": {
+    "model": "openclaw",
+    "usage": {},
+    "parser": "mineru",
+    "parser_fallback": false
+  }
 }
 ```
+
+`parser` 和 `parser_fallback` 仅在启用 MinerU 且处理 PDF 时返回。
 
 ### `POST /skills/{skill_name}/batch-extract`
 
@@ -153,20 +176,57 @@ docker compose -f docker-compose.deploy.yml up -d
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 最多渲染页数，默认 3 |
+| `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |
 | `MINERU_ENABLED` | 是否让 PDF 优先使用 MinerU，默认 `false` |
 | `MINERU_BASE_URL` | MinerU HTTP 服务地址 |
+| `MINERU_ENDPOINT` | MinerU 解析接口路径，默认 `/file_parse` |
+| `MINERU_API_KEY` | 可选 Bearer Token；留空时不发送鉴权头 |
+| `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 120 |
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
+| `MINERU_BACKEND` | MinerU 后端，默认 `pipeline` |
+| `MINERU_PARSE_METHOD` | MinerU 解析方式，默认 `auto` |
+| `MINERU_LANGUAGE` | MinerU 文档语言，默认 `ch` |
 
 ### 可选：接入 MinerU
 
-本服务兼容提供 `POST /file_parse` 的 MinerU HTTP 服务。启动 MinerU 后配置：
+MinerU 只接管 PDF 转 Markdown，后续的 LLM 抽取和业务 JSON schema 不变；Excel、
+Word 和图片仍走原有流程。先确保 MinerU 的 HTTP 服务可从 `skill-api` 所在环境访问，
+再配置。本项目提供 MinerU 客户端，不包含 MinerU 服务本身。
 
 ```env
 MINERU_ENABLED=true
 MINERU_BASE_URL=http://host.docker.internal:8000
+MINERU_ENDPOINT=/file_parse
+MINERU_API_KEY=
+MINERU_TIMEOUT_SECONDS=120
+MINERU_FALLBACK_ENABLED=true
+MINERU_BACKEND=pipeline
+MINERU_PARSE_METHOD=auto
+MINERU_LANGUAGE=ch
 ```
 
-PDF 会优先由 MinerU 转成 Markdown；调用失败、超时或响应中没有 Markdown 时，自动
-回退到原来的 `pdfplumber`，扫描 PDF 仍可继续回退到 vision。Excel、Word 和图片的
-原有处理方式不变，`data` 中的业务 JSON schema 也不变。PDF 响应的 `meta.parser`
-会标识实际使用的 `mineru`、`pdfplumber` 或 `vision`。
+`MINERU_BASE_URL` 取决于部署位置：
+
+| skill-api | MinerU | 地址示例 |
+|-----------|--------|----------|
+| 本机运行 | 本机运行 | `http://127.0.0.1:8000` |
+| Docker 容器 | macOS/Windows 宿主机 | `http://host.docker.internal:8000` |
+| 同一 Compose 网络 | `mineru` 服务 | `http://mineru:8000` |
+| 独立服务器 | 可达的 MinerU 主机 | `http://<mineru-host>:8000` |
+
+当前客户端兼容常见的 `POST /file_parse` 接口：以 `files` 字段上传 PDF，并发送
+`backend`、`parse_method`、`lang_list` 等表单参数。响应可以是 JSON（Markdown 字段为
+`md_content`、`markdown_content` 或 `markdown`）、直接返回的 Markdown 文本，或包含
+`.md` 文件的 ZIP。
+
+PDF 解析链路如下：
+
+1. `MINERU_ENABLED=false`：直接使用 `pdfplumber`；扫描件再交给 vision。
+2. `MINERU_ENABLED=true`：优先调用 MinerU。
+3. MinerU 调用失败、超时或未返回 Markdown，且 `MINERU_FALLBACK_ENABLED=true`：
+   自动降级到 `pdfplumber`；若仍判定为扫描件，再交给 vision。
+4. `MINERU_FALLBACK_ENABLED=false`：MinerU 失败时直接返回转换错误。
+
+启用 MinerU 后，可通过响应的 `meta.parser` 判断最终使用的解析器：`mineru`、
+`pdfplumber` 或 `vision`。`meta.parser_fallback=true` 表示本次请求发生过 MinerU 降级。
+服务日志中的 `mineru_parse_succeeded` 和 `mineru_parse_fallback` 可用于排查调用情况。
