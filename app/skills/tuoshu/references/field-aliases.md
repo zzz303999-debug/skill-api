@@ -211,7 +211,7 @@
 | 发货公司 |
 | SHIPPER |
 
-收件方（TO）为货代或 `FROM/FM` 只有个人姓名时，不能据此推断托运人公司。缺失时输出 null，由人工补齐订单 `c_title`。
+只有正文中明确标注的`托运人`/`发货人`/`SHIPPER`栏位可以写入该字段。抬头、落款、图章、水印、logo、收件方（TO）或 `FROM/FM` 不能据此推断托运人公司。缺失时输出 null，由人工补齐订单 `c_title`，并保留 blocking 的 `missing_shipper_company`。
 
 ## shipper_agent（发件方 / 我方公司）
 
@@ -221,8 +221,22 @@
 | 我方公司 |
 | 货代 |
 | SHIPPER AGENT |
+| 文档正文抬头公司 |
+| 文档正文落款公司 |
 
-`FROM/FM` 单独作为 `sender` 原样保留；只有明确的公司名和托运人标签才能进入 `shipper_company`。
+正文抬头/落款中的公司名固定进入 `shipper_agent`。红章、水印和 logo 中的公司名不属于正文，不得抽取。`FROM/FM` 后的联系人进入 `sender_contact`；只有正文明确的发货人/托运人栏位才能进入 `shipper_company`。
+
+## recipient（收件方）
+
+| 别名 |
+|------|
+| TO |
+| 致 |
+| ATTN（非空时） |
+| 收件方 |
+| 收件人 |
+
+收件方只进入 `recipient`，不得转存到 `remark` 或订单 `c_note`。
 
 ## remark（备注）
 

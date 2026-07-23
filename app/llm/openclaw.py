@@ -129,8 +129,21 @@ def chat_json(
         if not json_schema or e.code != "llm_response_format_unsupported":
             raise
         log.warning("llm_json_schema_fallback", extra={"model": model})
+        schema_instruction = {
+            "role": "system",
+            "content": (
+                "网关不支持 structured output。仍须严格按以下 JSON Schema 输出对象：\n"
+                + json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))
+            ),
+        }
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        fallback_messages = [
+            *messages[:insert_at],
+            schema_instruction,
+            *messages[insert_at:],
+        ]
         content, meta = chat(
-            messages,
+            fallback_messages,
             model=model,
             temperature=temperature,
             response_format={"type": "json_object"},

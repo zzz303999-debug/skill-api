@@ -5,7 +5,7 @@
 ## 输出规范
 
 - 港口名统一**英文大写**
-- 去掉中文注释、州省缩写后缀（除非港口需要区分）、路由标记、换行、特殊符号
+- 保留州、省、国家等地理修饰信息，避免同名港口歧义
 - 未知港口保留原文大写
 
 ## 常见清洗场景
@@ -26,24 +26,25 @@
 
 | 原文 | 输出 | 说明 |
 |------|------|------|
-| `SEATTLE, WA` | `SEATTLE` | 去州缩写 |
-| `TACOMA,WA` | `TACOMA` | 去州缩写 |
-| `KANSAS CITY, MO` | `KANSAS CITY` | 保留城市名，去州 |
+| `SEATTLE, WA` | `SEATTLE, WA` | 保留州缩写 |
+| `TACOMA,WA` | `TACOMA, WA` | 统一逗号空格 |
+| `KANSAS CITY, MO` | `KANSAS CITY, MO` | 保留州缩写 |
+| `COLUMBUS(OH)` | `COLUMBUS, OH` | 括号州缩写转逗号格式 |
 | `MOBILE` | `MOBILE` | 已是纯城市名 |
 | `LONGVIEW` | `LONGVIEW` | |
 | `LAZARO CARDENAS` | `LAZARO CARDENAS` | 墨西哥港，无后缀 |
-| `HAIPHONG(DINH VU),VIET NAM` | `HAIPHONG` | 去括号内小港、去国家 |
-| `SANTOS,BR` | `SANTOS` | 去国家缩写 |
+| `HAIPHONG(DINH VU),VIET NAM` | `HAIPHONG(DINH VU), VIET NAM` | 保留副港和国家 |
+| `SANTOS,BR` | `SANTOS, BR` | 保留国家缩写 |
 
-**特例**：若不去州省会引起歧义（比如"PORTLAND, OR"和"PORTLAND, ME"是两个不同港口），保留州以区分：
+州省信息一律保留，不维护“是否歧义”的易漂移特例表：
 
 | 港口 | 输出 |
 |------|------|
 | `PORTLAND, OR` | `PORTLAND, OR` |
 | `PORTLAND, ME` | `PORTLAND, ME` |
-| `NEWARK, NJ` | `NEWARK` | 只有一个 NEWARK 主流港，可去 |
+| `NEWARK, NJ` | `NEWARK, NJ` |
 
-**默认策略**：无歧义时去后缀，有歧义时保留。
+**默认策略**：地理修饰只做格式归一，不删除。
 
 ### 3. 港口代码（5 字母）
 

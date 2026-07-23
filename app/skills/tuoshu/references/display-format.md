@@ -48,7 +48,7 @@
 | sender | 发货方（FROM 字段） | 发货方 |
 | sender_contact | 发货联系人 | 发货联系人 |
 | remark | 汇总备注 | 备注 |
-| containers[].type | 归一后的箱型 | 箱型 |
+| containers[].type | 原文箱型代码（HQ/HC 等不得互换） | 箱型 |
 | containers[].qty | 该类型/该行的箱数 | 箱量 |
 | containers[].container_no | 集装箱号 | 箱号 |
 | containers[].seal_no | 铅封号 | 铅封号 |

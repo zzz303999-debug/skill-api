@@ -32,16 +32,18 @@ class Settings(BaseSettings):
     vision_max_pdf_pages: int = Field(default=3, ge=1, le=10)
     vision_pdf_render_scale: float = Field(default=2.0, gt=0, le=4.0)
 
+    # PDF 文本层页级质量探测
+    parser_text_min_chars: int = Field(default=50, ge=1, le=1000)
+    parser_garbled_ratio_threshold: float = Field(default=0.05, ge=0, le=1)
+
     # MinerU（PDF 结构化解析；失败时可降级到现有解析器）
     mineru_enabled: bool = False
     mineru_base_url: str = ""
     mineru_endpoint: str = "/file_parse"
     mineru_api_key: str = ""
+    mineru_expected_version: str = "2.5.4"
     mineru_timeout_seconds: int = Field(default=120, ge=1, le=1800)
     mineru_fallback_enabled: bool = True
-    mineru_backend: str = "pipeline"
-    mineru_parse_method: str = "auto"
-    mineru_language: str = "ch"
 
     # 存储
     storage_dir: Path = Path("./storage")

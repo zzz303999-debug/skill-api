@@ -1,0 +1,72 @@
+{
+  "doc_type": "TRUCKING_ORDER",
+  "internal_ref": "VTXSH19090044",
+  "customs_declaration_no": null,
+  "customer_ref": null,
+  "mbl_no": "TEST000011",
+  "hbl_no": null,
+  "vessel": "WAN HAI 512",
+  "voyage": "W120",
+  "carrier": "香港亚海",
+  "pol": "SHANGHAI, CHINA",
+  "pod": "MACAU",
+  "transit_port": "HKHKG",
+  "terminal": null,
+  "etd": "2019-09-15",
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2019-09-12T14:00:00",
+  "containers": [
+    {
+      "type": "40HQ",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 10,
+      "packages_unit": null,
+      "gross_weight_kg": 100.0,
+      "volume_cbm": 10.0,
+      "po_no": null,
+      "mbl_no": "TEST000011",
+      "remark": null
+    }
+  ],
+  "factory": {
+    "name": "江阴市信腾新颖地面材料有限公司",
+    "address": "江阴市桐岐工业大道13号",
+    "contact": "诸晨栋",
+    "phone": "18800518758"
+  },
+  "shipper_company": null,
+  "shipper_agent": "上海威世国际货物运输代理有限公司",
+  "recipient": "北跃物流",
+  "doc_date": null,
+  "sender": null,
+  "sender_contact": null,
+  "remark": "数据准确，箱单填好过去；1750",
+  "order_mapping": {
+    "c_sn": "VTXSH19090044",
+    "mbl_no": "TEST000011",
+    "hbl_no": null,
+    "c_title": null,
+    "factory_name": "江阴市信腾新颖地面材料有限公司",
+    "c_note": "数据准确，箱单填好过去；1750"
+  },
+  "review_issues": [
+    {
+      "code": "missing_shipper_company",
+      "field": "shipper_company",
+      "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
+      "source_values": [],
+      "blocking": true
+    }
+  ],
+  "ready_for_order": false,
+  "source": {
+    "file": "A26042709390557851.jpg",
+    "doc_format": "jpeg",
+    "template_hint": null,
+    "extracted_at": null
+  },
+  "raw_text_snippet": null
+}

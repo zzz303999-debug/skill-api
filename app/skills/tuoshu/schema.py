@@ -49,10 +49,10 @@ class OrderMapping(BaseModel):
 class ContainerItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    type: str | None = Field(None, description="归一后的箱型：20GP/40GP/40HC/45HC 等")
+    type: str | None = Field(None, description="原文箱型代码，禁止在 HQ/HC/DV/GP 等类型间改写")
     qty: int | None = 1
-    container_no: str | None = None
-    seal_no: str | None = None
+    container_no: str | None = Field(None, description="箱号，必须为 4 个大写字母加 7 位数字")
+    seal_no: str | None = Field(None, description="封号，不得包含空格或 OCR 图片区域文字")
     packages: int | None = None
     packages_unit: str | None = None
     gross_weight_kg: float | None = None
@@ -109,14 +109,16 @@ class TuoshuOutput(BaseModel):
     containers: list[ContainerItem] = Field(default_factory=list)
 
     factory: Factory | None = None
-    shipper_company: str | None = Field(None, description="托运人公司，对应订单 c_title")
-    shipper_agent: str | None = None
+    shipper_company: str | None = Field(
+        None, description="仅取正文明确发货人/托运人栏位，对应订单 c_title"
+    )
+    shipper_agent: str | None = Field(None, description="文档正文抬头或落款中的委托公司")
 
     # 展示层扩展字段
-    recipient: str | None = Field(None, description="收件方（TO）")
+    recipient: str | None = Field(None, description="收件方（TO/致/ATTN）")
     doc_date: str | None = Field(None, description="文档日期（DATE）", pattern=DATE_PATTERN)
     sender: str | None = Field(None, description="发货方（FROM）")
-    sender_contact: str | None = Field(None, description="发货联系人")
+    sender_contact: str | None = Field(None, description="发货联系人（FROM/FM）")
 
     remark: str | None = None
     order_mapping: OrderMapping = Field(default_factory=OrderMapping)

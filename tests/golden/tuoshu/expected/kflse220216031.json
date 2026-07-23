@@ -1,0 +1,82 @@
+{
+  "doc_type": "PACKING_NOTICE",
+  "internal_ref": "KFLSE220216031",
+  "customs_declaration_no": null,
+  "customer_ref": "HDG2216",
+  "mbl_no": "COSU6886686750",
+  "hbl_no": null,
+  "vessel": "OOCL EGYPT",
+  "voyage": "041E",
+  "carrier": "COSCO",
+  "pol": "SHANGHAI",
+  "pod": "COLUMBUS, OH",
+  "transit_port": null,
+  "terminal": null,
+  "etd": "2022-02-21",
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2022-02-17T08:00:00",
+  "containers": [
+    {
+      "type": "40HQ",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": null,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 19000.0,
+      "volume_cbm": null,
+      "po_no": "HDG2216",
+      "mbl_no": "COSU6886686750",
+      "remark": null
+    }
+  ],
+  "factory": {
+    "name": "江西杰盛医疗制品有限公司",
+    "address": "江西九江彭泽县工业园杰盛路1号",
+    "contact": "陶金萍",
+    "phone": "13755224141"
+  },
+  "shipper_company": null,
+  "shipper_agent": "上海凯福国际物流有限公司",
+  "recipient": "上海硕豪物流有限公司",
+  "doc_date": "2022-02-16",
+  "sender": null,
+  "sender_contact": "袁丹",
+  "remark": "提箱码：5336 刘HDG2216；1、进港箱单全部打好。；2、请务必准时到达！；3、如迟到，请提前 1 小时联系工厂负责人或者通知我公司！；4、请提清洁无损坏集装箱！如发生集装箱破损有污染不适合装货，造成重新提箱或者船期延迟，所产生的费用与责任都有贵司无条件承担！",
+  "order_mapping": {},
+  "review_issues": [
+    {
+      "code": "missing_container_measurements",
+      "field": "containers[0]",
+      "message": "集装箱件数和体积为空，需人工确认",
+      "source_values": [],
+      "blocking": true
+    },
+    {
+      "code": "missing_shipper_company",
+      "field": "shipper_company",
+      "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
+      "source_values": [],
+      "blocking": true
+    },
+    {
+      "code": "carrier_by_mbl",
+      "field": "carrier",
+      "message": "承运人并非原文明示值，而是由主提单号前缀推断，需人工确认",
+      "source_values": [
+        "COSU6886686750",
+        "COSCO"
+      ],
+      "blocking": true
+    }
+  ],
+  "ready_for_order": false,
+  "source": {
+    "file": "2-17 KFLSE220216031托书.pdf",
+    "doc_format": "pdf",
+    "template_hint": null,
+    "extracted_at": null
+  },
+  "raw_text_snippet": null
+}

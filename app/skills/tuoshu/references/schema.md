@@ -106,7 +106,7 @@
 | `voyage` | string \| null | | 航次，如 `FI111A` / `006W` / `2210E` |
 | `carrier` | string \| null | | 船公司缩写（见 `carriers.md`），如 `ONE`/`MSK`/`COSCO` |
 | `pol` | string \| null | | 起运港，英文大写；若原文只有"上海"则输出 `SHANGHAI` |
-| `pod` | string \| null | | 目的港，英文大写，去中文/州省后缀（见 `ports.md`） |
+| `pod` | string \| null | | 目的港，英文大写，保留州/国家修饰信息（见 `ports.md`） |
 | `transit_port` | string \| null | | 中转港；待查描述如 `见设备交接单` 逐字保留，只有原文真正缺失时才为 null |
 | `terminal` | string \| null | | 港区/码头，保留原文（如 `洋一`/`外五`/`梅山码头`） |
 | `etd` | date \| null | | 预计开航日 / 船期，`YYYY-MM-DD` |
@@ -142,7 +142,7 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `type` | string | 归一后的箱型，见 `container-types.md`，如 `20GP` / `40GP` / `40HC` / `45HC` |
+| `type` | string | 原文箱型代码，见 `container-types.md`；禁止把 `40HQ` 改成 `40HC` |
 | `qty` | int | 该类型/该行的箱数 |
 | `container_no` | string \| null | 集装箱号（如 `SEGU1234567`），托书阶段通常为空 |
 | `seal_no` | string \| null | 铅封号，托书阶段通常为空 |
@@ -194,9 +194,10 @@
 
 输出 JSON 中必须是纯数字，不带单位或千分位：`"2,150 CTNS"` → `packages: 2150`，`"5,375.0 KGS"` → `gross_weight_kg: 5375.0`。
 
-### 港口/箱型/船公司归一
+### 港口/箱型/船公司处理
 
-见对应 references 文件。**归一必须查表**，不得自由发挥。
+见对应 references 文件。港口和船公司按各自规则处理；箱型仅识别和拆分数量，
+`HQ/HC/DV/GP` 等原文代码不得互换。
 
 ### 中转港待查描述保真
 

@@ -1,0 +1,10 @@
+{
+  "snapshot_kind": "partial_observed_fields",
+  "observed_at": "06:33",
+  "known_good_fields": {
+    "containers[0].type": "40HQ"
+  },
+  "known_bad_fields": {
+    "order_mapping.c_note": "出口清关的装完箱后请及时进港作业资水！"
+  }
+}

@@ -7,7 +7,45 @@ LLM 有时返回中文字段名、不同命名风格、或结构差异。
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Any
+
+from app.errors import ParseError
+from app.logging_conf import get_logger
+
+log = get_logger(__name__)
+
+KNOWN_CONTAINER_TYPES = frozenset(
+    {
+        "20GP",
+        "20DV",
+        "20DC",
+        "20GENERAL",
+        "40GP",
+        "40DV",
+        "40DC",
+        "40HC",
+        "40HQ",
+        "40H",
+        "45HC",
+        "45HQ",
+        "20RF",
+        "20REF",
+        "40RF",
+        "40REF",
+        "40RH",
+        "20OT",
+        "20OPENTOP",
+        "40OT",
+        "40OPENTOP",
+        "20FR",
+        "20FLAT",
+        "40FR",
+        "40FLAT",
+        "20TK",
+        "20TANK",
+    }
+)
 
 # 顶层字段：{LLM 可能输出的 key} → 正确的 schema key
 _TOP_LEVEL_ALIASES: dict[str, str] = {
@@ -147,6 +185,9 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     # recipient
     "收件方": "recipient",
     "收件人": "recipient",
+    "致": "recipient",
+    "ATTN": "recipient",
+    "attn": "recipient",
     "to": "recipient",
     "TO": "recipient",
     # doc_date
@@ -157,11 +198,13 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     # sender
     "发货方": "sender",
     "发货人": "sender",
-    "from": "sender",
-    "FROM": "sender",
     # sender_contact
     "发货联系人": "sender_contact",
     "发件人": "sender_contact",
+    "from": "sender_contact",
+    "FROM": "sender_contact",
+    "FM": "sender_contact",
+    "fm": "sender_contact",
     "senderContact": "sender_contact",
     "sender_contact": "sender_contact",
     # remark
@@ -264,10 +307,29 @@ _ORDER_MAPPING_ALIASES: dict[str, str] = {
 # review_issue 内部字段别名
 _REVIEW_ISSUE_ALIASES: dict[str, str] = {
     "问题代码": "code",
+    "问题码": "code",
+    "代码": "code",
+    "issue_code": "code",
     "字段": "field",
+    "问题字段": "field",
+    "涉及字段": "field",
+    "field_name": "field",
     "描述": "message",
+    "问题": "message",
+    "问题描述": "message",
+    "原因": "message",
+    "内容": "message",
+    "建议": "message",
+    "description": "message",
+    "reason": "message",
     "原文候选值": "source_values",
+    "候选值": "source_values",
+    "原始值": "source_values",
+    "values": "source_values",
     "是否阻断": "blocking",
+    "阻断": "blocking",
+    "需要阻断": "blocking",
+    "is_blocking": "blocking",
 }
 
 # source 内部字段别名
@@ -313,6 +375,8 @@ def _normalize_container(item: dict[str, Any]) -> dict[str, Any]:
         result["type"] = container_type
     if container_qty is not None and result.get("qty") is None:
         result["qty"] = container_qty
+    if isinstance(result.get("type"), str):
+        result["type"] = normalize_container_type(result["type"])
 
     for field, integral in (
         ("packages", True),
@@ -342,6 +406,86 @@ def _normalize_source(data: Any) -> dict[str, Any] | None:
     return data
 
 
+def _raise_invalid_review_issue(issue: Any, index: int, reason: str) -> None:
+    keys = sorted(str(key) for key in issue) if isinstance(issue, dict) else []
+    log.error(
+        "tuoshu_review_issue_parse_failed",
+        extra={
+            "review_issue_index": index,
+            "review_issue_type": type(issue).__name__,
+            "review_issue_keys": keys,
+            "reason": reason,
+        },
+    )
+    raise ParseError(
+        "LLM review_issues item does not match the required structure",
+        details={"index": index, "reason": reason},
+    )
+
+
+def _normalize_review_issue(issue: Any, index: int) -> dict[str, Any]:
+    """Normalize one structured issue; malformed model output is a parse error."""
+    if not isinstance(issue, dict):
+        _raise_invalid_review_issue(issue, index, "item must be an object")
+
+    normalized = _normalize_dict(issue, _REVIEW_ISSUE_ALIASES)
+    if normalized.get("code") == "unstructured_review_issue":
+        _raise_invalid_review_issue(
+            issue,
+            index,
+            "unstructured_review_issue is not an allowed review issue code",
+        )
+    required = ("code", "field", "message")
+    malformed = any(
+        not isinstance(normalized.get(key), str) or not normalized[key].strip()
+        for key in required
+    )
+
+    source_values = normalized.get("source_values")
+    if isinstance(source_values, list):
+        source_values = [str(value) for value in source_values]
+    elif source_values is None:
+        source_values = []
+    else:
+        source_values = [str(source_values)]
+
+    if malformed:
+        _raise_invalid_review_issue(
+            issue,
+            index,
+            "code, field, and message must be non-empty strings",
+        )
+
+    blocking = normalized.get("blocking", True)
+    if not isinstance(blocking, bool):
+        if isinstance(blocking, str) and blocking.strip().lower() in {"false", "0", "no"}:
+            blocking = False
+        elif blocking in (0, 1):
+            blocking = bool(blocking)
+        else:
+            blocking = True
+
+    return {
+        "code": normalized["code"].strip(),
+        "field": normalized["field"].strip(),
+        "message": normalized["message"].strip(),
+        "source_values": source_values,
+        "blocking": blocking,
+    }
+
+
+def normalize_review_issues(review_issues: Any) -> list[dict[str, Any]]:
+    """Strict, shared entry point for every review issue entering the output queue."""
+    if review_issues is None:
+        return []
+    if not isinstance(review_issues, list):
+        _raise_invalid_review_issue(review_issues, 0, "review_issues must be an array")
+    return [
+        _normalize_review_issue(issue, index)
+        for index, issue in enumerate(review_issues)
+    ]
+
+
 def _split_vessel_voyage(value: Any) -> tuple[str | None, str | None]:
     if not isinstance(value, str) or not value.strip():
         return None, None
@@ -359,10 +503,20 @@ def _split_vessel_voyage(value: Any) -> tuple[str | None, str | None]:
 def _split_container_type_qty(value: Any) -> tuple[str | None, int | None]:
     if not isinstance(value, str):
         return None, None
-    match = re.fullmatch(r"\s*(\d+)\s*[xX*×]\s*([A-Za-z0-9]+)\s*", value)
+    match = re.fullmatch(r"\s*(\d+)\s*[xX*×＊]\s*([A-Za-z0-9'’\s]+)\s*", value)
     if not match:
         return None, None
-    return match.group(2).upper(), int(match.group(1))
+    return normalize_container_type(match.group(2)), int(match.group(1))
+
+
+def normalize_container_type(value: str) -> str:
+    """Remove dimensional punctuation while preserving the source type suffix."""
+    return re.sub(r"['’\s]", "", value.strip())
+
+
+def is_known_container_type(value: str) -> bool:
+    lookup_key = re.sub(r"['’\s]", "", value).upper()
+    return lookup_key in KNOWN_CONTAINER_TYPES
 
 
 def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:
@@ -383,6 +537,47 @@ def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:
         cleaned = number
     unit = match.group(2).strip().upper() if match.group(2) else None
     return cleaned, unit
+
+
+def _normalize_date_value(value: Any, *, allow_time: bool) -> Any:
+    """Normalize common year-first date spellings emitted by OCR/LLMs.
+
+    Only unambiguous ``year-month-day`` values are changed. Invalid calendar
+    dates and unrelated text are deliberately left untouched so schema
+    validation can still reject them instead of silently inventing a value.
+    """
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip().translate(
+        str.maketrans({"／": "/", "．": ".", "－": "-", "：": ":"})
+    )
+    match = re.fullmatch(
+        r"(\d{4})\s*(?:年\s*|[./-]\s*)"
+        r"(\d{1,2})\s*(?:月\s*|[./-]\s*)"
+        r"(\d{1,2})\s*日?"
+        r"(?:[T\s]+(\d{1,2})\s*(?::|时)\s*(\d{1,2})"
+        r"(?:\s*(?::|分)\s*(\d{1,2})(?:\.\d+)?\s*秒?)?)?"
+        r"(?:Z|[+-]\d{2}:?\d{2})?",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return value
+
+    year, month, day = (int(match.group(index)) for index in range(1, 4))
+    hour = int(match.group(4) or 0)
+    minute = int(match.group(5) or 0)
+    second = int(match.group(6) or 0)
+    try:
+        parsed = datetime(year, month, day, hour, minute, second)
+    except ValueError:
+        return value
+
+    normalized_date = parsed.date().isoformat()
+    if not allow_time or match.group(4) is None:
+        return normalized_date
+    return f"{normalized_date}T{hour:02d}:{minute:02d}:{second:02d}"
 
 
 def _merge_remark(data: dict[str, Any], label: str, value: Any) -> None:
@@ -416,6 +611,14 @@ def normalize_llm_output(data: dict[str, Any]) -> dict[str, Any]:
     doc_type_val = result.get("doc_type")
     if isinstance(doc_type_val, str) and doc_type_val in _DOC_TYPE_CN_TO_EN:
         result["doc_type"] = _DOC_TYPE_CN_TO_EN[doc_type_val]
+
+    # OCR and models frequently use Chinese dates or non-zero-padded slashes.
+    # Normalize them before the strict Pydantic date-pattern validation.
+    for field in ("etd", "doc_date"):
+        result[field] = _normalize_date_value(result.get(field), allow_time=False)
+    result["loading_time"] = _normalize_date_value(
+        result.get("loading_time"), allow_time=True
+    )
 
     combined_vessel_voyage = result.pop("vessel_voyage", None)
     vessel, voyage = _split_vessel_voyage(combined_vessel_voyage)
@@ -468,19 +671,8 @@ def normalize_llm_output(data: dict[str, Any]) -> dict[str, Any]:
 
     # review_issues 内部归一
     review_issues = result.get("review_issues")
-    if isinstance(review_issues, list):
-        cleaned_issues = []
-        for issue in review_issues:
-            if isinstance(issue, dict):
-                issue = _normalize_dict(issue, _REVIEW_ISSUE_ALIASES)
-                # source_values 必须全是字符串，LLM 可能输出数字
-                sv = issue.get("source_values")
-                if isinstance(sv, list):
-                    issue["source_values"] = [str(v) if not isinstance(v, str) else v for v in sv]
-                elif sv is not None and not isinstance(sv, list):
-                    issue["source_values"] = [str(sv)]
-            cleaned_issues.append(issue)
-        result["review_issues"] = cleaned_issues
+    if review_issues is not None:
+        result["review_issues"] = normalize_review_issues(review_issues)
 
     # source 内部归一
     result["source"] = _normalize_source(result.get("source"))

@@ -6,6 +6,8 @@ few-shot 样例按需选一部分附上。
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -15,29 +17,97 @@ REF_DIR = Path(__file__).parent / "references"
 EX_DIR = REF_DIR / "examples"
 
 
-@lru_cache(maxsize=1)
-def load_references() -> dict[str, str]:
-    """一次性把 references/*.md 载入。"""
-    out: dict[str, str] = {}
-    for p in sorted(REF_DIR.glob("*.md")):
-        if p.name.startswith("._"):
-            continue
-        out[p.stem] = p.read_text(encoding="utf-8")
-    return out
+@dataclass(frozen=True)
+class PromptRoute:
+    """Cheap local routing result used to select prompt context."""
+
+    doc_type: str
+    template_hint: str | None = None
 
 
-@lru_cache(maxsize=1)
-def load_examples(limit: int = 3) -> list[tuple[str, str]]:
-    """加载 few-shot：返回 [(markdown_input, expected_json), ...]。
+_TEMPLATE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("bingsheng_transport", ("1sha044022", "bsse2105280058")),
+    ("xilinmen_grid", ("浙江经茂国际货运代理", "箱单备注", "装箱工厂喜临门")),
+    ("yuhai_table", ("上海育海国际货运有限公司", "育海编号")),
+    ("wxhyc_transport_para", ("运输委托书", "我司编号:wxhyc", "拆装箱日期")),
+    ("bolian_tegewei", ("倍联业务编号", "特格威", "保税区")),
+    ("xinyijie_paira", ("上海欣一捷", "货物配舱通知书")),
+    ("xinjie_truck", ("嘉兴新捷国际货运代理有限公司车队装箱通知单",)),
+    ("qide_door", ("启德物流有限公司", "门点做箱通知")),
+    ("sanrenxing_booking", ("上海三人行供应链管理", "装箱委托单")),
+    ("zuoxiang_std_esff", ("做箱通知书", "我司业务编号", "船名航次", "esff")),
+)
 
-    limit 控制随 prompt 附带的样例数，避免上下文爆炸。挑选覆盖不同类型的：
-    - zuoxiang_std_esff：单柜表格
-    - wxhyc_transport_para：段落式一票多柜
-    - yuhai_table：吨→KG 换算
-    """
-    picks = ["zuoxiang_std_esff", "wxhyc_transport_para", "yuhai_table"]
+_TEMPLATE_EXAMPLES = {
+    "bingsheng_transport": "bingsheng_transport",
+    "zuoxiang_std_esff": "zuoxiang_std_esff",
+    "xilinmen_grid": "xilinmen_grid",
+    "yuhai_table": "yuhai_table",
+    "wxhyc_transport_para": "wxhyc_transport_para",
+    "bolian_tegewei": "bolian_tegewei_1",
+    "xinjie_truck": "xinjie_truck",
+}
+
+_DOC_TYPE_EXAMPLES = {
+    "PACKING_NOTICE": "zuoxiang_std_esff",
+    "TRANSPORT_ORDER": "wxhyc_transport_para",
+    "TRUCKING_ORDER": "xinjie_truck",
+    "BOOKING_NOTE": "bolian_tegewei_1",
+    "UNKNOWN": "zuoxiang_std_esff",
+}
+
+
+def _normalize_route_text(text: str) -> str:
+    return re.sub(r"[\s:：]", "", text).lower()
+
+
+def detect_prompt_route(text: str) -> PromptRoute:
+    """Route a document without spending an extra LLM call."""
+    normalized = _normalize_route_text(text)
+    template_hint = next(
+        (
+            template
+            for template, markers in _TEMPLATE_MARKERS
+            if all(_normalize_route_text(marker) in normalized for marker in markers)
+        ),
+        None,
+    )
+
+    if any(
+        marker in normalized
+        for marker in (
+            "派车托书",
+            "拖车托书",
+            "车队托书",
+            "车队装箱通知单",
+            "门点装箱通知",
+            "车队将于",
+        )
+    ):
+        doc_type = "TRUCKING_ORDER"
+    elif any(marker in normalized for marker in ("运输委托书", "货物配舱通知书")):
+        doc_type = "TRANSPORT_ORDER"
+    elif any(marker in normalized for marker in ("做箱委托单", "做箱委托书", "装柜托书", "装箱委托单", "内装箱委托书")):
+        doc_type = "BOOKING_NOTE"
+    elif any(marker in normalized for marker in ("做箱通知书", "做箱通知", "装箱通知", "装箱通知书")):
+        # Some trucking templates use a generic title; operational fields win.
+        trucking_fields = ("提箱", "进港时间", "司机")
+        doc_type = (
+            "TRUCKING_ORDER"
+            if sum(marker in normalized for marker in trucking_fields) >= 2
+            else "PACKING_NOTICE"
+        )
+    else:
+        doc_type = "UNKNOWN"
+
+    return PromptRoute(doc_type=doc_type, template_hint=template_hint)
+
+
+@lru_cache(maxsize=16)
+def load_examples(names: tuple[str, ...]) -> list[tuple[str, str]]:
+    """Load only the few-shot examples selected for this document."""
     out: list[tuple[str, str]] = []
-    for name in picks[:limit]:
+    for name in names:
         md = EX_DIR / f"{name}.md"
         js = EX_DIR / f"{name}.json"
         if md.exists() and js.exists():
@@ -45,93 +115,54 @@ def load_examples(limit: int = 3) -> list[tuple[str, str]]:
     return out
 
 
-SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。
+SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Markdown/图片正文，只输出符合 JSON Schema 的英文 key 对象；不输出解释或另一份摘要。拿不准填 null。
 
-# 任务
-从用户提供的托书文档（已转成 markdown 文本，或直接是图片）中，抽取结构化 JSON。
+# 字段来源表（唯一目标）
+| 原文标签/版面角色 | 字段 | 缺失处理 |
+|---|---|---|
+| `TO`/`致`/非空`ATTN` | `recipient` | null |
+| 正文抬头或落款公司 | `shipper_agent` | null |
+| 正文明示`发货人`/`托运人`/`SHIPPER` | `shipper_company` | null + blocking `missing_shipper_company` |
+| `FROM`/`FM` 联系人 | `sender_contact` | null |
+| `日期`/`DATE`（含相邻碎片） | `doc_date` | null |
+| 无结构字段可承载的原文 | `remark` | null |
 
-# 硬性规则
-1. **精确复制**：`internal_ref`/`customs_declaration_no`/`customer_ref`/`mbl_no`/`hbl_no`/`po_no`/`container_no`/`seal_no` 以及所有人名字段必须从原文逐字符复制，不改字符大小写、不改形近字（如晔/晰）或 O/0、I/1、B/8。无法逐字确认的人名填 null，并写入 `review_issues`。
-2. **数字不计算**：`packages`/`gross_weight_kg`/`volume_cbm` 只做格式清洗（去空格、去单位、去千分位逗号），不求和。原文吨/T 时换算为 KG，并在对应 remark 说明。
-3. **港口/箱型/船公司归一**：严格按 references 中的映射表，不自由发挥。
-4. **多柜展开**：`3*40HC` → 一条 qty=3；`1*40HQ + 2*40GP` → 两条；每柜有独立明细/单号时每柜一条。
-5. **空值一律 null**：不用空字符串、不用 0（除非原文明确 0）。但有业务含义的待查描述不是空值，例如中转港的`见设备交接单`必须保留原文。
-6. **日期格式**：date 用 `YYYY-MM-DD`，datetime 用 `YYYY-MM-DDTHH:MM:SS`。无法确定年份则 null。
-7. **中转港待查信息保真**：原文出现 `见设` / `见设备单` / `见设备交接单` 等描述时，`transit_port` 逐字保留该描述，不能输出 null，避免下游误判为直达。
-8. **不臆造**：拿不准就 null。
-9. **字段名必须用英文**：JSON key 必须严格使用 schema.md 定义的英文 key（如 `mbl_no`、`carrier`、`pol`、`pod`、`etd`），禁止输出中文 key。中文只用于读取原文字段和最终展示，调用方会从校验后的英文 JSON 直接渲染。
-10. **字段语义隔离**：`我司业务编号`/`我司编号`只进 `internal_ref`；只有明确的`报关单号`/`关单号`才进 `customs_declaration_no`。收件货代和个人发货人都不能充当 `shipper_company`，缺失就填 null。
-11. **PO 不丢失**：PO 号填入对应 `containers[].po_no`；多个柜的 PO 全部保留。调用方会将其汇总到订单 `c_note`。
-12. **冲突必须阻断**：同一柜出现两组件数/毛重/体积时，主值按原文明确标注选取，所有候选值写入该柜 `remark`，并新增 blocking 的 `review_issues`（code=`conflicting_container_data`，field=`containers[N]`，source_values 列出各组原值）。不得自行裁决为可下单。
-13. **柜级信息不得上浮丢失**：`柜1：博特装柜`、`柜2备注：先装 A 厂` 等只属于某柜的描述，必须写入对应 `containers[N].remark`；可以同时汇总到顶层 `remark`，但不得只保留顶层。
-14. **承运人交叉校验**：`carrier` 与主提单号前缀冲突时以 carriers.md 的主提单号前缀为准，并写入 blocking 的 `review_issues`，不得让摘要和 JSON 使用不同值。
-15. **关键箱数据缺失必须复核**：同一柜的 `packages` 与 `volume_cbm` 均为空时，写入一个 blocking 的 `review_issues`（code=`missing_container_measurements`，field=`containers[N]`）。
+结构化后的收件方、公司、联系人不得重复进 `remark`/`c_note`。抬头货代不是托运人。
 
-# 中文字段映射
-- `我司编号`/`业务编号` → `internal_ref`
-- `提单号` → `mbl_no`
-- `船名航次` → `vessel` + `voyage`；优先按 `/` 或 `V.` 拆分，无法可靠拆分时不得猜测
-- `承运人`/`船公司` → `carrier`
-- `中转港` → `transit_port`；`见XX文件`等描述逐字保留
-- `目的港` → `pod`
-- `开航时间`/`开船时间`/`船期` → `etd`；`开港时间`不是 ETD，放入 `remark`
-- `做箱时间`/`装箱日期`/`拆装箱日期` → `loading_time`
-- `件数`/`毛重`/`体积` → `containers[].packages`/`gross_weight_kg`/`volume_cbm`，去单位和千分位后输出数字
-- `箱型箱量` → `containers[].type` + `qty`，例如 `3*40HC` → `type="40HC", qty=3`
-- `门点地址` → `factory.address`；`工厂联系人`/`工厂电话` → `factory.contact`/`factory.phone`
-- `收件方` → `recipient`；`发货人公司` → `shipper_company`，只有个人姓名时 `shipper_company=null`
-- 其他无法可靠归类的信息 → `remark`
+# 抽取规则
+1. 编号和人名逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
+2. `我司编号/业务编号→internal_ref`，`报关单号/关单号→customs_declaration_no`，`提单号→mbl_no`，PO/订单号进对应 `containers[].po_no/customer_ref`。
+3. `船名航次→vessel+voyage`；`中转港`的“见设备交接单/见设”等待查原文必须保留；`开港时间`不是 `etd`。
+4. 日期为 `YYYY-MM-DD`，时间为 `YYYY-MM-DDTHH:MM:SS`；原文有时分不得降精度。MinerU 相邻单元格 `日期：20` + `21.5.28` 必须拼为 `2021-05-28`。缺年按文档日期、文件名/业务号年份推断，否则 null。
+5. `packages/gross_weight_kg/volume_cbm` 只清洗单位和千分位，不求和；吨转 KG。任一值 ≤0 清空；件数为空但原文有 CTNS/PKGS 等单位时仍保留 `packages_unit`；件数和体积均缺失时加 blocking `missing_container_measurements`。
+6. 箱型必须与原文一致，禁止在 `HQ/HC/DV/GP` 等代码之间改写；`3*40HQ→type=40HQ,qty=3`，`3*40HC→type=40HC,qty=3`；表外箱型同样保留原文并加 non-blocking `unknown_container_type`；混合箱型分行。同一表单若“总箱量”含多个重叠/残留值，但货物明细“箱型”栏只有一个明确值，以明细“箱型”栏为准，不把总箱量中的额外残留值建柜或报冲突。
+7. 同柜多组件数/重量/体积时保留明确主值，全部候选写柜备注，并加 blocking `conflicting_container_data`。
+8. `container_no` 仅 4 大写字母+7 数字；`seal_no` 无空格且仅字母数字 `./-`。`28GSHEN S` 等图章 OCR 填 null 并加 blocking issue。
+9. `carrier` 只有原文明示承运人/船公司才是直接值；由主单前缀或船名推断时加 blocking `carrier_by_mbl/carrier_by_vessel` 并列依据；前缀冲突以主单前缀为准。
+10. 港口州/国家修饰信息不得丢弃，`COLUMBUS(OH)` 归一为 `COLUMBUS, OH`。`source` 使用用户给出的 file/doc_format/extracted_at；所有复核项只写 `review_issues`，每个 code 只允许一条且禁止 `unstructured_review_issue`。每项必须完整包含非空字符串 `code`、`field`、`message`，以及字符串数组 `source_values` 和布尔值 `blocking`。
+11. `remark`、`containers[].remark`、`seal_no` 等自由文本必须能在来源中找到依据；禁止补写原文没有的操作要求、术语或语句。图片输入时，MinerU 文本只是 OCR 辅助，原图可见文字才是最终依据；OCR 中出现但图片上看不到的词句必须剔除，并写 blocking `ungrounded_text`。`sender_contact` 只能取 FROM/FM 后的人名，页脚“联系人/我司联系人”不得填入该字段。
 
-缺少年份的业务日期按“文档日期 → 文件名或业务编号中的年份 → 当前年份”依次推断；只有前两项均无年份线索时才可使用当前年份，仍有歧义则输出 null 并进入人工复核。
-最终中文展示由调用方从校验后的 JSON 生成；不要另外生成一份中文摘要。
-
-# 输出格式
-只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字。
-必须包含 `source` 对象，字段由调用方指定（file / doc_format / extracted_at）。
-`raw_text_snippet` 由调用方从转换原文截取；不要改写或总结。
-
-# 业务知识（references）
-
-## schema
-{schema_md}
-
-## 字段别名
-{field_aliases_md}
-
-## 箱型归一
-{container_types_md}
-
-## 船公司前缀
-{carriers_md}
-
-## 港口清洗
-{ports_md}
-
-## 分类
-{classification_md}
-
-## 展示格式
-{display_format_md}
+`doc_type` 仅 PACKING_NOTICE/TRANSPORT_ORDER/TRUCKING_ORDER/BOOKING_NOTE/UNKNOWN。标题优先；“做箱通知”若以提箱、进港、司机为主则 TRUCKING_ORDER。本地提示：doc_type={route_doc_type}，template_hint={route_template_hint}；与原文冲突时以原文为准。
 """
 
 
-def build_system_prompt() -> str:
-    refs = load_references()
+def build_system_prompt(route: PromptRoute | None = None) -> str:
+    route = route or PromptRoute(doc_type="UNKNOWN")
     return SYSTEM_PROMPT_TEMPLATE.format(
-        schema_md=refs.get("schema", ""),
-        field_aliases_md=refs.get("field-aliases", ""),
-        container_types_md=refs.get("container-types", ""),
-        carriers_md=refs.get("carriers", ""),
-        ports_md=refs.get("ports", ""),
-        classification_md=refs.get("classification", ""),
-        display_format_md=refs.get("display-format", ""),
+        route_doc_type=route.doc_type,
+        route_template_hint=route.template_hint or "null",
     )
 
 
-def build_few_shot_messages() -> list[dict]:
-    """few-shot 转成 messages（user/assistant 对话形式）。"""
+def build_few_shot_messages(route: PromptRoute | None = None) -> list[dict]:
+    """Select one relevant example instead of attaching the whole example set."""
+    route = route or PromptRoute(doc_type="UNKNOWN")
+    example_name = _TEMPLATE_EXAMPLES.get(route.template_hint or "")
+    if example_name is None:
+        example_name = _DOC_TYPE_EXAMPLES[route.doc_type]
+
     msgs: list[dict] = []
-    for md, js in load_examples():
+    for md, js in load_examples((example_name,)):
         msgs.append({"role": "user", "content": f"输入托书文本：\n\n{md}"})
         msgs.append({"role": "assistant", "content": js})
     return msgs
@@ -151,9 +182,24 @@ def build_user_message_text(markdown: str, filename: str, doc_format: str, extra
 
 
 def build_user_message_vision(
-    image_data_urls: str | list[str], filename: str, doc_format: str, extracted_at: str
+    image_data_urls: str | list[str],
+    filename: str,
+    doc_format: str,
+    extracted_at: str,
+    parsed_text: str | None = None,
+    image_detail: str = "high",
 ) -> list[dict]:
     urls = [image_data_urls] if isinstance(image_data_urls, str) else image_data_urls
+    parsed_section = ""
+    if parsed_text:
+        parsed_section = (
+            "\n\n以下是 MinerU OCR 辅助文本，不是独立事实来源。所有自由文本字段必须在图片中"
+            "肉眼可见；OCR 中存在但图片上看不到的词句必须剔除并写 blocking "
+            "ungrounded_text。图片与文本冲突时以图片为准，并写入 review_issues，不得静默选择：\n"
+            "===== 已解析文本开始 =====\n"
+            f"{parsed_text}\n"
+            "===== 已解析文本结束 ====="
+        )
     return [
         {
             "type": "text",
@@ -162,10 +208,18 @@ def build_user_message_vision(
                 f"file={filename}\n"
                 f"doc_format={doc_format}\n"
                 f"extracted_at={extracted_at}\n\n"
-                f"请直接从图片内容中提取，输出 JSON。source 字段用上述元数据。"
+                f"请直接从图片正文中提取，忽略红色图章、水印、logo 和其他图片区域中的文字，"
+                f"输出 JSON。source 字段用上述元数据。"
+                f"{parsed_section}"
             ),
         },
-        *[{"type": "image_url", "image_url": {"url": url}} for url in urls],
+        *[
+            {
+                "type": "image_url",
+                "image_url": {"url": url, "detail": image_detail},
+            }
+            for url in urls
+        ],
     ]
 
 
