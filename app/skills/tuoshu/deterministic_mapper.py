@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import re
 from dataclasses import dataclass, field
@@ -55,7 +56,24 @@ def _table_rows(markdown: str) -> list[list[str]]:
         if cells and cells[0].isdigit():
             cells = cells[1:]
         rows.append(cells)
+    if rows:
+        return rows
+
+    # MinerU may emit an HTML table for DOCX templates instead of pipe rows.
+    decoded = html.unescape(markdown)
+    for raw_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", decoded, re.IGNORECASE | re.DOTALL):
+        cells = [
+            re.sub(r"<[^>]+>", "", cell).strip()
+            for cell in re.findall(r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>", raw_row, re.IGNORECASE | re.DOTALL)
+        ]
+        if cells:
+            rows.append(cells)
     return rows
+
+
+def _normalize_label(value: str) -> str:
+    """Normalize layout whitespace without changing the value cells."""
+    return re.sub(r"\s+", "", value).rstrip("：:").lower()
 
 
 def _header_sequence(rows: list[list[str]]) -> tuple[tuple[str, ...], ...]:
@@ -80,6 +98,32 @@ def _paired_table_values(rows: list[list[str]]) -> dict[str, str]:
     return values
 
 
+def _table_value_for_labels(rows: list[list[str]], labels: tuple[str, ...]) -> str | None:
+    expected = {_normalize_label(label) for label in labels}
+    known_labels = {
+        _normalize_label(label)
+        for _, field_labels in _NEIZHUANG_LABELS
+        for label in field_labels
+    }
+    for row_index, row in enumerate(rows):
+        for column, cell in enumerate(row):
+            if _normalize_label(cell) not in expected:
+                continue
+            # Inline tables alternate label/value cells on the same row.
+            if column + 1 < len(row):
+                inline_value = row[column + 1].strip()
+                if inline_value and _normalize_label(inline_value) not in known_labels:
+                    return inline_value
+            # Paired tables put labels in one row and values in the next.
+            for next_row in rows[row_index + 1 :]:
+                if not next_row or all(re.fullmatch(r":?-{3,}:?", part.replace(" ", "")) for part in next_row):
+                    continue
+                if column < len(next_row) and next_row[column].strip():
+                    return next_row[column].strip()
+                break
+    return None
+
+
 def _mixed_row_value(rows: list[list[str]], label: str) -> str | None:
     normalized_label = label.rstrip("：:")
     for row in rows:
@@ -99,6 +143,23 @@ def _parse_date(value: str) -> str | None:
         except ValueError:
             continue
     return None
+
+
+_NEIZHUANG_LABELS = (
+    ("carrier", ("船公司", "承运人", "船东", "CARRIER")),
+    ("etd", ("船期", "开航日期", "开航日", "ETD")),
+    ("transit_port", ("中转港（卸港）", "中转港(卸港)", "中转港", "卸港")),
+    ("remark", ("要求进港时间", "要求进港")),
+)
+
+
+def _extract_neizhuang_booking(markdown: str, rows: list[list[str]]) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for output_field, labels in _NEIZHUANG_LABELS:
+        value = _table_value_for_labels(rows, labels)
+        if value:
+            values[output_field] = value
+    return values
 
 
 def _extract_bingsheng(markdown: str, rows: list[list[str]]) -> tuple[dict[str, Any], list[str]]:
@@ -196,6 +257,19 @@ def map_template(markdown: str | None) -> MapperResult:
     if not markdown:
         return MapperResult()
     rows = _table_rows(markdown)
+    neizhuang_values = _extract_neizhuang_booking(markdown, rows)
+    normalized_source = _normalize_label(markdown)
+    if (
+        ("内装箱委托书" in normalized_source and len(neizhuang_values) >= 3)
+        or all(field in neizhuang_values for field, _ in _NEIZHUANG_LABELS)
+    ):
+        return MapperResult(
+            template_id="neizhuang_booking",
+            fingerprint=_fingerprint(
+                tuple((labels[0],) for _, labels in _NEIZHUANG_LABELS)
+            ),
+            values=neizhuang_values,
+        )
     sequence = _header_sequence(rows)
     fingerprint = _fingerprint(sequence)
     if fingerprint != BINGSHENG_FINGERPRINT or not all(

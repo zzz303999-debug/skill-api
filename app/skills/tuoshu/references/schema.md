@@ -104,7 +104,7 @@
 | `hbl_no` | string \| null | | 子提单号 / 分提单号（House B/L）；不得回退到 `mbl_no` |
 | `vessel` | string \| null | | 船名，全大写 |
 | `voyage` | string \| null | | 航次，如 `FI111A` / `006W` / `2210E` |
-| `carrier` | string \| null | | 船公司缩写（见 `carriers.md`），如 `ONE`/`MSK`/`COSCO` |
+| `carrier` | string \| null | | 原文明示船公司时保留完整值；缺失时才按 `carriers.md` 推断缩写 |
 | `pol` | string \| null | | 起运港，英文大写；若原文只有"上海"则输出 `SHANGHAI` |
 | `pod` | string \| null | | 目的港，英文大写，保留州/国家修饰信息（见 `ports.md`） |
 | `transit_port` | string \| null | | 中转港；待查描述如 `见设备交接单` 逐字保留，只有原文真正缺失时才为 null |
@@ -220,7 +220,7 @@
 - `containers[].po_no` 全量汇总到 `order_mapping.c_note`，并保留原 `remark`
 - `c_title` 或 `factory_name` 缺失时必须生成 blocking 复核项
 - 同一柜出现两组件数/毛重/体积时，主值和所有候选值都要留痕，并生成 `conflicting_container_data` 复核项；不得自动裁决通过
-- `carrier` 与主提单号前缀冲突时，以前缀表修正 JSON，并生成 `carrier_prefix_mismatch` blocking 复核项
+- `carrier` 原文明示值优先于主提单号前缀；仅原文缺失时才用前缀兜底并生成 `carrier_by_mbl` blocking 复核项。无明示值且船名可识别时用 `carrier_by_vessel`。
 - 同一柜 `packages` 与 `volume_cbm` 均为空时，生成 `missing_container_measurements` blocking 复核项
 - `柜N：...`/`柜N备注：...` 的柜级信息必须进入对应 `containers[N-1].remark`，不能只放顶层 `remark`
 

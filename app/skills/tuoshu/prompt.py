@@ -26,6 +26,7 @@ class PromptRoute:
 
 
 _TEMPLATE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("neizhuang_booking", ("内装箱委托书", "船公司", "要求进港时间")),
     ("bingsheng_transport", ("1sha044022", "bsse2105280058")),
     ("xilinmen_grid", ("浙江经茂国际货运代理", "箱单备注", "装箱工厂喜临门")),
     ("yuhai_table", ("上海育海国际货运有限公司", "育海编号")),
@@ -39,6 +40,7 @@ _TEMPLATE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 _TEMPLATE_EXAMPLES = {
+    "neizhuang_booking": "zuoxiang_std_esff",
     "bingsheng_transport": "bingsheng_transport",
     "zuoxiang_std_esff": "zuoxiang_std_esff",
     "xilinmen_grid": "xilinmen_grid",
@@ -132,13 +134,13 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 # 抽取规则
 1. 编号和人名逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
 2. `我司编号/业务编号→internal_ref`，`报关单号/关单号→customs_declaration_no`，`提单号→mbl_no`，PO/订单号进对应 `containers[].po_no/customer_ref`。
-3. `船名航次→vessel+voyage`；`中转港`的“见设备交接单/见设”等待查原文必须保留；`开港时间`不是 `etd`。
+3. `船名航次→vessel+voyage`；`船 公 司` 等标签先去空白再匹配，船公司原文值（包括 `EMC CPS` 这类全称）优先于提单号推断；`中转港（卸港）` 归入 `transit_port`；其中“见设备交接单/见设”等待查原文必须保留；`开港时间`不是 `etd`。
 4. 日期为 `YYYY-MM-DD`，时间为 `YYYY-MM-DDTHH:MM:SS`；原文有时分不得降精度。MinerU 相邻单元格 `日期：20` + `21.5.28` 必须拼为 `2021-05-28`。缺年按文档日期、文件名/业务号年份推断，否则 null。
 5. `packages/gross_weight_kg/volume_cbm` 只清洗单位和千分位，不求和；吨转 KG。任一值 ≤0 清空；件数为空但原文有 CTNS/PKGS 等单位时仍保留 `packages_unit`；件数和体积均缺失时加 blocking `missing_container_measurements`。
 6. 箱型必须与原文一致，禁止在 `HQ/HC/DV/GP` 等代码之间改写；`3*40HQ→type=40HQ,qty=3`，`3*40HC→type=40HC,qty=3`；表外箱型同样保留原文并加 non-blocking `unknown_container_type`；混合箱型分行。同一表单若“总箱量”含多个重叠/残留值，但货物明细“箱型”栏只有一个明确值，以明细“箱型”栏为准，不把总箱量中的额外残留值建柜或报冲突。
 7. 同柜多组件数/重量/体积时保留明确主值，全部候选写柜备注，并加 blocking `conflicting_container_data`。
 8. `container_no` 仅 4 大写字母+7 数字；`seal_no` 无空格且仅字母数字 `./-`。`28GSHEN S` 等图章 OCR 填 null 并加 blocking issue。
-9. `carrier` 只有原文明示承运人/船公司才是直接值；由主单前缀或船名推断时加 blocking `carrier_by_mbl/carrier_by_vessel` 并列依据；前缀冲突以主单前缀为准。
+9. `carrier` 只有原文明示承运人/船公司才是直接值；由主单前缀或船名推断时加 blocking `carrier_by_mbl/carrier_by_vessel` 并列依据；原文明示值优先，只有原文缺失时才使用前缀/船名兜底。
 10. 港口州/国家修饰信息不得丢弃，`COLUMBUS(OH)` 归一为 `COLUMBUS, OH`。`source` 使用用户给出的 file/doc_format/extracted_at；所有复核项只写 `review_issues`，每个 code 只允许一条且禁止 `unstructured_review_issue`。每项必须完整包含非空字符串 `code`、`field`、`message`，以及字符串数组 `source_values` 和布尔值 `blocking`。
 11. `remark`、`containers[].remark`、`seal_no` 等自由文本必须能在来源中找到依据；禁止补写原文没有的操作要求、术语或语句。图片输入时，MinerU 文本只是 OCR 辅助，原图可见文字才是最终依据；OCR 中出现但图片上看不到的词句必须剔除，并写 blocking `ungrounded_text`。`sender_contact` 只能取 FROM/FM 后的人名，页脚“联系人/我司联系人”不得填入该字段。
 
@@ -236,7 +238,7 @@ _FIELD_LABELS: dict[str, str] = {
     "hbl_no": "子提单号",
     "vessel": "船名",
     "voyage": "航次",
-    "carrier": "承运人",
+    "carrier": "船公司",
     "pol": "起运港",
     "pod": "目的港",
     "transit_port": "中转港",
@@ -302,6 +304,8 @@ def format_to_chat_text(data: dict | TuoshuOutput) -> str:
     for key, label in _FIELD_LABELS.items():
         val = data.get(key)
         if val is not None and val != "":
+            if key == "carrier":
+                val = f"{val}（接口原始值）"
             lines.append(f"{label}: {val}")
 
     # ---- containers ----

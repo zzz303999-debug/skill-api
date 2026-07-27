@@ -152,6 +152,29 @@ curl -X POST http://localhost:8080/skills/tuoshu/extract \
 上传限制由 `API_MAX_UPLOAD_BYTES`、`API_BATCH_MAX_FILES` 控制，Skill/LLM 总并发由
 `SKILL_MAX_CONCURRENCY` 控制。
 
+### `POST /orders`
+
+接收上游自由文本，使用独立的订单文本 Schema 完成抽取，并在订单必填字段齐全时调用
+订单创建接口，不依赖文件托书 Skill。接口只解析显式的“字段：值”，不调用 LLM，
+不补全、不推断、不归一化字段值。请求为 JSON：
+
+```json
+{
+  "content": "提单号：ASHHKP29193205；托运人：……",
+  "roomId": "upstream-room-id"
+}
+```
+
+响应中的 `roomId` 原样回传，`source_fields` 原样保留输入标签和值；`order_data` 是按
+下单接口字段名映射后的实际请求数据。`roomId` 会原样传到下游请求顶层。
+
+Postman 配置、完整字段映射和断言脚本见
+[自由文本创建订单接口 Postman 测试文档](docs/order-create-postman.md)。
+
+请求同样需要 `X-API-Key`。缺少提单号或托运人/公司名称时返回 `422`，不会调用下单
+接口；订单接口网络错误或业务拒绝返回 `502`。创建调用不会自动重试，调用方
+也不应在结果不明确时盲目重试，以免重复下单。
+
 ## 添加新 skill
 
 三步：
@@ -178,6 +201,13 @@ curl -X POST http://localhost:8080/skills/tuoshu/extract \
 | `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
+| `ORDER_API_URL` | 订单创建接口地址 |
+| `ORDER_API_EXT_APP_ID` | 下单账号 `ext_app_id` |
+| `ORDER_API_EXT_USER_ID` | 下单账号 `ext_user_id` |
+| `ORDER_API_JXT_OPEN_ID` | 下单账号 `jxt_open_id`，同时映射到订单 `c_id` |
+| `ORDER_API_USER_ID` | 发送人 `userId` |
+| `ORDER_API_ORDER_INFO` | `apiKeyInfo.order_info` JSON 数组 |
+| `ORDER_API_TIMEOUT_SECONDS` | 下单接口超时秒数，默认 30；创建请求不自动重试 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 最多渲染页数，默认 3 |
 | `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |
 | `PARSER_TEXT_MIN_CHARS` | PDF 单页合格文本层的最少字符数，默认 50 |

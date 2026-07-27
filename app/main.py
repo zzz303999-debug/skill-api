@@ -24,6 +24,15 @@ from app.core.skill_base import SkillBase, SkillMeta
 from app.deps import require_api_key
 from app.errors import BadRequestError, SkillAPIError
 from app.logging_conf import get_logger, setup_logging
+from app.orders import (
+    CreateOrderFromTextRequest,
+    CreateOrderFromTextResponse,
+    build_order_data,
+    extract_order_text,
+    parse_source_fields,
+    publish_create_order,
+    validate_order_api_config,
+)
 
 setup_logging()
 log = get_logger(__name__)
@@ -95,6 +104,58 @@ async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
         options=None,
     )
     return await loop.run_in_executor(_skill_executor, call)
+
+
+async def _publish_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _skill_executor,
+        partial(publish_create_order, order_data, room_id=room_id),
+    )
+
+
+async def _extract_order_text(text: str):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _skill_executor,
+        partial(extract_order_text, text),
+    )
+
+
+@app.post(
+    "/orders",
+    response_model=CreateOrderFromTextResponse,
+    tags=["orders"],
+    summary="Extract and create an order from free text",
+)
+async def create_order_from_text(
+    body: CreateOrderFromTextRequest,
+    _: Annotated[None, Depends(require_api_key)],
+) -> dict[str, Any]:
+    validate_order_api_config()
+    text = body.content.strip()
+    encoded = text.encode("utf-8")
+    if len(encoded) > settings.api_max_upload_bytes:
+        raise BadRequestError(
+            "text is too large",
+            code="text_too_large",
+            details={"max_bytes": settings.api_max_upload_bytes},
+        )
+
+    extracted, meta = await _extract_order_text(text)
+    order_data = build_order_data(
+        extracted,
+        customer_id=settings.order_api_jxt_open_id,
+    )
+    upstream = await _publish_order(order_data, room_id=body.roomId)
+    return {
+        "roomId": body.roomId,
+        "source_fields": parse_source_fields(text),
+        "extracted": extracted.model_dump(),
+        "order_data": order_data,
+        "upstream": upstream,
+        "meta": meta,
+    }
 
 
 def _make_extract_route(skill: SkillBase):

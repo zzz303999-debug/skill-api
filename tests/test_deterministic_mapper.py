@@ -68,3 +68,38 @@ def test_mapper_ai_conflict_is_visible_and_mapper_value_wins():
         if issue["code"] == "deterministic_ai_conflict"
     }
     assert {"mbl_no", "containers[0].type"} <= conflict_fields
+
+
+def test_neizhuang_booking_maps_spaced_labels_without_mbl_carrier_fallback():
+    markdown = (
+        "内装箱委托书\n"
+        "| 船 公 司 | 船 期 | 中转港（卸港） | 要求进港时间 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| EMC CPS | 1月21日 | USLAX | 装好就进港 |"
+    )
+
+    result = map_template(markdown)
+
+    assert result.template_id == "neizhuang_booking"
+    assert result.values == {
+        "carrier": "EMC CPS",
+        "etd": "1月21日",
+        "transit_port": "USLAX",
+        "remark": "装好就进港",
+    }
+
+
+def test_neizhuang_booking_maps_mineru_html_label_value_rows():
+    markdown = (
+        "内装箱委托书<table>"
+        "<tr><td>船 公 司</td><td>EMC CPS</td><td>船 期</td><td>1月21日</td></tr>"
+        "<tr><td>中转港（卸港）</td><td>USLAX</td>"
+        "<td>要求进港时间</td><td>装好就进港</td></tr></table>"
+    )
+
+    result = map_template(markdown)
+
+    assert result.values["carrier"] == "EMC CPS"
+    assert result.values["etd"] == "1月21日"
+    assert result.values["transit_port"] == "USLAX"
+    assert result.values["remark"] == "装好就进港"

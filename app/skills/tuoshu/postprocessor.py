@@ -66,7 +66,9 @@ _MARKDOWN_PARAGRAPH_PREFIX_RE = re.compile(
     r"^_(?:p|l)\d+(?:: \(empty\))?_\s*", re.IGNORECASE
 )
 _INLINE_LABEL_BOUNDARY_RE = re.compile(
-    r"\s+(?=(?:TO|致|ATTN|FROM|FM|DATE|日期)\s*[：:])", re.IGNORECASE
+    r"\s+(?=(?:TO|致|ATTN|FROM|FM|DATE|日期|提单号|主单号|船\s*公\s*司|承运人|船\s*期|"
+    r"中转港(?:代码|（卸港）|\(卸港\))?|要求进港时间|件数|毛重|体积)\s*[：:])",
+    re.IGNORECASE,
 )
 _BARE_COMPANY_RE = re.compile(
     r"[\u4e00-\u9fffA-Za-z0-9（）()·&.-]{2,80}(?:有限责任公司|股份有限公司|有限公司|公司)"
@@ -327,26 +329,73 @@ def _clean_labeled_value(value: str) -> str | None:
     return cleaned if cleaned and cleaned not in {"-", "/"} else None
 
 
+def _normalized_label(value: str) -> str:
+    return re.sub(r"\s+", "", value).rstrip("：:").lower()
+
+
+def _label_pattern(label: str) -> str:
+    # Chinese forms often insert spaces purely for visual alignment.
+    return r"\s*".join(re.escape(char) for char in label if not char.isspace())
+
+
+_ADJACENT_FIELD_LABELS = frozenset(
+    _normalized_label(label)
+    for label in (
+        "承运人",
+        "船公司",
+        "船东",
+        "CARRIER",
+        "船期",
+        "开航日期",
+        "开航日",
+        "ETD",
+        "中转港",
+        "中转港代码",
+        "中转港（卸港）",
+        "中转港(卸港)",
+        "卸港",
+        "要求进港时间",
+        "要求进港",
+    )
+)
+
+
+def _is_adjacent_field_label(value: str) -> bool:
+    return _normalized_label(value) in _ADJACENT_FIELD_LABELS
+
+
 def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[str]:
     """Extract values only when a body label and value are directly adjacent."""
-    label_pattern = "|".join(re.escape(label) for label in labels)
+    label_pattern = "|".join(_label_pattern(label) for label in labels)
     pattern = re.compile(
         rf"(?:^|(?<=\s))(?:{label_pattern})\s*(?:[：:]\s*|\|\s*)([^|\n]+)",
         re.IGNORECASE,
     )
     values: list[str] = []
     decoded_source = html.unescape(source_text)
-    html_cells = [
-        re.sub(r"<[^>]+>", "", cell).strip()
-        for cell in re.findall(r"<td\b[^>]*>(.*?)</td>", decoded_source, re.IGNORECASE | re.DOTALL)
-    ]
-    expected_labels = {label.lower() for label in labels}
-    for index, cell in enumerate(html_cells[:-1]):
-        if cell.rstrip("：:").strip().lower() not in expected_labels:
-            continue
-        value = _clean_labeled_value(html_cells[index + 1])
-        if value and value not in values:
-            values.append(value)
+    expected_labels = {_normalized_label(label) for label in labels}
+    for raw_row in re.findall(
+        r"<tr\b[^>]*>(.*?)</tr>", decoded_source, re.IGNORECASE | re.DOTALL
+    ):
+        html_cells = [
+            re.sub(r"<[^>]+>", "", cell).strip()
+            for cell in re.findall(
+                r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>",
+                raw_row,
+                re.IGNORECASE | re.DOTALL,
+            )
+        ]
+        for index, cell in enumerate(html_cells[:-1]):
+            if _normalized_label(cell) not in expected_labels:
+                continue
+            next_cell = html_cells[index + 1]
+            value = (
+                None
+                if _is_adjacent_field_label(next_cell)
+                else _clean_labeled_value(next_cell)
+            )
+            if value and value not in values:
+                values.append(value)
     for raw_line in source_text.splitlines():
         line = _MARKDOWN_PARAGRAPH_PREFIX_RE.sub("", raw_line.strip())
         cells = [cell.strip() for cell in line.strip("|").split("|")]
@@ -354,8 +403,9 @@ def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[
         for index, candidate in enumerate(candidates):
             match = pattern.search(candidate)
             value = _clean_labeled_value(match.group(1)) if match else None
-            if value is None and candidate.rstrip("：:").strip().lower() in expected_labels:
-                value = _clean_labeled_value(cells[index + 1]) if index + 1 < len(cells) else None
+            if value is None and _normalized_label(candidate) in expected_labels:
+                if index + 1 < len(cells) and not _is_adjacent_field_label(cells[index + 1]):
+                    value = _clean_labeled_value(cells[index + 1])
             if value and value not in values:
                 values.append(value)
     return values
@@ -363,14 +413,21 @@ def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[
 
 def _extract_table_column_values(source_text: str, labels: tuple[str, ...]) -> list[str]:
     """Read a value from the next row in a labeled Markdown table column."""
-    expected = {label.lower() for label in labels}
+    expected = {_normalized_label(label) for label in labels}
     rows: list[list[str]] = []
     values: list[str] = []
 
     def consume_table() -> None:
         for row_index, row in enumerate(rows[:-1]):
             for column_index, cell in enumerate(row):
-                if cell.rstrip("：:").strip().lower() not in expected:
+                if _normalized_label(cell) not in expected:
+                    continue
+                if column_index + 1 < len(row) and not _is_adjacent_field_label(
+                    row[column_index + 1]
+                ):
+                    value = _clean_labeled_value(row[column_index + 1])
+                    if value and value not in values:
+                        values.append(value)
                     continue
                 for next_row in rows[row_index + 1 :]:
                     if all(re.fullmatch(r":?-{3,}:?", part.replace(" ", "")) for part in next_row):
@@ -389,6 +446,35 @@ def _extract_table_column_values(source_text: str, labels: tuple[str, ...]) -> l
         if rows:
             consume_table()
             rows = []
+    decoded_source = html.unescape(source_text)
+    for raw_table in re.findall(
+        r"<table\b[^>]*>(.*?)</table>", decoded_source, re.IGNORECASE | re.DOTALL
+    ):
+        rows = [
+            [
+                re.sub(r"<[^>]+>", "", cell).strip()
+                for cell in re.findall(
+                    r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>",
+                    raw_row,
+                    re.IGNORECASE | re.DOTALL,
+                )
+            ]
+            for raw_row in re.findall(
+                r"<tr\b[^>]*>(.*?)</tr>", raw_table, re.IGNORECASE | re.DOTALL
+            )
+        ]
+        consume_table()
+    return values
+
+
+def _extract_explicit_carriers(source_text: str) -> list[str]:
+    labels = ("承运人", "船公司", "船东", "CARRIER")
+    values = _extract_explicit_values(source_text, labels)
+    values.extend(
+        value
+        for value in _extract_table_column_values(source_text, labels)
+        if value not in values
+    )
     return values
 
 
@@ -477,7 +563,12 @@ def _append_top_level_remark(data: dict[str, Any], values: list[str]) -> None:
     data["remark"] = "；".join(parts) or None
 
 
-def _restore_explicit_header_fields(data: dict[str, Any], source_text: str) -> None:
+def _restore_explicit_header_fields(
+    data: dict[str, Any],
+    source_text: str,
+    issues: list[dict[str, Any]] | None = None,
+    reference_year: int | None = None,
+) -> None:
     recipients = _extract_explicit_values(
         source_text, ("TO", "致", "ATTN", "收件方", "收件人")
     )
@@ -494,6 +585,21 @@ def _restore_explicit_header_fields(data: dict[str, Any], source_text: str) -> N
     doc_dates.update(_extract_fragmented_dates(source_text))
     if len(doc_dates) == 1:
         data["doc_date"] = doc_dates.pop()
+
+    explicit_carriers = _extract_explicit_carriers(source_text)
+    if explicit_carriers:
+        # The source label is authoritative, including names such as ``EMC CPS``.
+        data["carrier"] = explicit_carriers[0]
+        target_issues = issues if issues is not None else data.get("review_issues")
+        if isinstance(target_issues, list):
+            target_issues[:] = [
+                issue
+                for issue in target_issues
+                if not (
+                    issue.get("code") == "deterministic_ai_conflict"
+                    and issue.get("field") == "carrier"
+                )
+            ]
 
     customer_refs = list(
         dict.fromkeys(
@@ -561,6 +667,78 @@ def _restore_explicit_header_fields(data: dict[str, Any], source_text: str) -> N
     }
     if len(etd_dates) == 1:
         data["etd"] = etd_dates.pop()
+    elif not etd_dates:
+        # The booking-note template commonly writes ``1月21日``.  Infer only
+        # the year that is already explicit in the document date.
+        doc_year_match = re.match(r"(\d{4})-", str(data.get("doc_date") or ""))
+        if doc_year_match is None:
+            internal_ref = str(data.get("internal_ref") or "")
+            doc_year_match = re.search(r"(?<!\d)(20\d{2})(?!\d)", internal_ref)
+        if doc_year_match is None:
+            # A year in an explicit date elsewhere in the source is a safer
+            # fallback than leaving a mapped month/day string schema-invalid.
+            doc_year_match = re.search(r"(?<!\d)(20\d{2})(?!\d)", source_text)
+        year = int(doc_year_match.group(1)) if doc_year_match else reference_year
+        if year:
+            partial_dates: set[str] = set()
+            for value in etd_values:
+                match = re.fullmatch(r"\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?\s*", value)
+                if not match:
+                    continue
+                try:
+                    partial_dates.add(
+                        date(
+                            year,
+                            int(match.group(1)),
+                            int(match.group(2)),
+                        ).isoformat()
+                    )
+                except ValueError:
+                    continue
+            if len(partial_dates) == 1:
+                data["etd"] = partial_dates.pop()
+        else:
+            partial_values = [
+                value
+                for value in etd_values
+                if re.fullmatch(r"\s*\d{1,2}\s*月\s*\d{1,2}\s*日?\s*", value)
+            ]
+            if partial_values:
+                data["etd"] = None
+                _append_issue(
+                    issues if issues is not None else data.setdefault("review_issues", []),
+                    code="etd_year_missing",
+                    field="etd",
+                    message="船期只有月日且缺少可推断年份，已保留为空，需人工确认",
+                    source_values=list(dict.fromkeys(partial_values)),
+                )
+
+    transit_values = _extract_explicit_values(
+        source_text,
+        ("中转港", "中转港代码", "中转港（卸港）", "中转港(卸港)", "卸港"),
+    )
+    transit_values.extend(
+        value
+        for value in _extract_table_column_values(
+            source_text,
+            ("中转港", "中转港代码", "中转港（卸港）", "中转港(卸港)", "卸港"),
+        )
+        if value not in transit_values
+    )
+    if transit_values:
+        concrete = [value for value in transit_values if value not in _TRANSIT_LOOKUP_VALUES]
+        data["transit_port"] = concrete[0] if concrete else transit_values[0]
+
+    required_port_times = _extract_explicit_values(
+        source_text, ("要求进港时间", "要求进港")
+    )
+    required_port_times.extend(
+        value
+        for value in _extract_table_column_values(source_text, ("要求进港时间", "要求进港"))
+        if value not in required_port_times
+    )
+    if len(required_port_times) == 1:
+        _append_top_level_remark(data, required_port_times)
 
 
 def _restore_numbered_notice_remark(data: dict[str, Any], source_text: str) -> None:
@@ -1022,7 +1200,16 @@ def _validate_carrier_source(
     if not isinstance(carrier, str) or not carrier.strip():
         issues[:] = [issue for issue in issues if issue.get("code") not in inferred_codes]
         return
-    carrier = carrier.strip().upper()
+    carrier = carrier.strip()
+    data["carrier"] = carrier
+
+    explicit = _extract_explicit_carriers(source_text) if source_text is not None else []
+    if explicit:
+        data["carrier"] = explicit[0]
+        issues[:] = [issue for issue in issues if issue.get("code") not in inferred_codes]
+        return
+
+    carrier = carrier.upper()
     data["carrier"] = carrier
 
     if source_text is None:
@@ -1038,11 +1225,6 @@ def _validate_carrier_source(
             message="视觉输入无法确定承运人是否为原文明示值，需人工确认",
             source_values=[carrier],
         )
-        return
-
-    explicit = _extract_explicit_values(source_text, ("承运人", "船公司", "CARRIER", "船东"))
-    if explicit:
-        issues[:] = [issue for issue in issues if issue.get("code") not in inferred_codes]
         return
 
     expected_carrier = _carrier_from_mbl(data.get("mbl_no"))
@@ -1168,7 +1350,9 @@ def _build_order_note(data: dict[str, Any]) -> str | None:
     return "；".join(parts) or None
 
 
-def finalize_extraction(data: dict[str, Any], *, source_text: str | None) -> dict[str, Any]:
+def finalize_extraction(
+    data: dict[str, Any], *, source_text: str | None, reference_year: int | None = None
+) -> dict[str, Any]:
     """补充订单映射，并把不可安全自动下单的情况转成结构化问题。"""
     raw_issues = data.get("review_issues")
     issues = [dict(issue) for issue in normalize_review_issues(raw_issues)]
@@ -1179,7 +1363,7 @@ def finalize_extraction(data: dict[str, Any], *, source_text: str | None) -> dic
 
     if source_text:
         data["raw_text_snippet"] = source_text[:200]
-        _restore_explicit_header_fields(data, source_text)
+        _restore_explicit_header_fields(data, source_text, issues, reference_year)
         _restore_numbered_notice_remark(data, source_text)
         _validate_sender_contact(data, source_text, issues)
         for field in _PERSON_FIELDS:
@@ -1232,11 +1416,32 @@ def finalize_extraction(data: dict[str, Any], *, source_text: str | None) -> dic
     _normalize_port_fields(data, source_text)
     _inherit_single_container_mbl(data)
 
+    unresolved_partial_etd = data.get("etd")
+    if isinstance(unresolved_partial_etd, str) and re.fullmatch(
+        r"\s*\d{1,2}\s*月\s*\d{1,2}\s*日?\s*", unresolved_partial_etd
+    ):
+        data["etd"] = None
+        _append_issue(
+            issues,
+            code="etd_year_missing",
+            field="etd",
+            message="船期只有月日且缺少可推断年份，已保留为空，需人工确认",
+            source_values=[unresolved_partial_etd.strip()],
+        )
+
     expected_carrier = _carrier_from_mbl(data.get("mbl_no"))
     carrier = data.get("carrier")
+    explicit_carrier = bool(
+        source_text and _extract_explicit_carriers(source_text)
+    )
     if expected_carrier and not carrier:
         data["carrier"] = expected_carrier
-    elif expected_carrier and isinstance(carrier, str) and carrier.upper() != expected_carrier:
+    elif (
+        expected_carrier
+        and not explicit_carrier
+        and isinstance(carrier, str)
+        and carrier.upper() != expected_carrier
+    ):
         data["carrier"] = expected_carrier
         _append_issue(
             issues,

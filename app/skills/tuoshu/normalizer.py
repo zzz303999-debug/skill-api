@@ -107,6 +107,8 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     # carrier
     "承运人": "carrier",
     "船公司": "carrier",
+    "船 公 司": "carrier",
+    "船东": "carrier",
     "carrier_code": "carrier",
     "carrierCode": "carrier",
     # pol
@@ -121,6 +123,10 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "destination": "pod",
     # transit_port
     "中转港": "transit_port",
+    "中转港（卸港）": "transit_port",
+    "中转港(卸港)": "transit_port",
+    "中转港代码": "transit_port",
+    "卸港": "transit_port",
     "transitPort": "transit_port",
     "transshipment_port": "transit_port",
     # terminal
@@ -128,6 +134,7 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "码头": "terminal",
     # etd
     "船期": "etd",
+    "船 期": "etd",
     "开航日": "etd",
     "开航时间": "etd",
     "开船时间": "etd",
@@ -209,6 +216,8 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "sender_contact": "sender_contact",
     # remark
     "备注": "remark",
+    "要求进港时间": "remark",
+    "要求进港": "remark",
     "注意事项": "remark",
     "remarks": "remark",
     "note": "remark",
@@ -357,6 +366,8 @@ def _normalize_dict(data: dict[str, Any], aliases: dict[str, str]) -> dict[str, 
     result: dict[str, Any] = {}
     for key, value in data.items():
         canonical = aliases.get(key, key)
+        if canonical == key and isinstance(key, str) and re.search(r"\s", key):
+            canonical = aliases.get(re.sub(r"\s+", "", key), key)
         if canonical in result:
             # 正式 key 已存在，跳过别名值（除非正式 key 的值是 None）
             if result[canonical] is None:

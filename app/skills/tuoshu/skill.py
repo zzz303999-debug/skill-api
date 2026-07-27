@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -325,7 +326,12 @@ class TuoshuSkill(SkillBase):
         data = merge_deterministic_values(data, mapper_result)
         if parser_review_issues:
             data.setdefault("review_issues", []).extend(parser_review_issues)
-        data = finalize_extraction(data, source_text=source_text)
+        filename_year = re.search(r"(?<!\d)(20\d{2})(?!\d)", filename)
+        data = finalize_extraction(
+            data,
+            source_text=source_text,
+            reference_year=int(filename_year.group(1)) if filename_year else None,
+        )
 
         # 确保 source 字段齐全（若模型漏填）
         src = data.get("source")

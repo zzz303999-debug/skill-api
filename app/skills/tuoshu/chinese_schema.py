@@ -18,7 +18,7 @@ EN_TO_CN_TOP: dict[str, str] = {
     "hbl_no": "子提单号",
     "vessel": "船名",
     "voyage": "航次",
-    "carrier": "承运人",
+    "carrier": "船公司",
     "pol": "起运港",
     "pod": "目的港",
     "transit_port": "中转港",
@@ -120,6 +120,11 @@ def to_chinese(data: dict | TuoshuOutput) -> dict:
     validated = data if isinstance(data, TuoshuOutput) else TuoshuOutput.model_validate(data)
     data = validated.model_dump()
     result = _convert_keys(data, EN_TO_CN_TOP)
+
+    # carrier 保留接口返回的完整原值，展示层明确标注其未经中文名称映射。
+    carrier = data.get("carrier")
+    if isinstance(carrier, str) and carrier:
+        result["船公司"] = f"{carrier}（接口原始值）"
 
     # doc_type 枚举值也转中文
     doc_type_en = data.get("doc_type")

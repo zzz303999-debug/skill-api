@@ -559,6 +559,16 @@ def test_slash_vessel_voyage_is_split():
     assert result["voyage"] == "0PPT4E"
 
 
+def test_spaced_table_aliases_normalize_to_schema_fields():
+    result = normalize_llm_output(
+        {"船  公  司": "EMC CPS", "中转港（卸港）": "USLAX", "船 期": "2026-01-21"}
+    )
+
+    assert result["carrier"] == "EMC CPS"
+    assert result["transit_port"] == "USLAX"
+    assert result["etd"] == "2026-01-21"
+
+
 def test_finalize_preserves_transit_lookup_and_builds_order_mapping():
     result = finalize_extraction(
         {
@@ -788,6 +798,53 @@ def test_carrier_prefix_wins_and_indexed_remark_stays_with_container():
     assert result["ready_for_order"] is False
 
 
+def test_explicit_spaced_carrier_wins_over_mbl_prefix_and_restores_booking_fields():
+    result = finalize_extraction(
+        {
+            "carrier": "EMC",
+            "mbl_no": "EGLV12345678",
+            "etd": None,
+            "transit_port": None,
+            "doc_date": None,
+            "remark": None,
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=(
+            "内装箱委托书\n"
+            "| 船 公 司 | 船 期 | 中转港（卸港） | 要求进港时间 |\n"
+            "| --- | --- | --- | --- |\n"
+            "| EMC CPS | 1月21日 | USLAX | 装好就进港 |"
+        ),
+        reference_year=2026,
+    )
+
+    assert result["carrier"] == "EMC CPS"
+    assert result["etd"] == "2026-01-21"
+    assert result["transit_port"] == "USLAX"
+    assert result["remark"] == "装好就进港"
+    assert not any(
+        issue["code"] in {"carrier_by_mbl", "carrier_prefix_mismatch"}
+        for issue in result["review_issues"]
+    )
+
+
+@pytest.mark.parametrize("source_text", ["船期：1月21日", None])
+def test_partial_etd_without_reference_year_is_nullable_with_review_issue(source_text):
+    result = finalize_extraction(
+        {
+            "etd": "1月21日",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["etd"] is None
+    issue = next(issue for issue in result["review_issues"] if issue["code"] == "etd_year_missing")
+    assert issue["source_values"] == ["1月21日"]
+
+
 def test_visual_person_name_is_blocked_when_verbatim_check_is_unavailable():
     result = finalize_extraction(
         {
@@ -839,11 +896,11 @@ def test_review_issues_are_single_source_for_missing_measurements_and_renderer()
     assert {
         issue["code"] for issue in result["review_issues"]
     } == {
-        "carrier_prefix_mismatch",
         "missing_shipper_company",
         "missing_container_measurements",
     }
-    assert len(result["review_issues"]) == 3
+    assert result["carrier"] == "OOCL"
+    assert len(result["review_issues"]) == 2
 
     rendered = format_to_chat_text(
         {
@@ -1232,6 +1289,16 @@ def test_display_renderers_reject_incomplete_json():
         to_chinese({"carrier": "HLC"})
 
 
+def test_display_renderers_label_carrier_as_raw_shipping_company_value():
+    data = {
+        "carrier": "EMC CPS",
+        "source": {"file": "test.docx", "doc_format": "docx"},
+    }
+
+    assert "船公司: EMC CPS（接口原始值）" in format_to_chat_text(data)
+    assert to_chinese(data)["船公司"] == "EMC CPS（接口原始值）"
+
+
 def test_extract_response_has_no_independent_summary(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 
@@ -1277,15 +1344,14 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
     data = body["data"]
     assert body["meta"] == {"model": "fake", "usage": None}
     assert "carrier" in data and "承运人" not in data
-    assert data["carrier"] == "HLC"
+    assert data["carrier"] == "HMM"
     assert data["factory"]["name"] == "某门点"
     assert data["containers"][0]["remark"] == "博特装柜"
     assert data["raw_text_snippet"].startswith("提单号：HLCUSHA12345678")
 
     rendered = format_to_chat_text(data)
-    assert "承运人: HLC" in rendered
-    assert "承运人: HMM" not in rendered
-    assert "原文候选：HMM / HLC" in rendered
+    assert "船公司: HMM（接口原始值）" in rendered
+    assert "船公司: HLC（接口原始值）" not in rendered
     assert "做箱工厂: 某门点" in rendered
     assert "错误工厂" not in rendered
     assert "箱型备注: 博特装柜" in rendered
