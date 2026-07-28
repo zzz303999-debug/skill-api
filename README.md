@@ -63,43 +63,194 @@ make dev                         # uvicorn --reload
 - `http://localhost:8080/healthz`
 - `http://localhost:8080/skills` — 已注册的 skill 列表
 
-### Docker 部署
+## 生产部署交接
 
-```bash
-cp .env.example .env             # 填生产配置
-docker compose up -d --build
-docker compose logs -f
+### 服务与外部依赖
+
+```text
+调用方
+  └── skill-api:8080
+        ├── OpenClaw 网关（托书抽取必需）
+        ├── MinerU（可选，提高图片/扫描 PDF 解析质量）
+        └── 订单接口（仅 POST /orders 需要）
 ```
 
-### 龙虾环境按版本部署
+| 组件 | 是否包含在本仓库 | 是否必需 | 不可用时的影响 |
+|------|--------------------|----------|------------------|
+| `skill-api` | 是 | 是 | 整个 API 不可用 |
+| OpenClaw | 否 | 托书抽取必需 | 文件转换可能成功，但 LLM 抽取失败 |
+| MinerU | 否，必须单独部署 | 否 | 关闭时图片/扫描件改走 vision |
+| 订单接口 | 否 | 仅 `/orders` 必需 | `/orders` 返回 `502/503`，托书抽取不受影响 |
 
-GitHub 推送 `v*` tag 后，Actions 会构建并发布 GHCR 镜像。龙虾不需要 Git，使用
-只读的 GitHub Packages Token 登录一次，然后按明确版本部署：
+`GET /healthz` 只是 `skill-api` 存活检查，不会请求 OpenClaw、MinerU 或订单接口。
+所以上线验收必须再执行一次真实文档抽取。
+
+### 部署前准备
+
+- Python `3.11`；非 Docker 部署使用 `uv` 按 `uv.lock` 安装。
+- 准备可访问的 OpenClaw OpenAI 兼容地址和 API Key。
+- 生成独立的生产 `API_KEY`，不得使用 `.env.example` 中的示例值。
+- 如启用 MinerU，先单独部署兼容服务，再配置本项目。
+- 云服务器对外建议由 Nginx/Caddy 提供 HTTPS，`8080` 只对反向代理开放。
+- 放通 `skill-api` 到 OpenClaw、MinerU 和订单接口的出站网络。
+
+生成 API Key：
 
 ```bash
-export SKILL_API_IMAGE=ghcr.io/zzz303999-debug/skill-api:v0.1.0
+openssl rand -hex 32
+```
+
+必须将结果完整填入 `API_KEY`。当前实现在 `API_KEY` 为空时会关闭鉴权，生产环境严禁
+留空，也不得使用 `change-me`/`change-me-in-prod`。
+
+敏感变量 `API_KEY`、`OPENCLAW_API_KEY`、`MINERU_API_KEY` 和订单凭据必须由 Secret/
+服务器环境管理，不得提交 `.env`。
+
+### 方式一：Docker Compose
+
+GitHub 推送 `v*` tag 后，Actions 会将版本镜像发布到 GHCR。部署人员需在服务器
+保存 `docker-compose.deploy.yml` 和 `.env`，并显式指定镜像版本：
+
+```env
+SKILL_API_IMAGE=ghcr.io/zzz303999-debug/skill-api:v0.1.0
+API_KEY=<64位随机值>
+OPENCLAW_BASE_URL=http://<openclaw-host>:18789/v1
+OPENCLAW_API_KEY=<secret>
+MINERU_ENABLED=false
+```
+
+私有 GHCR 镜像需先用只读 Packages Token 登录，然后部署：
+
+```bash
+docker compose -f docker-compose.deploy.yml config --quiet
 docker compose -f docker-compose.deploy.yml pull
 docker compose -f docker-compose.deploy.yml up -d
+docker compose -f docker-compose.deploy.yml ps
+docker compose -f docker-compose.deploy.yml logs --tail=200 skill-api
 ```
 
-生产环境不要使用 `latest`；回滚时把 `SKILL_API_IMAGE` 改回上一个版本并重新执行
-`up -d`。`.env` 始终由龙虾环境维护，不进入 GitHub。
+生产不得依赖 `latest`。回滚时将 `.env` 中 `SKILL_API_IMAGE` 改为上一个已验证版本，
+重新执行 `pull` 和 `up -d`。
 
-### 交付给部署平台（如"龙虾" Agent）
+如 OpenClaw 或 MinerU 运行在 Linux Docker 宿主机而不在 Compose 网络，需给
+`skill-api` 增加：
 
-把整个 repo 目录打包交付即可。平台需要知道的信息：
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
 
-| 项 | 值 |
-|----|----|
-| 镜像构建 | `docker build -t skill-api .` |
-| 容器端口 | `8080` |
-| 健康检查 | `GET /healthz` |
-| 需注入的环境变量 | 见 `.env.example`（`OPENCLAW_*` 和 `API_KEY` 必填） |
-| 持久化目录（可选） | `/app/storage` |
+然后使用 `http://host.docker.internal:<port>`。容器中的 `127.0.0.1` 只代表容器自身，
+不代表云服务器宿主机。
 
-**敏感变量**（走平台 Secret）：`OPENCLAW_API_KEY`、`API_KEY`、`MINERU_API_KEY`（如启用）
+使用同机 Nginx/Caddy 时，应将 `docker-compose.deploy.yml` 的端口映射改为
+`127.0.0.1:8080:8080`，避免绕过 HTTPS 直接访问 Uvicorn。
 
-**普通变量**（走 ConfigMap / 环境变量）：其余
+### 方式二：uv + systemd（非 Docker）
+
+在 Linux 服务器安装 Python 3.11、uv、LibreOffice、`fonts-noto-cjk` 和 `curl`，然后：
+
+```bash
+sudo useradd --system --home-dir /opt/skill-api --shell /usr/sbin/nologin skill-api
+cd /opt/skill-api
+uv sync --frozen --no-dev --python 3.11
+cp .env.example .env
+# 编辑 .env，填入生产地址和 Secret
+sudo install -d -o skill-api -g skill-api /opt/skill-api/storage
+sudo chown root:skill-api /opt/skill-api/.env
+sudo chmod 0640 /opt/skill-api/.env
+```
+
+如 `skill-api` 用户已存在，跳过 `useradd`。
+
+使用专用的低权限用户运行。`/etc/systemd/system/skill-api.service` 示例：
+
+```ini
+[Unit]
+Description=skill-api
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=skill-api
+Group=skill-api
+WorkingDirectory=/opt/skill-api
+EnvironmentFile=/opt/skill-api/.env
+Environment=HOME=/opt/skill-api/storage
+ExecStart=/opt/skill-api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+TimeoutStopSec=210
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now skill-api
+sudo systemctl status skill-api
+sudo journalctl -u skill-api -n 200 --no-pager
+```
+
+`Restart=always` 处理进程退出，但不能代替外部监控。应从另一台机器或云拨测每分钟
+请求 `/healthz`，并将连续失败和恢复事件发到企业微信。
+
+### HTTPS 反向代理
+
+Nginx 默认请求体限制不足以上传大文档，默认代理超时也可能早于 LLM 超时。生产配置
+至少应包含：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name skill-api.example.com;
+    ssl_certificate /etc/letsencrypt/live/skill-api.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/skill-api.example.com/privkey.pem;
+
+    # 应与 API_MAX_UPLOAD_BYTES 保持一致。
+    client_max_body_size 20m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 210s;
+        proxy_send_timeout 210s;
+    }
+}
+```
+
+证书路径由部署环境的 ACME/证书管理工具生成并按实际域名替换。云安全组对公网只开放 `80/443`，
+不开放 `8080`。
+
+### 上线验收
+
+1. 存活检查必须返回 `status=ok` 且包含 `tuoshu`：
+
+   ```bash
+   curl -fsS http://127.0.0.1:8080/healthz
+   ```
+
+2. 使用非生产样例文档做端到端抽取：
+
+   ```bash
+   curl -fsS -X POST http://127.0.0.1:8080/skills/tuoshu/extract \
+     -H "X-API-Key: $API_KEY" \
+     -F "file=@./sample.pdf"
+   ```
+
+3. 确认返回中存在 `data`、`meta.model`、`meta.parser` 和 `content`。
+4. 如启用 MinerU，确认 `meta.parser` 或 `meta.page_routes[].parser` 中存在 `mineru`；
+   如出现 `mineru_failed`/`mineru_low_confidence`，查看网络、版本和 MinerU 日志。
+5. 如使用 `/orders`，用测试账号单独验证一次；该接口会真实创建订单，不得用
+   生产数据反复重试。
 
 ## 接口
 
@@ -107,7 +258,8 @@ docker compose -f docker-compose.deploy.yml up -d
 返回所有已注册 skill 及元数据。
 
 ### `GET /healthz`
-健康检查。
+存活检查，返回 API 状态和已注册 skill。该接口不调用 OpenClaw、MinerU 或订单
+接口，因此 `200` 只表示 FastAPI 进程可响应，不表示端到端抽取可用。
 
 ### `POST /skills/{skill_name}/extract`
 运行指定 skill，返回结构化 JSON。
@@ -226,9 +378,13 @@ MinerU 接管低质量 PDF 页和原始图片，后续的模板 Mapper、LLM 补
 不变。先确保 MinerU 的 HTTP 服务可从 `skill-api` 所在环境访问，再配置。本项目提供
 MinerU 客户端，不包含 MinerU 服务本身。
 
+`MINERU_ENABLED=false` 时服务仍可启动：普通 PDF 文本层由 `pdfplumber` 处理，图片和
+扫描件由 OpenClaw vision 处理。因此关闭 MinerU 不等于完全离线，OpenClaw 仍是必需依赖。
+MinerU 建议只暴露在私有网络，不直接开放公网端口。
+
 ```env
 MINERU_ENABLED=true
-MINERU_BASE_URL=http://host.docker.internal:8000
+MINERU_BASE_URL=http://<mineru-host>:8000
 MINERU_ENDPOINT=/file_parse
 MINERU_API_KEY=
 MINERU_EXPECTED_VERSION=2.5.4
@@ -240,8 +396,9 @@ MINERU_FALLBACK_ENABLED=true
 
 | skill-api | MinerU | 地址示例 |
 |-----------|--------|----------|
-| 本机运行 | 本机运行 | `http://127.0.0.1:8000` |
+| 非 Docker 本机运行 | 同机运行 | `http://127.0.0.1:8000` |
 | Docker 容器 | macOS/Windows 宿主机 | `http://host.docker.internal:8000` |
+| Docker 容器 | Linux 宿主机 | 先配置 `host-gateway`，再用 `http://host.docker.internal:8000` |
 | 同一 Compose 网络 | `mineru` 服务 | `http://mineru:8000` |
 | 独立服务器 | 可达的 MinerU 主机 | `http://<mineru-host>:8000` |
 
