@@ -1342,6 +1342,7 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
     assert response.status_code == 200
     body = response.json()
     data = body["data"]
+    assert body["content"] == "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
     assert body["meta"] == {"model": "fake", "usage": None}
     assert "carrier" in data and "承运人" not in data
     assert data["carrier"] == "HMM"

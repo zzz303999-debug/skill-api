@@ -146,6 +146,7 @@ class TuoshuSkill(SkillBase):
     accepts = [".xlsx", ".xlsm", ".xls", ".docx", ".doc", ".pdf",
                ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"]
     output_model = TuoshuOutput
+    include_content = True
 
     def run(self, *, file_bytes: bytes, filename: str, options: dict | None = None) -> dict:
         ext = Path(filename).suffix.lower()
@@ -353,4 +354,4 @@ class TuoshuSkill(SkillBase):
         result_dict = validated.model_dump()
         safe_meta = {key: meta.get(key) for key in ("model", "usage") if key in meta}
         safe_meta.update(conversion_meta)
-        return {"result": result_dict, "meta": safe_meta}
+        return {"result": result_dict, "content": source_text or "", "meta": safe_meta}

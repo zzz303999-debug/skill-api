@@ -74,12 +74,17 @@ def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
     data 字段的类型 = skill.output_model，这样 OpenAPI 就能显示精确 schema。
     """
     data_type: Any = skill.output_model if skill.output_model else dict
+    fields: dict[str, Any] = {
+        "skill": (str, skill.name),
+        "version": (str, skill.version),
+        "data": (data_type, ...),
+        "meta": (dict, Field(default_factory=dict)),
+    }
+    if skill.include_content:
+        fields["content"] = (str, ...)
     return create_model(
         f"{skill.name.title().replace('-', '')}Response",
-        skill=(str, skill.name),
-        version=(str, skill.version),
-        data=(data_type, ...),
-        meta=(dict, Field(default_factory=dict)),
+        **fields,
         __base__=BaseModel,
     )
 
@@ -167,12 +172,15 @@ def _make_extract_route(skill: SkillBase):
     ) -> dict[str, Any]:
         content = await _read_upload(file)
         out = await _run_skill(skill, content, file.filename or "unnamed")
-        return {
+        response = {
             "skill": skill.name,
             "version": skill.version,
             "data": out["result"],
             "meta": out.get("meta", {}),
         }
+        if skill.include_content:
+            response["content"] = out.get("content", "")
+        return response
 
     return handler
 
