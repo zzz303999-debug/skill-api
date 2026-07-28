@@ -10,8 +10,10 @@ from typing import Any
 from .normalizer import (
     is_known_container_type,
     normalize_container_type,
+    normalize_date_value,
     normalize_review_issues,
 )
+from .schema import DATE_OR_DATETIME_PATTERN, DATE_PATTERN
 
 _PERSON_FIELDS = ("sender", "sender_contact", "factory.contact")
 _TRANSIT_LOOKUP_VALUES = (
@@ -55,6 +57,7 @@ _ALWAYS_BLOCKING_CODES = {
     "carrier_by_mbl",
     "carrier_by_vessel",
     "carrier_source_unverified",
+    "invalid_date_format",
 }
 _GROUNDING_WRAPPERS = ("另有记录", "主值", "待人工确认")
 _CONFIRMED_OCR_ARTIFACT_PATTERNS = (
@@ -62,6 +65,8 @@ _CONFIRMED_OCR_ARTIFACT_PATTERNS = (
 )
 _CONTAINER_NO_RE = re.compile(r"^[A-Z]{4}\d{7}$")
 _SEAL_NO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9./-]{3,19}$")
+_DATE_ONLY_RE = re.compile(DATE_PATTERN)
+_DATE_OR_DATETIME_RE = re.compile(DATE_OR_DATETIME_PATTERN)
 _MARKDOWN_PARAGRAPH_PREFIX_RE = re.compile(
     r"^_(?:p|l)\d+(?:: \(empty\))?_\s*", re.IGNORECASE
 )
@@ -1299,6 +1304,34 @@ def _source_mentions_measurements(source_text: str, fields: list[str]) -> bool:
     )
 
 
+def _sanitize_schema_dates(data: dict[str, Any], issues: list[dict[str, Any]]) -> None:
+    """Keep malformed optional dates from rejecting the entire extraction."""
+    specs = (
+        ("etd", False, _DATE_ONLY_RE),
+        ("doc_date", False, _DATE_ONLY_RE),
+        ("loading_time", True, _DATE_OR_DATETIME_RE),
+    )
+    for field, allow_time, pattern in specs:
+        value = data.get(field)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            data[field] = None
+            continue
+        normalized = normalize_date_value(value, allow_time=allow_time)
+        if isinstance(normalized, str) and pattern.fullmatch(normalized):
+            data[field] = normalized
+            continue
+        data[field] = None
+        _append_issue(
+            issues,
+            code="invalid_date_format",
+            field=field,
+            message="日期值格式或日历日期无效，已清空并需人工确认",
+            source_values=[str(value)],
+        )
+
+
 def _restore_missing_container_measurements(
     data: dict[str, Any], source_text: str | None, issues: list[dict[str, Any]]
 ) -> None:
@@ -1455,6 +1488,7 @@ def finalize_extraction(
     _restore_indexed_container_remarks(data)
     _remove_confirmed_ocr_artifacts(data, issues)
     _ground_free_text_fields(data, source_text, issues)
+    _sanitize_schema_dates(data, issues)
 
     containers = data.get("containers")
     if isinstance(containers, list):

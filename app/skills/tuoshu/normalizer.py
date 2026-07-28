@@ -550,7 +550,7 @@ def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:
     return cleaned, unit
 
 
-def _normalize_date_value(value: Any, *, allow_time: bool) -> Any:
+def normalize_date_value(value: Any, *, allow_time: bool) -> Any:
     """Normalize common year-first date spellings emitted by OCR/LLMs.
 
     Only unambiguous ``year-month-day`` values are changed. Invalid calendar
@@ -563,6 +563,9 @@ def _normalize_date_value(value: Any, *, allow_time: bool) -> Any:
     text = value.strip().translate(
         str.maketrans({"／": "/", "．": ".", "－": "-", "：": ":"})
     )
+    # OCR commonly joins the time directly to the Chinese day suffix, for
+    # example ``2026年7月15日0:00``.
+    text = re.sub(r"日(?=\d{1,2}\s*(?::|时))", "日 ", text)
     match = re.fullmatch(
         r"(\d{4})\s*(?:年\s*|[./-]\s*)"
         r"(\d{1,2})\s*(?:月\s*|[./-]\s*)"
@@ -626,8 +629,8 @@ def normalize_llm_output(data: dict[str, Any]) -> dict[str, Any]:
     # OCR and models frequently use Chinese dates or non-zero-padded slashes.
     # Normalize them before the strict Pydantic date-pattern validation.
     for field in ("etd", "doc_date"):
-        result[field] = _normalize_date_value(result.get(field), allow_time=False)
-    result["loading_time"] = _normalize_date_value(
+        result[field] = normalize_date_value(result.get(field), allow_time=False)
+    result["loading_time"] = normalize_date_value(
         result.get("loading_time"), allow_time=True
     )
 

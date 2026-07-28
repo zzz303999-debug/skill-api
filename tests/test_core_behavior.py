@@ -523,6 +523,38 @@ def test_document_and_loading_dates_are_normalized_before_schema_validation():
     assert result["loading_time"] == "2026-07-16T00:00:00"
 
 
+def test_loading_time_without_space_after_chinese_day_is_normalized():
+    result = normalize_llm_output({"loading_time": "2026年7月16日0:00"})
+
+    assert result["loading_time"] == "2026-07-16T00:00:00"
+
+
+def test_invalid_optional_date_becomes_blocking_review_issue():
+    result = finalize_extraction(
+        {
+            "loading_time": "2026年2月30日",
+            "shipper_company": "测试托运人有限公司",
+            "factory": {"name": "测试工厂"},
+            "containers": [
+                {"type": "20GP", "qty": 1, "packages": 1, "volume_cbm": 1}
+            ],
+        },
+        source_text=None,
+    )
+
+    assert result["loading_time"] is None
+    assert result["ready_for_order"] is False
+    assert {
+        "code": "invalid_date_format",
+        "field": "loading_time",
+        "message": "日期值格式或日历日期无效，已清空并需人工确认",
+        "source_values": ["2026年2月30日"],
+        "blocking": True,
+    } in result["review_issues"]
+    result["source"] = {"file": "invalid-date.pdf", "doc_format": "pdf"}
+    TuoshuOutput.model_validate(result)
+
+
 def test_table_dates_restore_loading_time_without_copying_etd():
     result = finalize_extraction(
         {
