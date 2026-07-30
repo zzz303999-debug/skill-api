@@ -1,0 +1,16 @@
+services:
+  skill-api:
+    image: ${SKILL_API_IMAGE:-ghcr.io/zzz303999-debug/skill-api:latest}
+    container_name: skill-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

@@ -42,6 +42,8 @@ class SkillBase(ABC):
     accepts: ClassVar[list[str]] = []
     # 强类型输出模型，供 OpenAPI 生成精确 schema
     output_model: ClassVar[type[BaseModel] | None] = None
+    # 是否在单文件抽取接口顶层返回解析后的原始文本
+    include_content: ClassVar[bool] = False
 
     @classmethod
     def meta(cls) -> SkillMeta:

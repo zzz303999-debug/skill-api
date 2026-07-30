@@ -17,14 +17,42 @@ DocType = Literal[
     "UNKNOWN",
 ]
 
+DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+DATE_OR_DATETIME_PATTERN = r"^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2})?$"
+
+
+class ReviewIssue(BaseModel):
+    """需要人工处理后才能进入订单接口的问题。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    code: str
+    field: str
+    message: str
+    source_values: list[str] = Field(default_factory=list)
+    blocking: bool = True
+
+
+class OrderMapping(BaseModel):
+    """抽取结果到订单接口的确定性字段映射。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    c_sn: str | None = Field(None, description="我司业务编号，对应 internal_ref")
+    mbl_no: str | None = Field(None, description="主提单号")
+    hbl_no: str | None = Field(None, description="子提单号/分提单号")
+    c_title: str | None = Field(None, description="托运人公司名称")
+    factory_name: str | None = Field(None, description="工厂门点简称")
+    c_note: str | None = Field(None, description="订单备注，包含 PO 号和原文备注")
+
 
 class ContainerItem(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
-    type: str | None = Field(None, description="归一后的箱型：20GP/40GP/40HC/45HC 等")
+    type: str | None = Field(None, description="原文箱型代码，禁止在 HQ/HC/DV/GP 等类型间改写")
     qty: int | None = 1
-    container_no: str | None = None
-    seal_no: str | None = None
+    container_no: str | None = Field(None, description="箱号，必须为 4 个大写字母加 7 位数字")
+    seal_no: str | None = Field(None, description="封号，不得包含空格或 OCR 图片区域文字")
     packages: int | None = None
     packages_unit: str | None = None
     gross_weight_kg: float | None = None
@@ -35,7 +63,7 @@ class ContainerItem(BaseModel):
 
 
 class Factory(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     name: str | None = None
     address: str | None = None
@@ -44,7 +72,7 @@ class Factory(BaseModel):
 
 
 class Source(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     file: str
     doc_format: str
@@ -55,10 +83,11 @@ class Source(BaseModel):
 class TuoshuOutput(BaseModel):
     """托书统一抽取结果。"""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     doc_type: DocType = "UNKNOWN"
-    booking_no: str | None = None
+    internal_ref: str | None = Field(None, description="我司业务编号，对应订单 c_sn")
+    customs_declaration_no: str | None = None
     customer_ref: str | None = None
     mbl_no: str | None = None
     hbl_no: str | None = None
@@ -72,16 +101,28 @@ class TuoshuOutput(BaseModel):
     transit_port: str | None = None
     terminal: str | None = None
 
-    etd: str | None = None
+    etd: str | None = Field(None, pattern=DATE_PATTERN)
     si_cutoff: str | None = None
     customs_cutoff: str | None = None
-    loading_time: str | None = None
+    loading_time: str | None = Field(None, pattern=DATE_OR_DATETIME_PATTERN)
 
     containers: list[ContainerItem] = Field(default_factory=list)
 
     factory: Factory | None = None
-    shipper_agent: str | None = None
+    shipper_company: str | None = Field(
+        None, description="仅取正文明确发货人/托运人栏位，对应订单 c_title"
+    )
+    shipper_agent: str | None = Field(None, description="文档正文抬头或落款中的委托公司")
+
+    # 展示层扩展字段
+    recipient: str | None = Field(None, description="收件方（TO/致/ATTN）")
+    doc_date: str | None = Field(None, description="文档日期（DATE）", pattern=DATE_PATTERN)
+    sender: str | None = Field(None, description="发货方（FROM）")
+    sender_contact: str | None = Field(None, description="发货联系人（FROM/FM）")
 
     remark: str | None = None
+    order_mapping: OrderMapping = Field(default_factory=OrderMapping)
+    review_issues: list[ReviewIssue] = Field(default_factory=list)
+    ready_for_order: bool = False
     source: Source
     raw_text_snippet: str | None = None

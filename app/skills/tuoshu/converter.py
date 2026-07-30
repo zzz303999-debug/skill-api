@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 tuoshu-extractor: 任意格式 → Markdown（无损转换）
 
 职责单一：xlsx/xls/docx/doc/pdf → stdout markdown。
 不做任何语义抽取、不做归一化、不做 OCR。
-图片和扫描 PDF 输出 SCAN_OR_IMAGE_HINT: <path>，由上层调用 OCR skill。
+图片和扫描 PDF 输出 SCAN_OR_IMAGE_HINT: <path>，由上层转为 vision 输入。
 
 用法:
     python3 scripts/to_text.py <file>
@@ -19,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-
 
 # ---------- 通用工具 ----------
 
@@ -58,15 +56,15 @@ def _clean_cell(value) -> str:
 
 def convert_xlsx(path: str) -> None:
     import io
+
     import openpyxl
-    from openpyxl.utils import get_column_letter
 
     # 用 BytesIO 绕过 openpyxl 对扩展名的检查（有些 .xls 实际是 xlsx）
     with open(path, "rb") as fh:
         data = fh.read()
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
     print(f"# {Path(path).name}")
-    print(f"_format: xlsx_")
+    print("_format: xlsx_")
     print()
 
     for ws in wb.worksheets:
@@ -91,8 +89,8 @@ def convert_xlsx(path: str) -> None:
             continue
 
         # 修剪尾部纯空的行/列（结构中间的空行空列保留，只去外围的填充空白）
-        def _cell_val(r: int, c: int):
-            return merged_map.get((r, c), ws.cell(row=r, column=c).value)
+        def _cell_val(r: int, c: int, merged=merged_map, worksheet=ws):
+            return merged.get((r, c), worksheet.cell(row=r, column=c).value)
 
         while max_row > 0 and all(
             _cell_val(max_row, c) in (None, "") for c in range(1, max_col + 1)
@@ -145,7 +143,7 @@ def convert_xls(path: str) -> None:
     book = xlrd.open_workbook(path, formatting_info=False)
     datemode = book.datemode
     print(f"# {Path(path).name}")
-    print(f"_format: xls_")
+    print("_format: xls_")
     print()
 
     for sheet in book.sheets():
@@ -166,11 +164,11 @@ def convert_xls(path: str) -> None:
                 for c in range(clo, chi):
                     merged_map[(r, c)] = anchor
 
-        def _xls_val(r: int, c: int):
-            if (r, c) in merged_map:
-                return merged_map[(r, c)]
-            ctype = sheet.cell_type(r, c)
-            v = sheet.cell_value(r, c)
+        def _xls_val(r: int, c: int, merged=merged_map, current_sheet=sheet):
+            if (r, c) in merged:
+                return merged[(r, c)]
+            ctype = current_sheet.cell_type(r, c)
+            v = current_sheet.cell_value(r, c)
             # XL_CELL_DATE = 3：还原为 ISO datetime 字符串
             if ctype == xlrd.XL_CELL_DATE:
                 try:
@@ -218,7 +216,7 @@ def convert_docx(path: str) -> None:
 
     doc = Document(path)
     print(f"# {Path(path).name}")
-    print(f"_format: docx_")
+    print("_format: docx_")
     print()
 
     # 按 body 顺序遍历段落和表格

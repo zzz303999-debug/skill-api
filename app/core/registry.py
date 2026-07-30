@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-from typing import Iterable
+from collections.abc import Iterable
 
 from app.core.skill_base import SkillBase
 from app.errors import SkillNotFoundError

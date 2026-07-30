@@ -1,0 +1,396 @@
+from __future__ import annotations
+
+import pytest
+
+import app.document_parsers.mineru as mineru_module
+from app.config import settings
+from app.document_parsers.mineru import (
+    MINERU_REQUEST_PROFILE,
+    MinerUContractError,
+    MinerUError,
+    MinerUParseResult,
+    _content_list_to_markdown,
+    _extract_markdown,
+    _quality_result,
+    _strip_markdown_images,
+    parse_document,
+    parse_pdf,
+)
+from app.errors import ConvertError
+from app.skills.tuoshu import convert_service
+from app.skills.tuoshu.convert_service import ConversionText, detect_image_mime
+
+
+def test_extract_markdown_from_nested_mineru_response():
+    payload = {"results": {"order": {"md_content": "# 托书\n\n内容"}}}
+
+    assert _extract_markdown(payload) == "# 托书\n\n内容"
+
+
+def test_image_format_is_detected_from_content():
+    assert detect_image_mime(b"\x89PNG\r\n\x1a\ncontent", "order.png") == (
+        "image/png",
+        "png",
+    )
+
+
+def test_unknown_image_content_is_rejected():
+    from app.errors import BadRequestError
+
+    with pytest.raises(BadRequestError, match="not a supported raster format"):
+        detect_image_mime(b"not-an-image", "order.png")
+
+
+def test_image_extension_mismatch_is_rejected():
+    from app.errors import BadRequestError
+
+    with pytest.raises(BadRequestError, match="does not match"):
+        detect_image_mime(b"\x89PNG\r\n\x1a\ncontent", "order.jpg")
+
+
+def test_mineru_low_confidence_is_explicit_when_structure_and_labels_are_absent():
+    result = _quality_result("一段没有业务标签且没有表格结构的普通文本内容", [])
+
+    assert result.low_confidence is True
+    assert result.low_confidence_reasons == ("no_table_or_key_labels",)
+
+
+def test_original_image_is_uploaded_to_mineru(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        headers = {"content-type": "application/json", "x-mineru-version": "2.5.4"}
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"markdown": "| 提单号 | TEST000011 |"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse()
+
+    image_bytes = b"\x89PNG\r\n\x1a\noriginal"
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
+    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+
+    result = parse_document(image_bytes, "order.png", mime_type="image/png")
+
+    assert result.markdown == "| 提单号 | TEST000011 |"
+    assert captured["files"] == {"files": ("order.png", image_bytes, "image/png")}
+
+
+def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
+    import pdfplumber
+
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+        def extract_tables(self):
+            return []
+
+        def extract_words(self):
+            return []
+
+    class FakePdf:
+        pages = [FakePage("提单号 船名 件数 " + "有效文本" * 20), FakePage("")]
+
+        def close(self):
+            return None
+
+    mineru_calls: list[str] = []
+
+    def fake_mineru(_bytes, filename, **_kwargs):
+        mineru_calls.append(filename)
+        return MinerUParseResult(markdown="| 提单号 | OCR000001 |", table_count=1)
+
+    monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
+    monkeypatch.setattr(convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png")
+    monkeypatch.setattr(convert_service.mineru, "parse_document", fake_mineru)
+
+    result = convert_service._convert_pdf_with_page_routing(b"pdf", "mixed.pdf")
+
+    assert [page.parser for page in result.pages] == ["pdfplumber", "mineru"]
+    assert mineru_calls == ["mixed-page-2.png"]
+
+
+def test_low_confidence_image_routes_to_vision_with_blocking_issue(monkeypatch):
+    image_bytes = b"\x89PNG\r\n\x1a\nlow-resolution"
+    monkeypatch.setattr(settings, "mineru_enabled", True)
+    monkeypatch.setattr(
+        convert_service.mineru,
+        "parse_document",
+        lambda *_args, **_kwargs: MinerUParseResult(
+            markdown="无法辨认",
+            low_confidence_reasons=("insufficient_text_blocks", "no_table_or_key_labels"),
+        ),
+    )
+
+    result = convert_service.convert_image_to_parse_result(image_bytes, "low.png")
+
+    assert result.pages[0].parser == "vision"
+    assert result.pages[0].vision_image == image_bytes
+    assert result.review_issues() == [
+        {
+            "code": "mineru_low_confidence",
+            "field": "source.pages[0]",
+            "message": "MinerU 图片结果低置信，已转 vision，必须人工复核",
+            "source_values": ["insufficient_text_blocks", "no_table_or_key_labels"],
+            "blocking": True,
+        }
+    ]
+
+
+def test_high_confidence_image_keeps_original_as_visual_evidence(monkeypatch):
+    image_bytes = b"\x89PNG\r\n\x1a\noriginal"
+    monkeypatch.setattr(settings, "mineru_enabled", True)
+    monkeypatch.setattr(
+        convert_service.mineru,
+        "parse_document",
+        lambda *_args, **_kwargs: MinerUParseResult(
+            markdown="备注：出口清关的装完箱后请及时进港 作业资水！",
+            table_count=1,
+        ),
+    )
+
+    result = convert_service.convert_image_to_parse_result(image_bytes, "order.png")
+
+    assert result.pages[0].parser == "mineru"
+    assert result.pages[0].confidence == "high"
+    assert result.pages[0].markdown.endswith("作业资水！")
+    assert result.pages[0].vision_image == image_bytes
+    assert result.vision_images == [image_bytes]
+    assert result.parser_fallback is False
+
+
+def test_content_list_discards_image_stamp_and_logo_ocr():
+    content_list = [
+        {"type": "text", "text": "TO：上海运嘉货运代理有限公司"},
+        {"type": "image", "text": "上海秉晟国际物流有限公司 28GSHEN S"},
+        {"type": "stamp", "content": "上海秉晟国际物流有限公司"},
+        {"type": "table", "table_body": "| 主单号 | 1SHA044022 |"},
+    ]
+
+    markdown = _content_list_to_markdown(content_list)
+
+    assert markdown == "TO：上海运嘉货运代理有限公司\n\n| 主单号 | 1SHA044022 |"
+    assert "28GSHEN S" not in markdown
+    assert "秉晟" not in markdown
+
+
+def test_content_list_preserves_markdown_heading_levels():
+    content_list = [
+        {"type": "text", "text_level": 1, "text": "运输委托书"},
+        {"type": "title", "level": 2, "text": "箱信息"},
+        {"type": "text", "text_level": 0, "text": "40HQ X 1"},
+    ]
+
+    assert _content_list_to_markdown(content_list) == (
+        "# 运输委托书\n\n## 箱信息\n\n40HQ X 1"
+    )
+
+
+def test_markdown_fallback_removes_image_alt_text():
+    markdown = "正文\n\n![上海秉晟国际物流有限公司 28GSHEN S](images/stamp.jpg)\n\n结尾"
+
+    assert _strip_markdown_images(markdown) == "正文\n\n结尾"
+
+
+def test_mineru_request_profile_and_version_are_pinned(monkeypatch):
+    captured: dict = {}
+
+    class FakeResponse:
+        headers = {"content-type": "application/json", "x-mineru-version": "2.5.4"}
+        content = b"{}"
+        text = ""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"markdown": "# 固定解析结果"}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url, **kwargs):
+            captured["url"] = url
+            captured.update(kwargs)
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_endpoint", "/file_parse")
+    monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
+    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+
+    result = parse_pdf(b"pdf", "order.pdf")
+
+    assert result == "# 固定解析结果"
+    assert captured["data"] == MINERU_REQUEST_PROFILE
+    assert captured["files"] == {"files": ("order.pdf", b"pdf", "application/pdf")}
+
+
+def test_mineru_missing_version_header_is_accepted(monkeypatch, caplog):
+    class FakeResponse:
+        headers = {"content-type": "application/json"}
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"markdown": "# MinerU without version header"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
+    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+
+    assert parse_pdf(b"pdf", "order.pdf") == "# MinerU without version header"
+    assert "mineru_version_header_missing" in caplog.text
+
+
+def test_mineru_version_drift_is_a_contract_error(monkeypatch):
+    class FakeResponse:
+        headers = {"content-type": "application/json", "x-mineru-version": "2.6.0"}
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
+    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+
+    with pytest.raises(MinerUContractError, match="expected 2.5.4, got 2.6.0"):
+        parse_pdf(b"pdf", "order.pdf")
+
+
+def test_mineru_version_lock_cannot_be_empty(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_expected_version", "")
+
+    with pytest.raises(MinerUContractError, match="must be pinned"):
+        parse_pdf(b"pdf", "order.pdf")
+
+
+def test_pdf_prefers_mineru(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_enabled", True)
+    monkeypatch.setattr(settings, "mineru_fallback_enabled", True)
+    monkeypatch.setattr(
+        convert_service.mineru,
+        "parse_pdf",
+        lambda _file_bytes, _filename: "# MinerU Markdown",
+    )
+
+    converted = convert_service.convert_to_markdown(b"pdf", "order.pdf")
+
+    assert converted == "# MinerU Markdown"
+    assert converted.parser == "mineru"
+    assert converted.parser_fallback is False
+
+
+def test_pdf_falls_back_to_original_converter(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_enabled", True)
+    monkeypatch.setattr(settings, "mineru_fallback_enabled", True)
+
+    def fail_mineru(_file_bytes, _filename):
+        raise MinerUError("unavailable")
+
+    def fake_pdf_converter(_path):
+        print("# pdfplumber Markdown")
+
+    monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
+    monkeypatch.setitem(convert_service._DISPATCH, ".pdf", fake_pdf_converter)
+
+    converted = convert_service.convert_to_markdown(b"pdf", "order.pdf")
+
+    assert converted.strip() == "# pdfplumber Markdown"
+    assert converted.parser == "pdfplumber"
+    assert converted.parser_fallback is True
+
+
+def test_pdf_can_disable_fallback(monkeypatch):
+    monkeypatch.setattr(settings, "mineru_enabled", True)
+    monkeypatch.setattr(settings, "mineru_fallback_enabled", False)
+
+    def fail_mineru(_file_bytes, _filename):
+        raise MinerUError("unavailable")
+
+    monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
+
+    with pytest.raises(ConvertError, match="MinerU convert failed"):
+        convert_service.convert_to_markdown(b"pdf", "order.pdf")
+
+
+def test_mineru_markdown_is_sent_to_llm_in_full(monkeypatch):
+    import app.skills.tuoshu.skill as skill_module
+
+    markdown = "# 做箱通知书\n" + ("完整正文字段\n" * 2000) + "文档末尾唯一字段"
+    captured: dict = {}
+    monkeypatch.setattr(
+        skill_module,
+        "convert_to_markdown",
+        lambda _file_bytes, _filename: ConversionText(markdown, parser="mineru"),
+    )
+
+    def fake_chat_json(messages, **_kwargs):
+        captured["messages"] = messages
+        return {"source": {}}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+
+    skill_module.TuoshuSkill().run(file_bytes=b"pdf", filename="order.pdf")
+
+    user_message = captured["messages"][-1]["content"]
+    assert markdown in user_message
+    assert "文档末尾唯一字段" in user_message

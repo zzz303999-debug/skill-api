@@ -9,11 +9,10 @@ import base64
 import json
 from typing import Any
 
-from openai import OpenAI
-from openai import APIError, APITimeoutError, APIConnectionError
+from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 
 from app.config import settings
-from app.errors import LLMError
+from app.errors import LLMError, ParseError
 from app.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -65,11 +64,21 @@ def chat(
     try:
         resp = get_client().chat.completions.create(**kwargs)
     except (APITimeoutError, APIConnectionError) as e:
-        raise LLMError(f"LLM gateway network error: {e}", code="llm_network") from e
+        log.warning("llm_network_error", exc_info=True)
+        raise LLMError("LLM gateway network error", code="llm_network") from e
     except APIError as e:
-        raise LLMError(f"LLM gateway error: {e}", code="llm_upstream") from e
+        error_text = str(e).lower()
+        response_format_error = (
+            "response_format" in error_text
+            or "json_schema" in error_text
+            or "structured output" in error_text
+        )
+        code = "llm_response_format_unsupported" if response_format_error else "llm_upstream"
+        log.warning("llm_upstream_error", extra={"code": code}, exc_info=True)
+        raise LLMError("LLM gateway rejected the request", code=code) from e
     except Exception as e:
-        raise LLMError(f"LLM unexpected error: {e}") from e
+        log.exception("llm_unexpected_error")
+        raise LLMError("LLM request failed") from e
 
     try:
         content = resp.choices[0].message.content or ""
@@ -91,14 +100,54 @@ def chat_json(
     *,
     model: str | None = None,
     temperature: float = 0.0,
+    json_schema: dict | None = None,
 ) -> tuple[dict, dict]:
-    """要求模型输出 JSON 对象。返回 (parsed_dict, meta)。"""
-    content, meta = chat(
-        messages,
-        model=model,
-        temperature=temperature,
-        response_format={"type": "json_object"},
-    )
+    """要求模型输出 JSON 对象。返回 (parsed_dict, meta)。
+
+    当提供 json_schema 时，使用 structured output 模式
+    （json_schema），强制模型按指定字段名和类型输出。
+    网关不支持时自动降级为 json_object。
+    """
+    response_format: dict = {"type": "json_object"}
+    if json_schema:
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "response",
+                "strict": False,
+                "schema": json_schema,
+            },
+        }
+    try:
+        content, meta = chat(
+            messages,
+            model=model,
+            temperature=temperature,
+            response_format=response_format,
+        )
+    except LLMError as e:
+        if not json_schema or e.code != "llm_response_format_unsupported":
+            raise
+        log.warning("llm_json_schema_fallback", extra={"model": model})
+        schema_instruction = {
+            "role": "system",
+            "content": (
+                "网关不支持 structured output。仍须严格按以下 JSON Schema 输出对象：\n"
+                + json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))
+            ),
+        }
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        fallback_messages = [
+            *messages[:insert_at],
+            schema_instruction,
+            *messages[insert_at:],
+        ]
+        content, meta = chat(
+            fallback_messages,
+            model=model,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+        )
     try:
         data = json.loads(content)
     except json.JSONDecodeError:
@@ -117,7 +166,11 @@ def chat_json(
                     except json.JSONDecodeError:
                         continue
             else:
-                raise LLMError("LLM did not return valid JSON", details={"raw": content[:500]})
+                log.warning("llm_invalid_json", extra={"content_length": len(content)})
+                raise ParseError("LLM did not return valid JSON")
         else:
-            raise LLMError("LLM did not return valid JSON", details={"raw": content[:500]})
+            log.warning("llm_invalid_json", extra={"content_length": len(content)})
+            raise ParseError("LLM did not return valid JSON") from None
+    if not isinstance(data, dict):
+        raise ParseError("LLM output must be a JSON object")
     return data, meta

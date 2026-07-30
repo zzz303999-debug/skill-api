@@ -9,5 +9,6 @@ storage/
 dist/
 build/
 .DS_Store
+._*
 .idea/
 .vscode/

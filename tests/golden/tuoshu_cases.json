@@ -1,0 +1,66 @@
+[
+  {
+    "name": "wxhyc_22010107",
+    "document": "tests/golden/tuoshu/documents/1-2 运输委托书 22010107 博特+时花内装+博特2X40.docx",
+    "document_sha256": "421ad0f39ebc548cb805c8980ce92b80fedaecc31eae18d1b23040722ab18ebc",
+    "parsed": "tests/golden/tuoshu/parsed/wxhyc-22010107.md",
+    "parsed_sha256": "7e1954ea19e0466fc5c9949f9810b4324a0e2ebcf4e4575fcb4b68288f5a0411",
+    "parser_mode": "local",
+    "human_verified": true,
+    "expected_route": {
+      "parser": "local",
+      "template_hint": "wxhyc_transport_para",
+      "deterministic_mapper": false
+    },
+    "expected": "tests/golden/tuoshu/expected/wxhyc-22010107.json",
+    "expected_sha256": "6db70a7b06a99529a4fd26a44024984220a29d02f41bbfc5b6225bc7121ddf72"
+  },
+  {
+    "name": "kflse220216031",
+    "document": "tests/golden/tuoshu/documents/2-17 KFLSE220216031托书.pdf",
+    "document_sha256": "58c387861389d5111404c17e05d4b1f5ea34da6b56e0d9a7836ec3f085650927",
+    "parsed": "tests/golden/tuoshu/parsed/kflse220216031.md",
+    "parsed_sha256": "c7ce34253233c7707ac28440d3870d0f288e29a5d561feeedbff3163188ba9a3",
+    "parser_mode": "local",
+    "human_verified": true,
+    "expected_route": {
+      "parser": "pdfplumber",
+      "template_hint": null,
+      "deterministic_mapper": false
+    },
+    "expected": "tests/golden/tuoshu/expected/kflse220216031.json",
+    "expected_sha256": "91c08e7d3f8e56ae70d2337f62d4185337b8126c616a0ce352d3d4b9bbcaaa58"
+  },
+  {
+    "name": "bsse2105280058",
+    "document": "tests/golden/tuoshu/documents/1SHA044022运输委托书2021-05-28.pdf",
+    "document_sha256": "7fc48703620c7e1b1333750d2c75085f3da133870bdcb2f9a6f21d758c6f642c",
+    "parsed": "tests/golden/tuoshu/parsed/bsse2105280058-mineru.md",
+    "parsed_sha256": "6eb9a9e79d00ab5a571cd28f843c9412a9a784742f7e601a22332db4f983fa94",
+    "parser_mode": "mineru",
+    "human_verified": true,
+    "expected_route": {
+      "parser": "pdfplumber",
+      "template_hint": "bingsheng_transport",
+      "deterministic_mapper": true
+    },
+    "expected": "app/skills/tuoshu/references/examples/bingsheng_transport.json",
+    "expected_sha256": "71f43022819ef467f3657e17dbc44d4a19f82c4d0d5196240f85b3f9e7372384"
+  },
+  {
+    "name": "weishi_A26042709390557851",
+    "document": "tests/golden/tuoshu/documents/A26042709390557851.jpg",
+    "document_sha256": "1490149e01c7fdf54751c69f4278426f15bfa8e2f0c916dbfd1fc868edbcd589",
+    "parsed": "tests/golden/tuoshu/parsed/A26042709390557851-mineru.md",
+    "parsed_sha256": "e08be581426dac80a0c86de28f4f38bcb4c7351852114cef109b2e9ac38b2e57",
+    "parser_mode": "mineru_image",
+    "human_verified": true,
+    "expected_route": {
+      "parser": "mineru",
+      "template_hint": null,
+      "deterministic_mapper": false
+    },
+    "expected": "tests/golden/tuoshu/expected/A26042709390557851.json",
+    "expected_sha256": "09f61a49aa7bbbfbfb65d0db68f7563863629ac0c6a0cf3cb79191f50fb8577a"
+  }
+]

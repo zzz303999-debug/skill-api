@@ -36,7 +36,14 @@ packages = ["app"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["**/._*"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501"]
+
+[tool.pytest.ini_options]
+markers = [
+    "golden: calls the configured LLM gateway against all pinned golden cases",
+    "mineru_golden: calls MinerU and diffs its raw parsed output",
+]

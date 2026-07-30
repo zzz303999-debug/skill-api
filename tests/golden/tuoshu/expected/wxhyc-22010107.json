@@ -1,0 +1,91 @@
+{
+  "doc_type": "TRANSPORT_ORDER",
+  "internal_ref": "WXHYC22010107",
+  "customs_declaration_no": null,
+  "customer_ref": null,
+  "mbl_no": "HLCUSHA2111JWDA1",
+  "hbl_no": null,
+  "vessel": "HYUNDAI HOPE",
+  "voyage": "046E",
+  "carrier": "HLC",
+  "pol": null,
+  "pod": "SAVANNAH",
+  "transit_port": "见设备交接单",
+  "terminal": null,
+  "etd": null,
+  "si_cutoff": null,
+  "customs_cutoff": null,
+  "loading_time": "2022-01-02",
+  "containers": [
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 809,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 3300.9,
+      "volume_cbm": 33.277,
+      "po_no": "D0483/0908",
+      "mbl_no": "HLCUSHA2111JWDA1",
+      "remark": "博特装柜"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 927,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 3337.5,
+      "volume_cbm": 31.679,
+      "po_no": null,
+      "mbl_no": "HLCUSHA2111JWDA1A",
+      "remark": "进仓编号HLCUSHA2111JWDA1A；合本内装"
+    },
+    {
+      "type": "40HC",
+      "qty": 1,
+      "container_no": null,
+      "seal_no": null,
+      "packages": 2150,
+      "packages_unit": "CTNS",
+      "gross_weight_kg": 5375.0,
+      "volume_cbm": 64.518,
+      "po_no": null,
+      "mbl_no": "HLCUSHA2111JWDA1B",
+      "remark": "博特装柜；另有记录 2149CTNS, 5372.5KGS, 64.487CBM，待人工确认"
+    }
+  ],
+  "factory": {
+    "name": null,
+    "address": "无锡市惠山区玉祁配套区祁北路127号",
+    "contact": "杨小姐 / 李部长",
+    "phone": "15906178209 / 13400018802"
+  },
+  "shipper_company": null,
+  "shipper_agent": null,
+  "recipient": "上海捷阳国际货物运输代理有限公司",
+  "doc_date": null,
+  "sender": null,
+  "sender_contact": "范颖晰",
+  "remark": "RMB2500*2+300；请于1月2日上午9点提供箱封号，谢谢！",
+  "order_mapping": {},
+  "review_issues": [
+    {
+      "code": "conflicting_container_data",
+      "field": "containers[2]",
+      "message": "同一柜存在多组件数、毛重或体积，需人工裁决",
+      "source_values": ["博特装柜；另有记录 2149CTNS, 5372.5KGS, 64.487CBM，待人工确认"],
+      "blocking": true
+    }
+  ],
+  "ready_for_order": false,
+  "source": {
+    "file": "1-2 运输委托书 22010107 博特+时花内装+博特2X40.docx",
+    "doc_format": "docx",
+    "template_hint": "wxhyc_transport_para",
+    "extracted_at": null
+  },
+  "raw_text_snippet": null
+}

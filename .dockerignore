@@ -13,3 +13,4 @@ tests/
 dist/
 build/
 .DS_Store
+._*

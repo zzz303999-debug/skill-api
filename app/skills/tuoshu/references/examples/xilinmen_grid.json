@@ -1,6 +1,7 @@
 {
   "doc_type": "PACKING_NOTICE",
-  "booking_no": "CNRX025055",
+  "internal_ref": null,
+  "customs_declaration_no": "CNRX025055",
   "customer_ref": "PO 881",
   "mbl_no": "CNRX025055",
   "hbl_no": null,
@@ -21,7 +22,7 @@
 
   "containers": [
     {
-      "type": "40HC",
+      "type": "40HQ",
       "qty": 4,
       "container_no": null,
       "seal_no": null,

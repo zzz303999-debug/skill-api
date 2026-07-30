@@ -1,6 +1,7 @@
 {
   "doc_type": "BOOKING_NOTE",
-  "booking_no": null,
+  "internal_ref": null,
+  "customs_declaration_no": null,
   "customer_ref": null,
   "mbl_no": "177MSHSHS40521",
   "hbl_no": null,
@@ -11,7 +12,7 @@
 
   "pol": null,
   "pod": "TRIESTE",
-  "transit_port": null,
+  "transit_port": "ITTRS",
   "terminal": null,
 
   "etd": null,
@@ -44,7 +45,17 @@
 
   "shipper_agent": null,
 
-  "remark": "2-12截单 不开港就预提，开港就做箱  代理放箱；倍联业务编号：待定（无有效值）；客户名称：特格威（备注在账单上）；报关员联系电话：李四 13800000002；中转港代码原文出现两次（ITTRS 与 见设备单），按'见设'规则取 null",
+  "remark": "2-12截单 不开港就预提，开港就做箱  代理放箱；倍联业务编号：待定（无有效值）；客户名称：特格威（备注在账单上）；报关员联系电话：李四 13800000002；中转港代码原文出现两次（ITTRS 与 见设备单），保留具体值 ITTRS 并交人工复核",
+
+  "review_issues": [
+    {
+      "code": "conflicting_transit_port",
+      "field": "transit_port",
+      "message": "中转港同时出现具体代码和待查描述，需人工确认",
+      "source_values": ["ITTRS", "见设备单"],
+      "blocking": true
+    }
+  ],
 
   "source": {
     "file": "2-12  托书 特格威 177MSHSHS40521.docx",

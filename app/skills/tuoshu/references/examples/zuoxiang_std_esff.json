@@ -1,6 +1,7 @@
 {
   "doc_type": "PACKING_NOTICE",
-  "booking_no": "ESFF21030474",
+  "internal_ref": "ESFF21030474",
+  "customs_declaration_no": null,
   "customer_ref": "8650135793",
   "mbl_no": "ONEYSH1AC9779502",
   "hbl_no": null,
@@ -11,7 +12,7 @@
 
   "pol": null,
   "pod": "SANTOS",
-  "transit_port": null,
+  "transit_port": "见设",
   "terminal": "洋一",
 
   "etd": "2021-03-23",
