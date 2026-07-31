@@ -41,6 +41,7 @@
 | si_cutoff | 截 SI / 截单时间 | 截单时间 |
 | customs_cutoff | 截关 / 截报关 | 截关时间 |
 | loading_time | 做箱/装箱时间 | 做箱/装箱时间 |
+| customer | 客户名称或简称（优先 FM，缺失时取客户栏或正文抬头） | 客户 |
 | shipper_company | 托运人公司 | 托运人公司 |
 | shipper_agent | 我方公司/发件方 | 委托公司 |
 | recipient | 收件方（TO 字段） | 收件方 |

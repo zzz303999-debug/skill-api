@@ -4,10 +4,10 @@ install:
 	uv venv --python 3.11 && uv pip install -e ".[dev]"
 
 dev:
-	uv run uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
+	uv run uvicorn app.main:app --host 0.0.0.0 --port 9000 --reload
 
 run:
-	uv run uvicorn app.main:app --host 0.0.0.0 --port 8080
+	uv run uvicorn app.main:app --host 0.0.0.0 --port 9000
 
 docker-build:
 	docker build -t skill-api:latest .

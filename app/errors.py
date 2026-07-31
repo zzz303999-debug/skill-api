@@ -22,11 +22,6 @@ class BadRequestError(SkillAPIError):
     code = "bad_request"
 
 
-class UnauthorizedError(SkillAPIError):
-    http_status = 401
-    code = "unauthorized"
-
-
 class SkillNotFoundError(SkillAPIError):
     http_status = 404
     code = "skill_not_found"

@@ -131,6 +131,44 @@ def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
     assert mineru_calls == ["mixed-page-2.png"]
 
 
+def test_pdf_page_routing_rejects_too_many_vision_pages(monkeypatch):
+    import pdfplumber
+
+    class FakePage:
+        def extract_text(self):
+            return ""
+
+        def extract_tables(self):
+            return []
+
+        def extract_words(self):
+            return []
+
+    class FakePdf:
+        pages = [FakePage(), FakePage(), FakePage()]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(settings, "vision_max_pdf_pages", 2)
+    monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
+    monkeypatch.setattr(convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png")
+    monkeypatch.setattr(
+        convert_service.mineru,
+        "parse_document",
+        lambda *_args, **_kwargs: MinerUParseResult(
+            markdown="无法辨认",
+            low_confidence_reasons=("insufficient_text_blocks",),
+        ),
+    )
+
+    with pytest.raises(ConvertError) as exc_info:
+        convert_service._convert_pdf_with_page_routing(b"pdf", "scan.pdf")
+
+    assert exc_info.value.code == "pdf_page_limit_exceeded"
+    assert exc_info.value.details == {"vision_page_count": 3, "max_pages": 2}
+
+
 def test_low_confidence_image_routes_to_vision_with_blocking_issue(monkeypatch):
     image_bytes = b"\x89PNG\r\n\x1a\nlow-resolution"
     monkeypatch.setattr(settings, "mineru_enabled", True)
@@ -332,7 +370,7 @@ def test_pdf_prefers_mineru(monkeypatch):
         lambda _file_bytes, _filename: "# MinerU Markdown",
     )
 
-    converted = convert_service.convert_to_markdown(b"pdf", "order.pdf")
+    converted = convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
 
     assert converted == "# MinerU Markdown"
     assert converted.parser == "mineru"
@@ -352,7 +390,7 @@ def test_pdf_falls_back_to_original_converter(monkeypatch):
     monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
     monkeypatch.setitem(convert_service._DISPATCH, ".pdf", fake_pdf_converter)
 
-    converted = convert_service.convert_to_markdown(b"pdf", "order.pdf")
+    converted = convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
 
     assert converted.strip() == "# pdfplumber Markdown"
     assert converted.parser == "pdfplumber"
@@ -369,7 +407,19 @@ def test_pdf_can_disable_fallback(monkeypatch):
     monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
 
     with pytest.raises(ConvertError, match="MinerU convert failed"):
-        convert_service.convert_to_markdown(b"pdf", "order.pdf")
+        convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
+
+
+def test_image_without_mineru_is_marked_for_review(monkeypatch):
+    image_bytes = b"\x89PNG\r\n\x1a\nimage"
+    monkeypatch.setattr(settings, "mineru_enabled", False)
+
+    result = convert_service.convert_image_to_parse_result(image_bytes, "order.png")
+
+    assert result.pages[0].confidence == "low"
+    assert result.parser_fallback is True
+    assert result.review_issues()[0]["code"] == "vision_only_unverified"
+    assert result.review_issues()[0]["blocking"] is True
 
 
 def test_mineru_markdown_is_sent_to_llm_in_full(monkeypatch):

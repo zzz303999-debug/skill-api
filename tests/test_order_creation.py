@@ -26,7 +26,6 @@ SAMPLE_TEXT = (
 
 
 def _configure(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
     monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
     monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
@@ -90,7 +89,6 @@ def test_create_from_text_extracts_then_publishes(monkeypatch):
     response = client.post(
         "/orders",
         json={"content": SAMPLE_TEXT, "roomId": "ewewdsdw121"},
-        headers={"X-API-Key": "test-key"},
     )
 
     assert response.status_code == 200
@@ -109,7 +107,6 @@ def test_create_from_text_requires_content_and_room_id(monkeypatch):
     response = client.post(
         "/orders",
         json={"text": SAMPLE_TEXT},
-        headers={"X-API-Key": "test-key"},
     )
 
     assert response.status_code == 422

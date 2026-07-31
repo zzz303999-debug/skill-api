@@ -5,13 +5,42 @@ services:
     container_name: skill-api
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "9000:9000"
     env_file:
       - .env
+    depends_on:
+      mineru:
+        condition: service_healthy
     volumes:
       - ./storage:/app/storage
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  mineru:
+    # MinerU is intentionally a separate container because its model/runtime
+    # is much larger than the API service and may require a GPU-enabled image.
+    build:
+      context: .
+      dockerfile: mineru/Dockerfile
+      args:
+        MINERU_VERSION: ${MINERU_VERSION:-2.5.4}
+        MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+    image: ${MINERU_IMAGE:-skill-api-mineru:2.5.4}
+    container_name: mineru
+    restart: unless-stopped
+    command: ${MINERU_COMMAND:-mineru-api --host 0.0.0.0 --port 8888}
+    shm_size: ${MINERU_SHM_SIZE:-8g}
+    environment:
+      MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+    expose:
+      - "8888"
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/docs', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s

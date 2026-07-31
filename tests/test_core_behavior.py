@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from app.config import settings
 from app.core import registry
 from app.errors import LLMError, ParseError
-from app.llm.openclaw import chat_json
+from app.llm.client import chat_json
 from app.main import app
 from app.skills.tuoshu.chinese_schema import to_chinese
 from app.skills.tuoshu.normalizer import normalize_llm_output
@@ -64,6 +64,17 @@ def test_incident_prompt_uses_fragmented_date_few_shot_with_positive_mapping():
     assert "| `TO`/`致`/非空`ATTN` | `recipient` |" in system
     assert "| `FROM`/`FM` 联系人 | `sender_contact` |" in system
     assert "carrier_by_vessel" in system
+
+
+def test_prompt_contains_compact_order_field_rules():
+    system = build_system_prompt()
+
+    assert "提单号必须至少 8 位" in system
+    assert "箱长 `20`/`25`/`40`" in system
+    assert "优先逐字取 `FM` 后的值" in system
+    assert "详细街道地址" in system
+    assert "毛重单位 `KGS`" in system
+    assert "体积单位 `CBM`" in system
 
 
 def test_prompt_route_treats_door_loading_notice_as_trucking():
@@ -127,7 +138,6 @@ def test_chat_text_contains_every_container():
 
 def test_batch_extract_calls_keyword_only_skill(monkeypatch):
     skill = registry.get("tuoshu")
-    monkeypatch.setattr(settings, "api_key", "test-key")
 
     def fake_run(*, file_bytes: bytes, filename: str, options=None):
         return {
@@ -142,7 +152,6 @@ def test_batch_extract_calls_keyword_only_skill(monkeypatch):
             ("files", ("a.xlsx", b"a", "application/octet-stream")),
             ("files", ("b.xlsx", b"bb", "application/octet-stream")),
         ],
-        headers={"X-API-Key": "test-key"},
     )
 
     assert response.status_code == 200
@@ -173,12 +182,33 @@ def test_scanned_pdf_is_sent_as_vision_pages(monkeypatch):
 
     monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
 
-    TuoshuSkill().run(file_bytes=b"fake-pdf", filename="scan.pdf")
+    response = TuoshuSkill().run(file_bytes=b"fake-pdf", filename="scan.pdf")
 
     user_content = captured["messages"][-1]["content"]
     images = [item for item in user_content if item["type"] == "image_url"]
     assert len(images) == 2
     assert all(item["image_url"]["url"].startswith("data:image/png;base64,") for item in images)
+    assert response["content"] == ""
+    assert response["meta"]["conversion_status"] == "needs_review"
+    assert response["meta"]["page_routes"] == [
+        {
+            "page": 1,
+            "parser": "vision",
+            "confidence": "low",
+            "issues": ["vision_only_unverified"],
+        },
+        {
+            "page": 2,
+            "parser": "vision",
+            "confidence": "low",
+            "issues": ["vision_only_unverified"],
+        },
+    ]
+    assert any(
+        issue["code"] == "vision_only_unverified" and issue["blocking"]
+        for issue in response["result"]["review_issues"]
+    )
+    assert response["result"]["ready_for_order"] is False
 
 
 def test_incomplete_review_issue_is_repaired_once(monkeypatch):
@@ -343,17 +373,25 @@ def test_high_confidence_mineru_image_is_cross_checked_against_original(monkeypa
 
 
 def test_upload_limit(monkeypatch):
-    monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(settings, "api_max_upload_bytes", 3)
 
     response = client.post(
         "/skills/tuoshu/extract",
         files={"file": ("a.xlsx", b"four", "application/octet-stream")},
-        headers={"X-API-Key": "test-key"},
     )
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "file_too_large"
+
+
+def test_empty_upload_is_rejected_before_conversion():
+    response = client.post(
+        "/skills/tuoshu/extract",
+        files={"file": ("empty.pdf", b"", "application/pdf")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "empty_file"
 
 
 def test_json_schema_falls_back_to_json_object(monkeypatch):
@@ -368,7 +406,7 @@ def test_json_schema_falls_back_to_json_object(monkeypatch):
             )
         return '{"ok": true}', {"model": "fake", "usage": None}
 
-    monkeypatch.setattr("app.llm.openclaw.chat", fake_chat)
+    monkeypatch.setattr("app.llm.client.chat", fake_chat)
     data, _meta = chat_json([], json_schema={"type": "object"})
 
     assert data == {"ok": True}
@@ -382,7 +420,7 @@ def test_json_schema_falls_back_to_json_object(monkeypatch):
 
 def test_chat_json_rejects_non_object(monkeypatch):
     monkeypatch.setattr(
-        "app.llm.openclaw.chat",
+        "app.llm.client.chat",
         lambda _messages, **_kwargs: ("[]", {"model": "fake", "usage": None}),
     )
 
@@ -656,6 +694,38 @@ def test_child_bill_aliases_never_fall_back_to_master_bill():
     assert result["ready_for_order"] is False
 
 
+@pytest.mark.parametrize("bill_no", ["12345678", "ABC12345", "HLCUSHA2111JWDA1"])
+def test_valid_bill_number_formats_are_preserved(bill_no):
+    result = finalize_extraction(
+        {
+            "mbl_no": bill_no,
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=f"提单号：{bill_no}\n托运人：某托运人公司",
+    )
+
+    assert result["mbl_no"] == bill_no
+    assert not any(issue["code"] == "invalid_mbl_no" for issue in result["review_issues"])
+
+
+@pytest.mark.parametrize("bill_no", ["1234567", "ABC-12345", "提单12345678"])
+def test_invalid_bill_number_formats_are_cleared(bill_no):
+    result = finalize_extraction(
+        {
+            "mbl_no": bill_no,
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=f"提单号：{bill_no}\n托运人：某托运人公司",
+    )
+
+    assert result["mbl_no"] is None
+    issue = next(issue for issue in result["review_issues"] if issue["code"] == "invalid_mbl_no")
+    assert issue["field"] == "mbl_no"
+    assert issue["blocking"] is True
+
+
 def test_explicit_master_and_child_bills_are_both_preserved():
     result = finalize_extraction(
         {
@@ -789,6 +859,129 @@ def test_explicit_body_shipper_is_the_only_c_title_source():
         for issue in result["review_issues"]
     )
     assert result["ready_for_order"] is False
+
+
+def test_bingsheng_header_company_is_used_for_c_title():
+    source_text = """# 运输委托书
+上海秉晟国际物流有限公司
+| 订单编号： | BSSE2108100016 | 日期： | 2021.8.10 |
+| TO： | 上海运嘉货运代理有限公司 | 海运出口 | |
+| 主单号 | 船名 | 航次 |
+| 1KT251889 | MAERSK HAMBURG | 131W |
+"""
+    result = finalize_extraction(
+        {
+            "shipper_company": None,
+            "shipper_agent": "上海秉晟国际物流有限公司",
+            "factory": {"name": "太仓门点"},
+        },
+        source_text=source_text,
+        template_hint="bingsheng_transport",
+    )
+
+    assert result["shipper_company"] == "上海秉晟国际物流有限公司"
+    assert result["shipper_agent"] == "上海秉晟国际物流有限公司"
+    assert result["order_mapping"]["c_title"] == "上海秉晟国际物流有限公司"
+    assert not any(
+        issue["code"] == "missing_shipper_company"
+        for issue in result["review_issues"]
+    )
+
+
+def test_bolian_segway_header_company_is_used_for_c_title():
+    source_text = """# 1-10号赛格威海出 托书7X40HC CNCT538619.docx
+_p1_ 江苏倍联现代物流有限公司
+_p2_ 常州赛格威做箱通知
+_p4_ TO：俊泰
+_p5_ DATE: 2022年1月5日
+_p8_ 做箱时间：开港装
+_p20_ 报关员电话：刘浩 18932397170
+_p21_ FROM:江苏倍联 陈俐玲
+"""
+    result = finalize_extraction(
+        {
+            "shipper_company": None,
+            "shipper_agent": "江苏倍联现代物流有限公司",
+            "factory": {"name": "江苏倍联现代物流有限公司"},
+            "remark": "做箱时间：开港装；加拼：；停靠港区：；报关员电话：刘浩 18932397170",
+            "review_issues": [
+                {
+                    "code": "missing_shipper_company",
+                    "field": "shipper_company",
+                    "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
+                    "source_values": ["江苏倍联现代物流有限公司", "常州赛格威做箱通知"],
+                    "blocking": True,
+                }
+            ],
+        },
+        source_text=source_text,
+        template_hint="bolian_segway",
+    )
+
+    assert result["shipper_company"] == "江苏倍联现代物流有限公司"
+    assert result["shipper_agent"] == "江苏倍联现代物流有限公司"
+    assert result["factory"]["name"] == "常州赛格威"
+    assert result["order_mapping"]["c_title"] == "江苏倍联现代物流有限公司"
+    assert result["order_mapping"]["factory_name"] == "常州赛格威"
+    assert result["remark"] == "做箱时间：开港装；报关员电话：刘浩 18932397170"
+    assert not any(
+        issue["code"] == "missing_shipper_company"
+        for issue in result["review_issues"]
+    )
+
+
+def test_zuoxiang_std_template_maps_factory_and_reads_transit_column():
+    source_text = """# 1-20 东华 派车托书.xlsx
+| _row/col_ | A | B | C | D | E | F | G | H | I | J | K | L |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 3 | 做箱工厂 | 东华工贸 | | | | | | | | | | |
+| 6 | 我司业务编号 | 客户编号 | 提单号 | 船名航次 | 目的港 | 中转港 | 港区 | 船期 | 件数 | 毛重 | 体积 | 箱型箱量 |
+| 7 | ESFF22010398 | DH- | ONEYSH1FD3312900 | HMM DUBLIN / 006W | Hamburg | 见设 | 洋山 | 2022-01-26 | | | | 1*40HQ |
+"""
+    result = finalize_extraction(
+        {
+            "factory": {"name": "东华工贸"},
+            "shipper_company": None,
+            "transit_port": "港区",
+            "containers": [
+                {"type": "40HQ", "qty": 1, "packages": None, "volume_cbm": None}
+            ],
+            "review_issues": [
+                {
+                    "code": "missing_shipper_company",
+                    "field": "shipper_company",
+                    "message": "模型认为托运人缺失",
+                    "source_values": [],
+                    "blocking": True,
+                },
+                {
+                    "code": "missing_container_measurements",
+                    "field": "containers",
+                    "message": "模型生成的柜量缺失提示",
+                    "source_values": ["件数为空", "体积为空", "1*40HQ"],
+                    "blocking": True,
+                },
+            ],
+        },
+        source_text=source_text,
+        template_hint="zuoxiang_std_esff",
+    )
+
+    assert result["shipper_company"] == "东华工贸"
+    assert result["order_mapping"]["c_title"] == "东华工贸"
+    assert result["factory"]["name"] == "东华工贸"
+    assert result["transit_port"] == "见设"
+    assert not any(
+        issue["code"] in {"missing_shipper_company", "conflicting_transit_port"}
+        for issue in result["review_issues"]
+    )
+    measurement_issues = [
+        issue
+        for issue in result["review_issues"]
+        if issue["code"] == "missing_container_measurements"
+    ]
+    assert len(measurement_issues) == 1
+    assert measurement_issues[0]["field"] == "containers[0]"
 
 
 def test_container_number_format_and_verbatim_rules_are_blocking():
@@ -930,9 +1123,10 @@ def test_review_issues_are_single_source_for_missing_measurements_and_renderer()
     } == {
         "missing_shipper_company",
         "missing_container_measurements",
+        "missing_customer",
     }
     assert result["carrier"] == "OOCL"
-    assert len(result["review_issues"]) == 2
+    assert len(result["review_issues"]) == 3
 
     rendered = format_to_chat_text(
         {
@@ -977,6 +1171,28 @@ def test_review_issues_are_deduplicated_by_code_before_output():
     assert codes.count("missing_container_measurements") == 1
     assert codes.count("carrier_by_mbl") == 1
     assert all(code != "unstructured_review_issue" for code in codes)
+
+
+def test_review_issue_code_is_unique_across_multiple_affected_fields():
+    result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+            "containers": [
+                {"type": "40HC", "packages": None, "volume_cbm": None},
+                {"type": "20GP", "packages": None, "volume_cbm": None},
+            ],
+        },
+        source_text="件数： CTNS 体积： CBM",
+    )
+
+    matching = [
+        issue
+        for issue in result["review_issues"]
+        if issue["code"] == "missing_container_measurements"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["field"] == "containers"
 
 
 @pytest.mark.parametrize(
@@ -1211,14 +1427,125 @@ def test_footer_contact_cannot_be_used_as_sender_contact():
     assert issue["blocking"] is True
 
 
-def test_unknown_container_type_is_preserved_with_non_blocking_review():
+def test_customer_prefers_fm_value_and_falls_back_to_header_company():
+    fm_result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=(
+            "上海凯福国际物流有限公司\nFM：海丰\n托运人：某托运人公司"
+        ),
+    )
+    header_result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text="上海凯福国际物流有限公司\n托运人：某托运人公司",
+    )
+    labeled_result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text="客户名称：特格威\n托运人：某托运人公司",
+    )
+    notice_heading_result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=(
+            "_p2_ 海丰装箱通知\n_p5_ 提单号 : 8890207520\n"
+            "_p7_ 箱型： 2*40HQ\n_p14_ 浙江省嘉兴市嘉善县姚庄镇利群路269号"
+        ),
+    )
+
+    assert fm_result["customer"] == "海丰"
+    assert header_result["customer"] == "上海凯福国际物流有限公司"
+    assert labeled_result["customer"] == "特格威"
+    assert notice_heading_result["customer"] == "海丰"
+    assert not any(
+        issue["code"] == "missing_customer"
+        for issue in notice_heading_result["review_issues"]
+    )
+    assert not any(issue["code"] == "missing_customer" for issue in fm_result["review_issues"])
+    assert (
+        to_chinese(
+            TuoshuOutput.model_validate(
+                {
+                    **fm_result,
+                    "source": {"file": "test.docx", "doc_format": "docx"},
+                }
+            )
+        )["客户"]
+        == "海丰"
+    )
+
+
+def test_missing_customer_has_blocking_explanation():
     result = finalize_extraction(
         {
             "shipper_company": "某托运人公司",
             "factory": {"name": "某门点"},
+        },
+        source_text="托运人：某托运人公司",
+    )
+
+    assert result["customer"] is None
+    issue = next(issue for issue in result["review_issues"] if issue["code"] == "missing_customer")
+    assert issue == {
+        "code": "missing_customer",
+        "field": "customer",
+        "message": "缺少客户，未从 FM、客户栏或正文抬头提取到有效值，需人工确认",
+        "source_values": [],
+        "blocking": True,
+    }
+    assert result["ready_for_order"] is False
+
+
+def test_four_character_container_type_and_measurement_precision_rules():
+    result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+            "containers": [
+                {
+                    "type": "25PL",
+                    "packages": 10,
+                    "packages_unit": "CTNS",
+                    "gross_weight_kg": 123.45678,
+                    "volume_cbm": 9.87654,
+                }
+            ],
+        },
+        source_text=(
+            "托运人：某托运人公司\n箱型：25PL\n"
+            "件数：10 CTNS\n毛重：123.45678 KGS\n体积：9.87654 CBM"
+        ),
+    )
+
+    container = result["containers"][0]
+    assert container["type"] == "25PL"
+    assert container["packages"] == 10
+    assert container["gross_weight_kg"] == 123.457
+    assert container["volume_cbm"] == 9.877
+    assert not any(issue["code"] == "unknown_container_type" for issue in result["review_issues"])
+
+
+def test_unknown_container_type_is_preserved_with_non_blocking_review():
+    result = finalize_extraction(
+        {
+            "customer": "测试客户",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
             "containers": [{"type": "40NOR", "packages": 10, "volume_cbm": 20}],
         },
-        source_text="托运人：某托运人公司\n箱型：40NOR\n件数：10\n体积：20",
+        source_text=(
+            "客户：测试客户\n托运人：某托运人公司\n"
+            "箱型：40NOR\n件数：10\n体积：20"
+        ),
     )
 
     assert result["containers"][0]["type"] == "40NOR"
@@ -1334,7 +1661,6 @@ def test_display_renderers_label_carrier_as_raw_shipping_company_value():
 def test_extract_response_has_no_independent_summary(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 
-    monkeypatch.setattr(settings, "api_key", "test-key")
     monkeypatch.setattr(
         skill_module,
         "convert_to_markdown",
@@ -1368,14 +1694,19 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
     response = client.post(
         "/skills/tuoshu/extract",
         files={"file": ("order.docx", b"fake-docx", "application/octet-stream")},
-        headers={"X-API-Key": "test-key"},
     )
 
     assert response.status_code == 200
     body = response.json()
     data = body["data"]
     assert body["content"] == "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
-    assert body["meta"] == {"model": "fake", "usage": None}
+    assert body["meta"]["model"] == "fake"
+    assert body["meta"]["usage"] is None
+    assert body["meta"]["conversion_status"] == "converted"
+    assert body["meta"]["source_bytes"] == len(b"fake-docx")
+    assert body["meta"]["content_chars"] == len(body["content"])
+    assert len(body["meta"]["source_sha256"]) == 64
+    assert len(body["meta"]["content_sha256"]) == 64
     assert "carrier" in data and "承运人" not in data
     assert data["carrier"] == "HMM"
     assert data["factory"]["name"] == "某门点"

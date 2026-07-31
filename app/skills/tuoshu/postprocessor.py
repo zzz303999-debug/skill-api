@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any
 
 from .normalizer import (
+    STANDARD_CONTAINER_SUFFIXES,
     is_known_container_type,
     normalize_container_type,
     normalize_date_value,
@@ -44,6 +45,7 @@ _ALWAYS_BLOCKING_CODES = {
     "conflicting_transit_port",
     "missing_factory_name",
     "missing_shipper_company",
+    "missing_customer",
     "hbl_misclassified_as_mbl",
     "hbl_no_not_verbatim",
     "person_name_not_verbatim",
@@ -58,6 +60,8 @@ _ALWAYS_BLOCKING_CODES = {
     "carrier_by_vessel",
     "carrier_source_unverified",
     "invalid_date_format",
+    "invalid_mbl_no",
+    "invalid_hbl_no",
 }
 _GROUNDING_WRAPPERS = ("另有记录", "主值", "待人工确认")
 _CONFIRMED_OCR_ARTIFACT_PATTERNS = (
@@ -67,6 +71,7 @@ _CONTAINER_NO_RE = re.compile(r"^[A-Z]{4}\d{7}$")
 _SEAL_NO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9./-]{3,19}$")
 _DATE_ONLY_RE = re.compile(DATE_PATTERN)
 _DATE_OR_DATETIME_RE = re.compile(DATE_OR_DATETIME_PATTERN)
+_BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
 _MARKDOWN_PARAGRAPH_PREFIX_RE = re.compile(
     r"^_(?:p|l)\d+(?:: \(empty\))?_\s*", re.IGNORECASE
 )
@@ -100,7 +105,9 @@ _PACKAGE_UNIT_ALIASES = {
 }
 _CONTAINER_TYPE_TOKEN = (
     r"\d{2}\s*['’]?\s*"
-    r"(?:GENERAL|OPENTOP|OPEN\s*TOP|TANK|FLAT|REF|NOR|GP|DV|DC|HC|HQ|RF|RH|OT|FR|TK|SD|H)"
+    r"(?:GENERAL|OPENTOP|OPEN\s*TOP|TANK|FLAT|REF|NOR|"
+    + "|".join(STANDARD_CONTAINER_SUFFIXES)
+    + r"|DV|DC|SD|H)"
 )
 _CONTAINER_TYPE_QTY_PATTERNS = (
     re.compile(
@@ -296,20 +303,33 @@ def _review_issue_key(issue: dict[str, Any]) -> tuple[Any, Any]:
     return issue.get("code"), issue.get("field")
 
 
+def _merged_review_issue_field(left: Any, right: Any) -> str:
+    if left == right and isinstance(left, str) and left:
+        return left
+    if isinstance(left, str) and isinstance(right, str):
+        left_root = re.split(r"[.[]", left, maxsplit=1)[0]
+        right_root = re.split(r"[.[]", right, maxsplit=1)[0]
+        if left_root and left_root == right_root:
+            return left_root
+    return "multiple_fields"
+
+
 def _deduplicate_review_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge semantically identical issues without hiding distinct affected fields."""
+    """Merge issues by code, matching the public one-entry-per-code contract."""
     deduplicated: list[dict[str, Any]] = []
     for issue in issues:
         code = issue.get("code")
         if not isinstance(code, str) or not code:
             continue
-        key = _review_issue_key(issue)
-        existing = next((item for item in deduplicated if _review_issue_key(item) == key), None)
+        existing = next((item for item in deduplicated if item.get("code") == code), None)
         if existing is None:
             copied = dict(issue)
             copied["source_values"] = list(issue.get("source_values") or [])
             deduplicated.append(copied)
             continue
+        existing["field"] = _merged_review_issue_field(
+            existing.get("field"), issue.get("field")
+        )
         existing["blocking"] = bool(existing.get("blocking", True)) or bool(
             issue.get("blocking", True)
         )
@@ -359,6 +379,8 @@ _ADJACENT_FIELD_LABELS = frozenset(
         "中转港（卸港）",
         "中转港(卸港)",
         "卸港",
+        "港区",
+        "码头",
         "要求进港时间",
         "要求进港",
     )
@@ -542,6 +564,24 @@ def _header_company_candidates(source_text: str) -> list[str]:
     return list(dict.fromkeys(line for line in lines if _BARE_COMPANY_RE.fullmatch(line)))
 
 
+def _customer_notice_heading_candidates(source_text: str) -> list[str]:
+    """Read a customer prefix from compact headings such as ``海丰装箱通知``."""
+    values: list[str] = []
+    inspected = 0
+    for raw_line in source_text.splitlines():
+        line = _MARKDOWN_PARAGRAPH_PREFIX_RE.sub("", raw_line.strip())
+        line = line.lstrip("# ").strip().strip("*_` ")
+        if not line:
+            continue
+        inspected += 1
+        match = re.fullmatch(r"([^|：:\n]{2,40}?)(?:装箱|做箱)通知(?:书)?", line)
+        if match:
+            values.append(match.group(1).strip())
+        if inspected >= 8:
+            break
+    return list(dict.fromkeys(values))
+
+
 def _recipient_row_extras(source_text: str) -> list[str]:
     labels = {"to", "致", "attn", "收件方", "收件人"}
     values: list[str] = []
@@ -626,6 +666,17 @@ def _restore_explicit_header_fields(
     if len(agent_candidates) == 1:
         data["shipper_agent"] = agent_candidates[0]
         _remove_remark_clauses_containing(data, agent_candidates[0])
+
+    fm_values = _extract_explicit_values(source_text, ("FM",))
+    explicit_customers = _extract_explicit_values(source_text, ("客户", "客户名称", "客户简称"))
+    customer_candidates = (
+        fm_values
+        or explicit_customers
+        or _customer_notice_heading_candidates(source_text)
+        or _header_company_candidates(source_text)
+    )
+    if len(customer_candidates) == 1:
+        data["customer"] = customer_candidates[0]
 
     loading_values = _extract_explicit_values(
         source_text,
@@ -746,6 +797,24 @@ def _restore_explicit_header_fields(
         _append_top_level_remark(data, required_port_times)
 
 
+def _apply_template_field_overrides(
+    data: dict[str, Any], source_text: str, template_hint: str | None
+) -> None:
+    if template_hint != "bolian_segway":
+        return
+    for raw_line in source_text.splitlines():
+        line = _MARKDOWN_PARAGRAPH_PREFIX_RE.sub("", raw_line.strip())
+        match = re.fullmatch(r"([^\n|：:]{2,40}?)做箱通知", line.strip("# *_`"))
+        if not match:
+            continue
+        factory = data.get("factory")
+        if not isinstance(factory, dict):
+            factory = {}
+            data["factory"] = factory
+        factory["name"] = match.group(1).strip()
+        return
+
+
 def _restore_numbered_notice_remark(data: dict[str, Any], source_text: str) -> None:
     lines = [
         _MARKDOWN_PARAGRAPH_PREFIX_RE.sub("", raw_line.strip()).strip()
@@ -800,10 +869,22 @@ def _validate_sender_contact(
 
 
 def _validate_shipper_company(
-    data: dict[str, Any], source_text: str | None, issues: list[dict[str, Any]]
+    data: dict[str, Any],
+    source_text: str | None,
+    issues: list[dict[str, Any]],
+    *,
+    template_hint: str | None,
 ) -> None:
     labels = ("托运人公司", "托运人", "发货人公司", "发货公司", "发货人", "SHIPPER")
     explicit_values = _extract_explicit_values(source_text, labels) if source_text else []
+    if not explicit_values and source_text and template_hint == "zuoxiang_std_esff":
+        explicit_values = _extract_explicit_values(source_text, ("做箱工厂",))
+    if (
+        not explicit_values
+        and source_text
+        and template_hint in {"bingsheng_transport", "bolian_segway"}
+    ):
+        explicit_values = _header_company_candidates(source_text)
     current = data.get("shipper_company")
     current = current.strip() if isinstance(current, str) and current.strip() else None
 
@@ -933,6 +1014,24 @@ def _ground_free_text_fields(
             )
 
 
+def _remove_empty_remark_clauses(data: dict[str, Any]) -> None:
+    targets: list[dict[str, Any]] = [data]
+    containers = data.get("containers")
+    if isinstance(containers, list):
+        targets.extend(container for container in containers if isinstance(container, dict))
+    for target in targets:
+        remark = target.get("remark")
+        if not isinstance(remark, str) or not remark.strip():
+            continue
+        clauses = [part.strip() for part in re.split(r"[；;\n]+", remark) if part.strip()]
+        kept = [
+            clause
+            for clause in clauses
+            if not re.fullmatch(r"[^：:；;\n]{1,30}[：:]", clause)
+        ]
+        target["remark"] = "；".join(kept) or None
+
+
 def _remove_confirmed_ocr_artifacts(
     data: dict[str, Any], issues: list[dict[str, Any]]
 ) -> None:
@@ -1023,6 +1122,12 @@ def _sanitize_container_measurements(
             if isinstance(value, (int, float)) and not isinstance(value, bool) and value <= 0:
                 invalid.append(f"{field}={value}")
                 container[field] = None
+            elif (
+                field != "packages"
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                container[field] = round(value, 3)
         if invalid:
             _append_issue(
                 issues,
@@ -1031,6 +1136,37 @@ def _sanitize_container_measurements(
                 message="集装箱件数、毛重或体积包含非正数，已清空并需人工确认",
                 source_values=invalid,
             )
+
+
+def _sanitize_bill_numbers(data: dict[str, Any], issues: list[dict[str, Any]]) -> None:
+    targets: list[tuple[dict[str, Any], str, str]] = [
+        (data, "mbl_no", "mbl_no"),
+        (data, "hbl_no", "hbl_no"),
+    ]
+    containers = data.get("containers")
+    if isinstance(containers, list):
+        targets.extend(
+            (container, "mbl_no", f"containers[{index}].mbl_no")
+            for index, container in enumerate(containers)
+            if isinstance(container, dict)
+        )
+
+    for target, key, field in targets:
+        value = target.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        value = value.strip()
+        if _BILL_NO_RE.fullmatch(value):
+            target[key] = value
+            continue
+        target[key] = None
+        _append_issue(
+            issues,
+            code=f"invalid_{key}",
+            field=field,
+            message="提单号必须至少 8 位，且只能由数字或英文字母数字组成，已清空",
+            source_values=[value],
+        )
 
 
 def _restore_packages_unit(data: dict[str, Any], source_text: str | None) -> None:
@@ -1139,10 +1275,7 @@ def _source_container_types(source_text: str | None) -> list[str]:
         return []
     decoded = html.unescape(source_text)
     pattern = re.compile(
-        r"(?<![A-Za-z0-9])"
-        r"\d{2}\s*['’]?\s*"
-        r"(?:GENERAL|OPENTOP|OPEN\s*TOP|TANK|FLAT|REF|NOR|GP|DV|DC|HC|HQ|RF|RH|OT|FR|TK|SD|H)"
-        r"(?![A-Za-z0-9])",
+        r"(?<![A-Za-z0-9])" + _CONTAINER_TYPE_TOKEN + r"(?![A-Za-z0-9])",
         re.IGNORECASE,
     )
     values: list[str] = []
@@ -1343,6 +1476,7 @@ def _restore_missing_container_measurements(
     containers = data.get("containers")
     if not isinstance(containers, list):
         return
+    removed_broad_issue = False
     for index, container in enumerate(containers):
         if not isinstance(container, dict):
             continue
@@ -1355,6 +1489,16 @@ def _restore_missing_container_measurements(
         # input source_text is unavailable, so an empty pair is itself unverified.
         if source_text is not None and not _source_mentions_measurements(source_text, missing):
             continue
+        if not removed_broad_issue:
+            issues[:] = [
+                issue
+                for issue in issues
+                if not (
+                    issue.get("code") == "missing_container_measurements"
+                    and issue.get("field") == "containers"
+                )
+            ]
+            removed_broad_issue = True
         _append_issue(
             issues,
             code="missing_container_measurements",
@@ -1384,7 +1528,11 @@ def _build_order_note(data: dict[str, Any]) -> str | None:
 
 
 def finalize_extraction(
-    data: dict[str, Any], *, source_text: str | None, reference_year: int | None = None
+    data: dict[str, Any],
+    *,
+    source_text: str | None,
+    reference_year: int | None = None,
+    template_hint: str | None = None,
 ) -> dict[str, Any]:
     """补充订单映射，并把不可安全自动下单的情况转成结构化问题。"""
     raw_issues = data.get("review_issues")
@@ -1397,6 +1545,7 @@ def finalize_extraction(
     if source_text:
         data["raw_text_snippet"] = source_text[:200]
         _restore_explicit_header_fields(data, source_text, issues, reference_year)
+        _apply_template_field_overrides(data, source_text, template_hint)
         _restore_numbered_notice_remark(data, source_text)
         _validate_sender_contact(data, source_text, issues)
         for field in _PERSON_FIELDS:
@@ -1440,8 +1589,14 @@ def finalize_extraction(
     if source_text:
         _restore_explicit_hbl(data, source_text, issues)
 
-    _validate_shipper_company(data, source_text, issues)
+    _validate_shipper_company(
+        data,
+        source_text,
+        issues,
+        template_hint=template_hint,
+    )
     _validate_container_identifiers(data, source_text, issues)
+    _sanitize_bill_numbers(data, issues)
     _prefer_explicit_detail_container(data, source_text, issues)
     _preserve_container_types(data, source_text, issues)
     _sanitize_container_measurements(data, issues)
@@ -1487,6 +1642,7 @@ def finalize_extraction(
 
     _restore_indexed_container_remarks(data)
     _remove_confirmed_ocr_artifacts(data, issues)
+    _remove_empty_remark_clauses(data)
     _ground_free_text_fields(data, source_text, issues)
     _sanitize_schema_dates(data, issues)
 
@@ -1515,6 +1671,19 @@ def finalize_extraction(
             field="shipper_company",
             message="缺少托运人公司，订单必填字段 c_title 需人工确认",
         )
+
+    customer = data.get("customer")
+    if not isinstance(customer, str) or not customer.strip():
+        data["customer"] = None
+        _append_issue(
+            issues,
+            code="missing_customer",
+            field="customer",
+            message="缺少客户，未从 FM、客户栏或正文抬头提取到有效值，需人工确认",
+        )
+    else:
+        data["customer"] = customer.strip()
+        _remove_issue(issues, code="missing_customer", field="customer")
 
     factory = data.get("factory")
     factory_name = factory.get("name") if isinstance(factory, dict) else None

@@ -37,7 +37,11 @@ def _case_path(case: dict[str, str], field: str) -> Path:
 
 def _canonical_expected(case: dict[str, str], markdown: str) -> dict[str, Any]:
     expected = json.loads(_case_path(case, "expected").read_text(encoding="utf-8"))
-    expected = finalize_extraction(normalize_llm_output(expected), source_text=markdown)
+    expected = finalize_extraction(
+        normalize_llm_output(expected),
+        source_text=markdown,
+        template_hint=case["expected_route"]["template_hint"],
+    )
     source = expected.setdefault("source", {})
     source.setdefault("file", Path(case["expected"]).with_suffix("").name)
     source.setdefault("doc_format", Path(source["file"]).suffix.lstrip("."))
@@ -210,7 +214,8 @@ def test_bsse_incident_acceptance_baseline():
     assert result["doc_date"] == "2021-05-28"
     assert result["recipient"] == "上海运嘉货运代理有限公司"
     assert result["shipper_agent"] == "上海秉晟国际物流有限公司"
-    assert result["shipper_company"] is None
+    assert result["shipper_company"] == "上海秉晟国际物流有限公司"
+    assert result["order_mapping"]["c_title"] == "上海秉晟国际物流有限公司"
     assert result["loading_time"] == "2021-06-01T08:00:00"
     assert result["containers"][0]["seal_no"] is None
     assert result["containers"][0]["packages"] is None
@@ -219,10 +224,10 @@ def test_bsse_incident_acceptance_baseline():
     issue_codes = {issue["code"] for issue in result["review_issues"]}
     assert {
         "missing_container_measurements",
-        "missing_shipper_company",
         "missing_factory_name",
         "carrier_by_vessel",
     } <= issue_codes
+    assert "missing_shipper_company" not in issue_codes
 
 
 def test_kflse220216031_acceptance_baseline():

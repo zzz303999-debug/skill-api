@@ -9,6 +9,8 @@ from __future__ import annotations
 import io
 import re
 import tempfile
+import threading
+import zipfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,10 @@ log = get_logger(__name__)
 # 复用底层字典
 _DISPATCH = _conv.DISPATCH
 _IMAGE_EXTS = _conv.IMAGE_EXTS
+
+# redirect_stdout replaces process-global sys.stdout, so local converters must
+# not overlap when SkillBase.run() executes in the bounded worker pool.
+_CONVERSION_STDOUT_LOCK = threading.Lock()
 
 SUPPORTED_EXTS = list(_DISPATCH.keys()) + list(_IMAGE_EXTS)
 
@@ -102,6 +108,92 @@ def detect_image_mime(file_bytes: bytes, filename: str) -> tuple[str, str]:
             },
         )
     return mime, image_format
+
+
+def detect_document_format(file_bytes: bytes) -> str:
+    """Detect the container format without trusting the uploaded filename."""
+    if not file_bytes:
+        return "empty"
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if file_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return "gif"
+    if file_bytes.startswith(b"BM"):
+        return "bmp"
+    if file_bytes.startswith((b"II*\x00", b"MM\x00*")):
+        return "tiff"
+    if len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
+        return "webp"
+
+    prefix = file_bytes[:4096].lstrip()
+    if b"%PDF-" in file_bytes[:1024]:
+        return "pdf"
+    if file_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return "ole"
+    if prefix.startswith(b"{\\rtf"):
+        return "rtf"
+    prefix_lower = prefix.lower()
+    if prefix_lower.startswith((b"<!doctype html", b"<html")):
+        return "html"
+    if prefix.startswith((b"<?xml", b"<pkg:package", b"<w:wordDocument")) and (
+        b"schemas.microsoft.com/office/word/2003/wordml" in prefix
+        or b"schemas.microsoft.com/office/2006/xmlPackage" in prefix
+    ):
+        return "word_xml"
+
+    if file_bytes.startswith(b"PK\x03\x04"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+                names = set(archive.namelist())
+        except (OSError, zipfile.BadZipFile):
+            return "zip"
+        if "word/document.xml" in names:
+            return "docx"
+        if "xl/workbook.xml" in names:
+            return "xlsx"
+        return "zip"
+    return "unknown"
+
+
+def validate_document_content(file_bytes: bytes, filename: str) -> str:
+    """Reject empty uploads and clear extension/content mismatches."""
+    ext = Path(filename).suffix.lower()
+    if is_image(ext):
+        _mime, image_format = detect_image_mime(file_bytes, filename)
+        return image_format
+
+    detected = detect_document_format(file_bytes)
+    if detected == "empty":
+        raise BadRequestError(
+            "uploaded file is empty",
+            code="empty_file",
+            details={"file": Path(filename).name},
+        )
+
+    accepted_formats = {
+        ".pdf": {"pdf"},
+        ".docx": {"docx"},
+        ".xlsx": {"xlsx"},
+        ".xlsm": {"xlsx"},
+        # Legacy Office formats share the OLE container. Some real-world .xls
+        # files are OOXML workbooks with the old suffix.
+        ".xls": {"ole", "xlsx", "unknown"},
+        ".doc": {"ole", "word_xml", "rtf", "html", "unknown"},
+    }
+    accepted = accepted_formats.get(ext)
+    if accepted is not None and detected not in accepted:
+        raise BadRequestError(
+            "file extension does not match file content",
+            code="file_format_mismatch",
+            details={
+                "file": Path(filename).name,
+                "extension": ext,
+                "detected_format": detected,
+            },
+        )
+    return detected
 
 
 _QUALITY_LABELS = ("船名", "提单号", "主单号", "件数")
@@ -240,6 +332,7 @@ def _parse_ocr_page(file_bytes: bytes, filename: str, page_index: int, quality: 
             quality=quality,
             confidence="low",
             vision_image=image,
+            vision_mime="image/png",
             issues=[
                 ParseIssue(
                     code="mineru_failed",
@@ -258,6 +351,7 @@ def _parse_ocr_page(file_bytes: bytes, filename: str, page_index: int, quality: 
             quality=quality,
             confidence="low",
             vision_image=image,
+            vision_mime="image/png",
             issues=[
                 ParseIssue(
                     code="mineru_low_confidence",
@@ -297,7 +391,18 @@ def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseRes
                     )
                 )
             else:
-                pages.append(_parse_ocr_page(file_bytes, filename, page_index, quality))
+                parsed_page = _parse_ocr_page(file_bytes, filename, page_index, quality)
+                pages.append(parsed_page)
+                vision_page_count = sum(page.vision_image is not None for page in pages)
+                if vision_page_count > settings.vision_max_pdf_pages:
+                    raise ConvertError(
+                        "PDF has too many pages for complete vision conversion",
+                        code="pdf_page_limit_exceeded",
+                        details={
+                            "vision_page_count": vision_page_count,
+                            "max_pages": settings.vision_max_pdf_pages,
+                        },
+                    )
     finally:
         pdf.close()
     if not pages:
@@ -310,7 +415,22 @@ def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResu
     if not settings.mineru_enabled:
         return ParseResult(
             input_format=image_format,
-            pages=[ParsedPage(page_number=1, parser="vision", vision_image=file_bytes)],
+            pages=[
+                ParsedPage(
+                    page_number=1,
+                    parser="vision",
+                    confidence="low",
+                    vision_image=file_bytes,
+                    vision_mime=mime_type,
+                    issues=[
+                        ParseIssue(
+                            code="vision_only_unverified",
+                            message="图片仅由 vision 识别，没有独立 OCR 文本可交叉核验，必须人工复核",
+                            page=1,
+                        )
+                    ],
+                )
+            ],
         )
     try:
         parsed = mineru.parse_document(file_bytes, filename, mime_type=mime_type)
@@ -327,6 +447,7 @@ def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResu
                     parser="vision",
                     confidence="low",
                     vision_image=file_bytes,
+                    vision_mime=mime_type,
                     issues=[
                         ParseIssue(
                             code="mineru_failed",
@@ -349,6 +470,7 @@ def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResu
                     markdown=parsed.markdown,
                     confidence="low",
                     vision_image=file_bytes,
+                    vision_mime=mime_type,
                     issues=[
                         ParseIssue(
                             code="mineru_low_confidence",
@@ -371,6 +493,7 @@ def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResu
                 # visible in the uploaded image.  Keep the original image as
                 # independent evidence even when MinerU reports high confidence.
                 vision_image=file_bytes,
+                vision_mime=mime_type,
             )
         ],
     )
@@ -389,6 +512,8 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
             f"unsupported extension: {ext}",
             details={"supported": SUPPORTED_EXTS},
         )
+
+    validate_document_content(file_bytes, filename)
 
     # 图片：跳过转换，交由 vision 通道
     if is_image(ext):
@@ -438,20 +563,127 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
         tmp_path.write_bytes(file_bytes)
         try:
             buf = io.StringIO()
-            with redirect_stdout(buf):
-                handler(str(tmp_path))
+            with _CONVERSION_STDOUT_LOCK:
+                with redirect_stdout(buf):
+                    conversion_report = handler(str(tmp_path))
             converted = buf.getvalue()
+            if not converted.strip():
+                raise ConvertError(
+                    "converter returned empty content",
+                    code="empty_converted_content",
+                    details={"file": Path(filename).name},
+                )
             parser = "pdfplumber" if ext == ".pdf" else "local"
+            report = conversion_report if isinstance(conversion_report, dict) else {}
+            report_issues = list(report.get("issues") or [])
+            missing_formula_values = list(report.get("formula_values_missing") or [])
+            if missing_formula_values:
+                report_issues.append(
+                    {
+                        "code": "formula_value_unavailable",
+                        "message": "Excel 公式没有可用缓存值，必须重新计算或人工复核",
+                        "source_values": missing_formula_values,
+                    }
+                )
+            coverage = dict(report.get("coverage") or {})
+            if coverage.get("complete") is False and not report_issues:
+                report_issues.append(
+                    {
+                        "code": "conversion_coverage_incomplete",
+                        "message": "附件存在未覆盖内容，必须对照原文件复核",
+                        "source_values": list(coverage.get("omissions") or []),
+                    }
+                )
+            parse_issues = [
+                ParseIssue(
+                    code=str(issue["code"]),
+                    message=str(issue["message"]),
+                    source_values=tuple(str(value) for value in issue.get("source_values") or []),
+                )
+                for issue in report_issues
+                if isinstance(issue, dict) and issue.get("code") and issue.get("message")
+            ]
+            pages = [
+                ParsedPage(
+                    page_number=1,
+                    parser=parser,
+                    markdown=converted,
+                    issues=parse_issues,
+                )
+            ]
+            embedded_images = list(report.get("embedded_images") or [])
+            processed_images = 0
+            for embedded_image in embedded_images:
+                if not isinstance(embedded_image, dict):
+                    continue
+                image_bytes = embedded_image.get("bytes")
+                image_filename = str(embedded_image.get("filename") or "embedded-image")
+                source_part = str(embedded_image.get("part") or "word/document.xml")
+                if not isinstance(image_bytes, bytes):
+                    continue
+                try:
+                    image_result = convert_image_to_parse_result(image_bytes, image_filename)
+                except (BadRequestError, ConvertError) as exc:
+                    pages[0].issues.append(
+                        ParseIssue(
+                            code="embedded_image_unprocessed",
+                            message="Word 内嵌图片无法处理，必须对照原文件复核",
+                            source_values=(image_filename, source_part, exc.code),
+                        )
+                    )
+                    omissions = list(coverage.get("omissions") or [])
+                    omissions.append(f"embedded_image:{image_filename}")
+                    coverage["omissions"] = omissions
+                    coverage["complete"] = False
+                    continue
+
+                processed_images += 1
+                for embedded_page in image_result.pages:
+                    embedded_markdown = embedded_page.markdown.strip()
+                    if embedded_markdown:
+                        embedded_markdown = (
+                            f"### Embedded image OCR: {image_filename}\n\n{embedded_markdown}"
+                        )
+                    image_issues = list(embedded_page.issues)
+                    image_issues.append(
+                        ParseIssue(
+                            code="embedded_image_requires_review",
+                            message="Word 内嵌图片内容已送识别，需确认其属于正文而非印章、logo 或水印",
+                            source_values=(image_filename, source_part),
+                        )
+                    )
+                    pages.append(
+                        ParsedPage(
+                            page_number=len(pages) + 1,
+                            parser=embedded_page.parser,
+                            markdown=embedded_markdown,
+                            quality=embedded_page.quality,
+                            confidence=embedded_page.confidence,
+                            vision_image=embedded_page.vision_image,
+                            vision_mime=embedded_page.vision_mime,
+                            source_part=f"{source_part}#{image_filename}",
+                            issues=image_issues,
+                        )
+                    )
+            if embedded_images:
+                coverage["embedded_images_processed"] = processed_images
+                if processed_images != len(embedded_images):
+                    coverage["complete"] = False
             result = ParseResult(
                 input_format=ext.lstrip("."),
-                pages=[ParsedPage(page_number=1, parser=parser, markdown=converted)],
+                pages=pages,
+                coverage=coverage,
+                fallback_used=ext == ".pdf" and settings.mineru_enabled,
             )
+            final_markdown = converted if len(pages) == 1 else result.markdown
             return ConversionText(
-                converted,
-                parser=parser,
-                parser_fallback=ext == ".pdf" and settings.mineru_enabled,
+                final_markdown,
+                parser=result.parser,
+                parser_fallback=result.parser_fallback,
                 parse_result=result,
             )
+        except ConvertError:
+            raise
         except Exception as e:
             raise ConvertError(f"convert failed: {e.__class__.__name__}: {e}") from e
 
@@ -462,14 +694,21 @@ def render_pdf_pages(
     max_pages: int,
     scale: float,
 ) -> list[bytes]:
-    """把扫描 PDF 的前几页渲染成 PNG，供 vision 模型识别。"""
+    """Render every PDF page, failing instead of silently truncating the document."""
     try:
         import pypdfium2 as pdfium
 
         pdf = pdfium.PdfDocument(file_bytes)
         images: list[bytes] = []
         try:
-            for page_index in range(min(len(pdf), max_pages)):
+            page_count = len(pdf)
+            if page_count > max_pages:
+                raise ConvertError(
+                    "PDF has too many pages for complete vision conversion",
+                    code="pdf_page_limit_exceeded",
+                    details={"page_count": page_count, "max_pages": max_pages},
+                )
+            for page_index in range(page_count):
                 page = pdf[page_index]
                 bitmap = None
                 try:
@@ -484,6 +723,8 @@ def render_pdf_pages(
                     page.close()
         finally:
             pdf.close()
+    except ConvertError:
+        raise
     except Exception as e:
         raise ConvertError(f"scan PDF render failed: {e.__class__.__name__}: {e}") from e
 

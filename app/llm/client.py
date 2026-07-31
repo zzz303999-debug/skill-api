@@ -1,4 +1,4 @@
-"""OpenClaw 网关 LLM 客户端（OpenAI 兼容协议）。
+"""OpenAI-compatible LLM client.
 
 所有 skill 通过 `chat()` 统一调用，禁止绕过。
 """
@@ -24,8 +24,8 @@ def get_client() -> OpenAI:
     global _client
     if _client is None:
         _client = OpenAI(
-            base_url=settings.openclaw_base_url,
-            api_key=settings.openclaw_api_key,
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
             timeout=settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
         )

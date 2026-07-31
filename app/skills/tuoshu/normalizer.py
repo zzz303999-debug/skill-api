@@ -15,6 +15,22 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
+STANDARD_CONTAINER_LENGTHS = ("20", "25", "40")
+STANDARD_CONTAINER_SUFFIXES = (
+    "GP",
+    "HC",
+    "HQ",
+    "RF",
+    "OT",
+    "TK",
+    "FR",
+    "PL",
+    "OH",
+    "RH",
+    "UT",
+    "VH",
+)
+
 KNOWN_CONTAINER_TYPES = frozenset(
     {
         "20GP",
@@ -44,6 +60,11 @@ KNOWN_CONTAINER_TYPES = frozenset(
         "40FLAT",
         "20TK",
         "20TANK",
+    }
+    | {
+        f"{length}{suffix}"
+        for length in STANDARD_CONTAINER_LENGTHS
+        for suffix in STANDARD_CONTAINER_SUFFIXES
     }
 )
 
@@ -177,6 +198,12 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "门点地址": "factory_address",
     "工厂联系人": "factory_contact",
     "工厂电话": "factory_phone",
+    # customer
+    "客户": "customer",
+    "客户名称": "customer",
+    "客户简称": "customer",
+    "customerName": "customer",
+    "customer_name": "customer",
     # shipper_company
     "托运人公司": "shipper_company",
     "托运人": "shipper_company",

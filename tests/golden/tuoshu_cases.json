@@ -45,7 +45,7 @@
       "deterministic_mapper": true
     },
     "expected": "app/skills/tuoshu/references/examples/bingsheng_transport.json",
-    "expected_sha256": "71f43022819ef467f3657e17dbc44d4a19f82c4d0d5196240f85b3f9e7372384"
+    "expected_sha256": "14ceb3537cef9b149d5ded64d23fb6f7449c4045a38549a6fe95c3bd261c8b2f"
   },
   {
     "name": "weishi_A26042709390557851",

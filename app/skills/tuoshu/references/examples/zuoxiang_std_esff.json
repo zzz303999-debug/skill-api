@@ -43,6 +43,8 @@
     "phone": "13800000001"
   },
 
+  "customer": null,
+  "shipper_company": "常州XX电动工具有限公司",
   "shipper_agent": null,
 
   "remark": "10点截单,提供箱封号；主单是ONEYSH1AC9779500",

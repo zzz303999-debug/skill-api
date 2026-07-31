@@ -217,6 +217,12 @@
 
 只有正文中明确标注的`托运人`/`发货人`/`SHIPPER`栏位可以写入该字段。抬头、落款、图章、水印、logo、收件方（TO）或 `FROM/FM` 不能据此推断托运人公司。缺失时输出 null，由人工补齐订单 `c_title`，并保留 blocking 的 `missing_shipper_company`。
 
+例外：`zuoxiang_std_esff` 模板的`做箱工厂`同时写入 `factory.name` 和
+`shipper_company`；`bingsheng_transport` 模板的标题下抬头公司同时写入
+`shipper_agent` 和 `shipper_company`；`bolian_segway` 模板的
+“江苏倍联现代物流有限公司”抬头也同时写入这两个字段。三者均用于生成订单 `c_title`，
+且不得扩展到其他模板。
+
 ## shipper_agent（发件方 / 我方公司）
 
 | 别名 |
@@ -229,6 +235,14 @@
 | 文档正文落款公司 |
 
 正文抬头/落款中的公司名固定进入 `shipper_agent`。红章、水印和 logo 中的公司名不属于正文，不得抽取。`FROM/FM` 后的联系人进入 `sender_contact`；只有正文明确的发货人/托运人栏位才能进入 `shipper_company`。
+
+## customer（客户）
+
+优先逐字取 `FM` 后的值，通常是公司名称或简称；`FM` 缺失时依次取明确的
+`客户`/`客户名称`/`客户简称`栏、“客户简称+装箱/做箱通知”抬头（如
+`海丰装箱通知` → `海丰`）和正文抬头公司。
+所有来源均无有效值时输出 null，并添加 blocking `missing_customer` 复核说明。
+该字段不替代 `shipper_company`，也不改变订单 `c_title` 的托运人来源。
 
 ## recipient（收件方）
 

@@ -64,6 +64,8 @@ class ParsedPage:
     quality: PageQuality | None = None
     confidence: Confidence = "high"
     vision_image: bytes | None = None
+    vision_mime: str | None = None
+    source_part: str | None = None
     issues: list[ParseIssue] = field(default_factory=list)
 
     def as_route_dict(self) -> dict[str, Any]:
@@ -74,6 +76,8 @@ class ParsedPage:
         }
         if self.quality is not None:
             result["quality"] = self.quality.as_dict()
+        if self.source_part is not None:
+            result["source_part"] = self.source_part
         if self.issues:
             result["issues"] = [issue.code for issue in self.issues]
         return result
@@ -86,6 +90,8 @@ class ParseResult:
     input_format: str
     pages: list[ParsedPage]
     issues: list[ParseIssue] = field(default_factory=list)
+    coverage: dict[str, Any] = field(default_factory=dict)
+    fallback_used: bool = False
 
     @property
     def markdown(self) -> str:
@@ -102,13 +108,23 @@ class ParseResult:
 
     @property
     def parser_fallback(self) -> bool:
-        return any(page.confidence == "low" or page.issues for page in self.pages) or bool(
-            self.issues
+        return (
+            self.fallback_used
+            or any(page.confidence == "low" or page.issues for page in self.pages)
+            or bool(self.issues)
         )
 
     @property
     def vision_images(self) -> list[bytes]:
         return [page.vision_image for page in self.pages if page.vision_image is not None]
+
+    @property
+    def vision_inputs(self) -> list[tuple[bytes, str]]:
+        return [
+            (page.vision_image, page.vision_mime or "image/png")
+            for page in self.pages
+            if page.vision_image is not None
+        ]
 
     def all_issues(self) -> list[ParseIssue]:
         return [*self.issues, *(issue for page in self.pages for issue in page.issues)]
@@ -117,9 +133,12 @@ class ParseResult:
         return [issue.as_review_issue() for issue in self.all_issues()]
 
     def meta(self) -> dict[str, Any]:
-        return {
+        result = {
             "parser": self.parser,
             "parser_fallback": self.parser_fallback,
             "input_format": self.input_format,
             "page_routes": [page.as_route_dict() for page in self.pages],
         }
+        if self.coverage:
+            result["coverage"] = self.coverage
+        return result

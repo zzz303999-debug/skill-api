@@ -8,7 +8,7 @@ HTTP 接口，供业务系统调用。目前内置海运托书抽取，并支持
 
 - **多 skill 可扩展**：每个 skill 一个子目录，启动自动发现并挂路由
 - **每个 skill 独立强类型契约**：OpenAPI 文档里能看到各 skill 精确的输入输出 schema
-- **统一 LLM 出口**：所有 skill 通过 `app.llm` 调 OpenClaw 网关（OpenAI 兼容协议）
+- **统一 LLM 出口**：所有 skill 通过 `app.llm` 调用 OpenAI-compatible API
 - **页级质量路由**：合格 PDF 页走 `pdfplumber`，扫描/残缺页走 MinerU
 - **图片原图解析**：按文件签名校验格式后直传 MinerU，失败或低置信时转视觉模型
 - **零静默错误**：解析降级、模板哨兵失败和 Mapper/AI 冲突均进入 blocking 复核项
@@ -22,10 +22,9 @@ skill-api/
 ├── app/
 │   ├── main.py                  # FastAPI 入口，启动时自动注册 skill
 │   ├── config.py                # 环境变量
-│   ├── deps.py                  # 鉴权等通用依赖
 │   ├── errors.py                # 统一错误类型
 │   ├── logging_conf.py          # JSON 日志
-│   ├── llm/openclaw.py          # OpenClaw 网关客户端（唯一 LLM 出口）
+│   ├── llm/client.py            # OpenAI-compatible 客户端（唯一 LLM 出口）
 │   ├── document_parsers/
 │   │   └── mineru.py            # MinerU HTTP 客户端与响应解析
 │   ├── core/
@@ -52,16 +51,16 @@ skill-api/
 ### 本地开发
 
 ```bash
-cp .env.example .env             # 填 OPENCLAW_API_KEY 等
+cp .env.example .env             # 填 LLM_BASE_URL、LLM_API_KEY 等
 make install                     # uv venv + 装依赖
 make dev                         # uvicorn --reload
 ```
 
 访问：
 
-- `http://localhost:8080/docs`  — Swagger UI
-- `http://localhost:8080/healthz`
-- `http://localhost:8080/skills` — 已注册的 skill 列表
+- `http://localhost:9000/docs`  — Swagger UI
+- `http://localhost:9000/healthz`
+- `http://localhost:9000/skills` — 已注册的 skill 列表
 
 ## 生产部署交接
 
@@ -69,61 +68,89 @@ make dev                         # uvicorn --reload
 
 ```text
 调用方
-  └── skill-api:8080
-        ├── OpenClaw 网关（托书抽取必需）
-        ├── MinerU（可选，提高图片/扫描 PDF 解析质量）
+  └── skill-api:9000
+        ├── OpenAI-compatible LLM（托书抽取必需）
+        ├── MinerU（Compose 同栈容器，提高图片/扫描 PDF 解析质量）
         └── 订单接口（仅 POST /orders 需要）
 ```
 
 | 组件 | 是否包含在本仓库 | 是否必需 | 不可用时的影响 |
 |------|--------------------|----------|------------------|
 | `skill-api` | 是 | 是 | 整个 API 不可用 |
-| OpenClaw | 否 | 托书抽取必需 | 文件转换可能成功，但 LLM 抽取失败 |
-| MinerU | 否，必须单独部署 | 否 | 关闭时图片/扫描件改走 vision |
+| LLM 服务 | 否 | 托书抽取必需 | 文件转换可能成功，但 LLM 抽取失败 |
+| MinerU | 是，独立 Compose 容器 | 扫描件高质量解析需要 | 关闭时图片/扫描件改走 vision |
 | 订单接口 | 否 | 仅 `/orders` 必需 | `/orders` 返回 `502/503`，托书抽取不受影响 |
 
-`GET /healthz` 只是 `skill-api` 存活检查，不会请求 OpenClaw、MinerU 或订单接口。
+`GET /healthz` 只是 `skill-api` 存活检查，不会请求 LLM、MinerU 或订单接口。
 所以上线验收必须再执行一次真实文档抽取。
 
 ### 部署前准备
 
 - Python `3.11`；非 Docker 部署使用 `uv` 按 `uv.lock` 安装。
-- 准备可访问的 OpenClaw OpenAI 兼容地址和 API Key。
-- 生成独立的生产 `API_KEY`，不得使用 `.env.example` 中的示例值。
-- 如启用 MinerU，先单独部署兼容服务，再配置本项目。
-- 云服务器对外建议由 Nginx/Caddy 提供 HTTPS，`8080` 只对反向代理开放。
-- 放通 `skill-api` 到 OpenClaw、MinerU 和订单接口的出站网络。
+- 准备可访问的 OpenAI-compatible API 地址、API Key 和模型名。
+- Docker Compose 部署会同时构建并启动 MinerU；非 Compose 部署时才需要单独准备 MinerU HTTP 服务。
+- 云服务器对外建议由 Nginx/Caddy 提供 HTTPS，`9000` 只对反向代理开放。
+- 放通 `skill-api` 到 LLM、MinerU 和订单接口的出站网络。
 
-生成 API Key：
-
-```bash
-openssl rand -hex 32
-```
-
-必须将结果完整填入 `API_KEY`。当前实现在 `API_KEY` 为空时会关闭鉴权，生产环境严禁
-留空，也不得使用 `change-me`/`change-me-in-prod`。
-
-敏感变量 `API_KEY`、`OPENCLAW_API_KEY`、`MINERU_API_KEY` 和订单凭据必须由 Secret/
+敏感变量 `LLM_API_KEY`、`MINERU_API_KEY` 和订单凭据必须由 Secret/
 服务器环境管理，不得提交 `.env`。
 
 ### 方式一：Docker Compose
 
-GitHub 推送 `v*` tag 后，Actions 会将版本镜像发布到 GHCR。部署人员需在服务器
-保存 `docker-compose.deploy.yml` 和 `.env`，并显式指定镜像版本：
+#### 云服务器从源码更新
+
+服务器直接检出本仓库时，可使用部署脚本完成拉代码、构建、停止旧容器、启动新容器和
+健康检查。首次部署先安装 Git、Docker Engine 和 Compose plugin，再准备 `.env`：
+
+```bash
+cp .env.example .env
+# 编辑 .env，至少填写 LLM_BASE_URL、LLM_API_KEY 和 LLM_MODEL_DEFAULT
+chmod +x scripts/deploy.sh
+./scripts/deploy.sh deploy
+```
+
+脚本默认更新 `origin/knight`，且生产目录中的 tracked 文件必须没有本地修改。拉取或构建
+失败时旧容器不会停止；新容器健康检查失败时，脚本会尝试恢复部署前的本地镜像。
+
+```bash
+./scripts/deploy.sh status
+./scripts/deploy.sh logs
+./scripts/deploy.sh restart
+./scripts/deploy.sh stop
+./scripts/deploy.sh start
+```
+
+可通过环境变量覆盖部署参数，例如：
+
+```bash
+DEPLOY_BRANCH=main HEALTH_TIMEOUT_SECONDS=180 ./scripts/deploy.sh deploy
+```
+
+该脚本使用 `docker-compose.yml` 在服务器本地构建 `skill-api` 和 MinerU，两个进程在
+不同容器中运行，API 通过 `http://mineru:8888` 访问 MinerU。MinerU 模型在构建镜像时下载并
+随镜像发布，更新 MinerU 版本或模型源时需要重新构建镜像。
+
+#### 从镜像仓库更新
+
+GitHub 推送 `v*` tag 后，Actions 会将版本镜像发布到 GHCR。部署人员需在仓库检出目录
+保存 `.env`（MinerU 构建还会使用 `mineru/Dockerfile`），并显式指定 API 镜像版本：
 
 ```env
 SKILL_API_IMAGE=ghcr.io/zzz303999-debug/skill-api:v0.1.0
-API_KEY=<64位随机值>
-OPENCLAW_BASE_URL=http://<openclaw-host>:18789/v1
-OPENCLAW_API_KEY=<secret>
-MINERU_ENABLED=false
+LLM_BASE_URL=https://<llm-host>/v1
+LLM_API_KEY=<secret>
+LLM_MODEL_DEFAULT=<model-name>
+MINERU_ENABLED=true
+MINERU_BASE_URL=http://mineru:8888
+MINERU_IMAGE=skill-api-mineru:2.5.4
 ```
 
 私有 GHCR 镜像需先用只读 Packages Token 登录，然后部署：
 
 ```bash
 docker compose -f docker-compose.deploy.yml config --quiet
-docker compose -f docker-compose.deploy.yml pull
+docker compose -f docker-compose.deploy.yml pull skill-api
+docker compose -f docker-compose.deploy.yml build --pull mineru
 docker compose -f docker-compose.deploy.yml up -d
 docker compose -f docker-compose.deploy.yml ps
 docker compose -f docker-compose.deploy.yml logs --tail=200 skill-api
@@ -132,7 +159,7 @@ docker compose -f docker-compose.deploy.yml logs --tail=200 skill-api
 生产不得依赖 `latest`。回滚时将 `.env` 中 `SKILL_API_IMAGE` 改为上一个已验证版本，
 重新执行 `pull` 和 `up -d`。
 
-如 OpenClaw 或 MinerU 运行在 Linux Docker 宿主机而不在 Compose 网络，需给
+如 LLM 或 MinerU 运行在 Linux Docker 宿主机而不在 Compose 网络，需给
 `skill-api` 增加：
 
 ```yaml
@@ -144,7 +171,7 @@ extra_hosts:
 不代表云服务器宿主机。
 
 使用同机 Nginx/Caddy 时，应将 `docker-compose.deploy.yml` 的端口映射改为
-`127.0.0.1:8080:8080`，避免绕过 HTTPS 直接访问 Uvicorn。
+`127.0.0.1:9000:9000`，避免绕过 HTTPS 直接访问 Uvicorn。
 
 ### 方式二：uv + systemd（非 Docker）
 
@@ -178,7 +205,7 @@ Group=skill-api
 WorkingDirectory=/opt/skill-api
 EnvironmentFile=/opt/skill-api/.env
 Environment=HOME=/opt/skill-api/storage
-ExecStart=/opt/skill-api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+ExecStart=/opt/skill-api/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 9000
 Restart=always
 RestartSec=5
 TimeoutStopSec=210
@@ -215,7 +242,7 @@ server {
     client_max_body_size 20m;
 
     location / {
-        proxy_pass http://127.0.0.1:8080;
+        proxy_pass http://127.0.0.1:9000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -228,21 +255,20 @@ server {
 ```
 
 证书路径由部署环境的 ACME/证书管理工具生成并按实际域名替换。云安全组对公网只开放 `80/443`，
-不开放 `8080`。
+不开放 `9000`。
 
 ### 上线验收
 
 1. 存活检查必须返回 `status=ok` 且包含 `tuoshu`：
 
    ```bash
-   curl -fsS http://127.0.0.1:8080/healthz
+   curl -fsS http://127.0.0.1:9000/healthz
    ```
 
 2. 使用非生产样例文档做端到端抽取：
 
    ```bash
-   curl -fsS -X POST http://127.0.0.1:8080/skills/tuoshu/extract \
-     -H "X-API-Key: $API_KEY" \
+   curl -fsS -X POST http://127.0.0.1:9000/skills/tuoshu/extract \
      -F "file=@./sample.pdf"
    ```
 
@@ -258,7 +284,7 @@ server {
 返回所有已注册 skill 及元数据。
 
 ### `GET /healthz`
-存活检查，返回 API 状态和已注册 skill。该接口不调用 OpenClaw、MinerU 或订单
+存活检查，返回 API 状态和已注册 skill。该接口不调用 LLM、MinerU 或订单
 接口，因此 `200` 只表示 FastAPI 进程可响应，不表示端到端抽取可用。
 
 ### `POST /skills/{skill_name}/extract`
@@ -267,13 +293,11 @@ server {
 请求：`multipart/form-data`
 
 - `file`：上传文件
-- header：`X-API-Key: <API_KEY>`
 
 示例：
 
 ```bash
-curl -X POST http://localhost:8080/skills/tuoshu/extract \
-  -H "X-API-Key: change-me-in-prod" \
+curl -X POST http://localhost:9000/skills/tuoshu/extract \
   -F "file=@./order.pdf"
 ```
 
@@ -285,7 +309,7 @@ curl -X POST http://localhost:8080/skills/tuoshu/extract \
   "version": "0.1.0",
   "data": {},
   "meta": {
-    "model": "openclaw",
+    "model": "gpt-5.4",
     "usage": {},
     "parser": "mineru",
     "parser_fallback": false
@@ -320,11 +344,8 @@ curl -X POST http://localhost:8080/skills/tuoshu/extract \
 响应中的 `roomId` 原样回传，`source_fields` 原样保留输入标签和值；`order_data` 是按
 下单接口字段名映射后的实际请求数据。`roomId` 会原样传到下游请求顶层。
 
-Postman 配置、完整字段映射和断言脚本见
-[自由文本创建订单接口 Postman 测试文档](docs/order-create-postman.md)。
-
-请求同样需要 `X-API-Key`。缺少提单号或托运人/公司名称时返回 `422`，不会调用下单
-接口；订单接口网络错误或业务拒绝返回 `502`。创建调用不会自动重试，调用方
+缺少提单号或托运人/公司名称时返回 `422`，不会调用下单接口；订单接口网络错误或
+业务拒绝返回 `502`。创建调用不会自动重试，调用方
 也不应在结果不明确时盲目重试，以免重复下单。
 
 ## 添加新 skill
@@ -346,10 +367,9 @@ Postman 配置、完整字段映射和断言脚本见
 
 | 变量 | 说明 |
 |------|------|
-| `OPENCLAW_BASE_URL` | 龙虾网关地址，由部署环境注入；本地默认 `http://127.0.0.1:18789/v1` |
-| `OPENCLAW_API_KEY` | 网关 Bearer Token |
-| `LLM_MODEL_DEFAULT` | 龙虾网关模型或 agent 名，默认 `openclaw` |
-| `API_KEY` | 客户端调用需要的 `X-API-Key` |
+| `LLM_BASE_URL` | OpenAI-compatible API 地址，默认 `https://api.openai.com/v1` |
+| `LLM_API_KEY` | LLM 服务的 Bearer Token |
+| `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `gpt-5.4` |
 | `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
@@ -360,31 +380,32 @@ Postman 配置、完整字段映射和断言脚本见
 | `ORDER_API_USER_ID` | 发送人 `userId` |
 | `ORDER_API_ORDER_INFO` | `apiKeyInfo.order_info` JSON 数组 |
 | `ORDER_API_TIMEOUT_SECONDS` | 下单接口超时秒数，默认 30；创建请求不自动重试 |
-| `VISION_MAX_PDF_PAGES` | 扫描 PDF 最多渲染页数，默认 3 |
+| `VISION_MAX_PDF_PAGES` | 扫描 PDF 可完整处理的最大页数，默认 10；超过时返回错误，不截断 |
 | `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |
 | `PARSER_TEXT_MIN_CHARS` | PDF 单页合格文本层的最少字符数，默认 50 |
 | `PARSER_GARBLED_RATIO_THRESHOLD` | PDF 单页允许的最大乱码率，默认 0.05 |
-| `MINERU_ENABLED` | 是否启用低质量 PDF 页和图片的 MinerU 解析，默认 `false` |
+| `MINERU_ENABLED` | 是否启用低质量 PDF 页和图片的 MinerU 解析，默认 `true` |
 | `MINERU_BASE_URL` | MinerU HTTP 服务地址 |
 | `MINERU_ENDPOINT` | MinerU 解析接口路径，默认 `/file_parse` |
 | `MINERU_API_KEY` | 可选 Bearer Token；留空时不发送鉴权头 |
 | `MINERU_EXPECTED_VERSION` | MinerU 版本锁，默认 `2.5.4`；服务返回版本头时必须完全一致 |
-| `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 120 |
+| `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 300 |
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
 
-### 可选：接入 MinerU
+### MinerU 解析服务
 
 MinerU 接管低质量 PDF 页和原始图片，后续的模板 Mapper、LLM 补全和业务 JSON schema
-不变。先确保 MinerU 的 HTTP 服务可从 `skill-api` 所在环境访问，再配置。本项目提供
-MinerU 客户端，不包含 MinerU 服务本身。
+不变。Docker Compose 会从 `mineru/Dockerfile` 构建锁定版本的 MinerU HTTP 服务，
+并通过 Compose 内网地址 `http://mineru:8888` 访问；本项目也保留了对独立 MinerU
+服务的 HTTP 客户端兼容能力。
 
 `MINERU_ENABLED=false` 时服务仍可启动：普通 PDF 文本层由 `pdfplumber` 处理，图片和
-扫描件由 OpenClaw vision 处理。因此关闭 MinerU 不等于完全离线，OpenClaw 仍是必需依赖。
+扫描件由配置的视觉模型处理。因此关闭 MinerU 不等于完全离线，LLM 服务仍是必需依赖。
 MinerU 建议只暴露在私有网络，不直接开放公网端口。
 
 ```env
 MINERU_ENABLED=true
-MINERU_BASE_URL=http://<mineru-host>:8000
+MINERU_BASE_URL=http://<mineru-host>:8888
 MINERU_ENDPOINT=/file_parse
 MINERU_API_KEY=
 MINERU_EXPECTED_VERSION=2.5.4
@@ -396,11 +417,11 @@ MINERU_FALLBACK_ENABLED=true
 
 | skill-api | MinerU | 地址示例 |
 |-----------|--------|----------|
-| 非 Docker 本机运行 | 同机运行 | `http://127.0.0.1:8000` |
-| Docker 容器 | macOS/Windows 宿主机 | `http://host.docker.internal:8000` |
-| Docker 容器 | Linux 宿主机 | 先配置 `host-gateway`，再用 `http://host.docker.internal:8000` |
-| 同一 Compose 网络 | `mineru` 服务 | `http://mineru:8000` |
-| 独立服务器 | 可达的 MinerU 主机 | `http://<mineru-host>:8000` |
+| 非 Docker 本机运行 | 同机运行 | `http://127.0.0.1:8888` |
+| Docker 容器 | macOS/Windows 宿主机 | `http://host.docker.internal:8888` |
+| Docker 容器 | Linux 宿主机 | 先配置 `host-gateway`，再用 `http://host.docker.internal:8888` |
+| 同一 Compose 网络 | `mineru` 服务 | `http://mineru:8888` |
+| 独立服务器 | 可达的 MinerU 主机 | `http://<mineru-host>:8888` |
 
 当前客户端兼容常见的 `POST /file_parse` 接口：以 `files` 字段上传 PDF 或原始图片，并发送
 `backend`、`parse_method`、`lang_list` 等表单参数。响应可以是 JSON（Markdown 字段为
@@ -419,6 +440,12 @@ PDF 解析链路如下：
 
 可通过响应的 `meta.parser` 判断最终解析器：`local`、`mineru`、`pdfplumber`、`vision`
 或 `mixed`。`meta.page_routes` 保留每页解析器、质量指标、置信度和问题代码。
+`meta.source_sha256` 和 `meta.content_sha256` 分别标识原附件与转换文本，
+`meta.conversion_status` 为 `converted` 或 `needs_review`。纯 vision、无转换文本或存在解析器
+复核项时固定返回 `needs_review`，不能静默进入可下单状态。
+Excel/Word 还会返回 `meta.coverage`：Excel 记录工作表、合并区域、公式和缓存值覆盖；
+Word 记录 story parts、文本框和内嵌图片覆盖。`coverage.complete=false` 时同样固定为
+`needs_review`。
 MinerU 请求参数由代码中的 `MINERU_REQUEST_PROFILE` 固定。服务若返回
 `X-MinerU-Version`（或 `MinerU-Version`）响应头，必须与 `MINERU_EXPECTED_VERSION`
 完全一致；缺少版本头时记录 `mineru_version_header_missing` 警告并继续解析，明确返回的

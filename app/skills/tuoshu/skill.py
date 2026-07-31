@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import UTC, datetime
@@ -18,6 +19,7 @@ from app.logging_conf import get_logger
 from .convert_service import (
     convert_image_to_parse_result,
     convert_to_markdown,
+    detect_document_format,
     is_image,
     render_pdf_pages,
 )
@@ -154,6 +156,7 @@ class TuoshuSkill(SkillBase):
             raise BadRequestError(f"unsupported extension: {ext}", details={"accepts": self.accepts})
 
         doc_format = ext.lstrip(".")
+        detected_format = detect_document_format(file_bytes)
         extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
         source_text: str | None = None
         conversion_meta: dict = {}
@@ -170,8 +173,8 @@ class TuoshuSkill(SkillBase):
             route_text = f"{filename}\n{source_text or ''}"
             if parse_result.vision_images:
                 data_urls = [
-                    image_to_data_url(image, mime=f"image/{doc_format}")
-                    for image in parse_result.vision_images
+                    image_to_data_url(image, mime=mime)
+                    for image, mime in parse_result.vision_inputs
                 ]
                 user_content = build_user_message_vision(
                     data_urls,
@@ -219,8 +222,30 @@ class TuoshuSkill(SkillBase):
                     scale=settings.vision_pdf_render_scale,
                 )
                 data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
-                if conversion_meta:
-                    conversion_meta["parser"] = "vision"
+                parser_review_issues.extend(
+                    {
+                        "code": "vision_only_unverified",
+                        "field": f"source.pages[{page_index}]",
+                        "message": "扫描 PDF 页面仅由 vision 识别，没有独立 OCR 文本可交叉核验，必须人工复核",
+                        "source_values": [],
+                        "blocking": True,
+                    }
+                    for page_index in range(len(page_images))
+                )
+                conversion_meta = {
+                    "parser": "vision",
+                    "parser_fallback": True,
+                    "input_format": "pdf",
+                    "page_routes": [
+                        {
+                            "page": page_index + 1,
+                            "parser": "vision",
+                            "confidence": "low",
+                            "issues": ["vision_only_unverified"],
+                        }
+                        for page_index in range(len(page_images))
+                    ],
+                }
                 user_content = build_user_message_vision(
                     data_urls,
                     filename=filename,
@@ -231,8 +256,8 @@ class TuoshuSkill(SkillBase):
                 source_text = str(markdown) or None
                 route_text = f"{filename}\n{source_text or ''}"
                 data_urls = [
-                    image_to_data_url(image, mime="image/png")
-                    for image in parse_result.vision_images
+                    image_to_data_url(image, mime=mime)
+                    for image, mime in parse_result.vision_inputs
                 ]
                 user_content = build_user_message_vision(
                     data_urls,
@@ -328,10 +353,12 @@ class TuoshuSkill(SkillBase):
         if parser_review_issues:
             data.setdefault("review_issues", []).extend(parser_review_issues)
         filename_year = re.search(r"(?<!\d)(20\d{2})(?!\d)", filename)
+        template_hint = mapper_result.template_id or route.template_hint
         data = finalize_extraction(
             data,
             source_text=source_text,
             reference_year=int(filename_year.group(1)) if filename_year else None,
+            template_hint=template_hint,
         )
 
         # 确保 source 字段齐全（若模型漏填）
@@ -341,7 +368,7 @@ class TuoshuSkill(SkillBase):
             data["source"] = src
         src.setdefault("file", filename)
         src.setdefault("doc_format", doc_format)
-        src["template_hint"] = mapper_result.template_id or route.template_hint
+        src["template_hint"] = template_hint
         src.setdefault("extracted_at", extracted_at)
 
         try:
@@ -354,4 +381,25 @@ class TuoshuSkill(SkillBase):
         result_dict = validated.model_dump()
         safe_meta = {key: meta.get(key) for key in ("model", "usage") if key in meta}
         safe_meta.update(conversion_meta)
-        return {"result": result_dict, "content": source_text or "", "meta": safe_meta}
+        converted_content = source_text or ""
+        coverage = conversion_meta.get("coverage")
+        coverage_complete = not isinstance(coverage, dict) or coverage.get("complete") is not False
+        safe_meta.update(
+            {
+                "source_sha256": hashlib.sha256(file_bytes).hexdigest(),
+                "content_sha256": (
+                    hashlib.sha256(converted_content.encode("utf-8")).hexdigest()
+                    if converted_content
+                    else None
+                ),
+                "source_bytes": len(file_bytes),
+                "content_chars": len(converted_content),
+                "detected_format": detected_format,
+                "conversion_status": (
+                    "needs_review"
+                    if parser_review_issues or not converted_content or not coverage_complete
+                    else "converted"
+                ),
+            }
+        )
+        return {"result": result_dict, "content": converted_content, "meta": safe_meta}

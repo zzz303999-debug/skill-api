@@ -1,7 +1,7 @@
 [project]
 name = "skill-api"
 version = "0.1.0"
-description = "Multi-skill extraction API service backed by OpenClaw gateway"
+description = "Multi-skill extraction API service backed by an OpenAI-compatible LLM"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

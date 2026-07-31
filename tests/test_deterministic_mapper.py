@@ -19,6 +19,8 @@ def test_exact_bingsheng_fingerprint_maps_known_fields():
     assert result.values["internal_ref"] == "BSSE2105280058"
     assert result.values["mbl_no"] == "1SHA044022"
     assert result.values["doc_date"] == "2021-05-28"
+    assert result.values["shipper_company"] == "上海秉晟国际物流有限公司"
+    assert result.values["shipper_agent"] == "上海秉晟国际物流有限公司"
     assert result.values["containers"][0] == {
         "type": "40NOR",
         "qty": 1,
@@ -26,6 +28,23 @@ def test_exact_bingsheng_fingerprint_maps_known_fields():
         "gross_weight_kg": 0.0,
         "volume_cbm": 0.0,
     }
+
+
+def test_bingsheng_variant_maps_header_company_for_order_title():
+    markdown = (
+        BSSE_MARKDOWN.replace("BSSE2105280058", "BSSE2108100016")
+        .replace("日期：20 | 21.5.28", "日期： | 2021.8.10")
+        .replace("1SHA044022", "1KT251889")
+        .replace("MAERSK LAVRAS", "MAERSK HAMBURG")
+        .replace("122W", "131W")
+    )
+
+    result = map_template(markdown)
+
+    assert result.template_id == "bingsheng_transport"
+    assert result.values["internal_ref"] == "BSSE2108100016"
+    assert result.values["mbl_no"] == "1KT251889"
+    assert result.values["shipper_company"] == "上海秉晟国际物流有限公司"
 
 
 def test_changed_header_cannot_hit_old_template():

@@ -14,8 +14,7 @@ class Settings(BaseSettings):
 
     # API
     api_host: str = "0.0.0.0"
-    api_port: int = 8080
-    api_key: str = "change-me"
+    api_port: int = 9000
     api_max_upload_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
     api_batch_max_files: int = Field(default=10, ge=1, le=100)
     skill_max_concurrency: int = Field(default=4, ge=1, le=64)
@@ -31,17 +30,15 @@ class Settings(BaseSettings):
     )
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
-    # OpenClaw
-    openclaw_base_url: str = "http://127.0.0.1:18789/v1"
-    openclaw_api_key: str = ""
-
-    # LLM
-    llm_model_default: str = "openclaw"
+    # OpenAI-compatible LLM
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str = ""
+    llm_model_default: str = "gpt-5.4"
     llm_timeout_seconds: int = 180
     llm_max_retries: int = 2
 
     # Vision
-    vision_max_pdf_pages: int = Field(default=3, ge=1, le=10)
+    vision_max_pdf_pages: int = Field(default=10, ge=1, le=10)
     vision_pdf_render_scale: float = Field(default=2.0, gt=0, le=4.0)
 
     # PDF 文本层页级质量探测

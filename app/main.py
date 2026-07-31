@@ -14,14 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, File, Request, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, create_model
 
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
-from app.deps import require_api_key
 from app.errors import BadRequestError, SkillAPIError
 from app.logging_conf import get_logger, setup_logging
 from app.orders import (
@@ -40,11 +39,11 @@ log = get_logger(__name__)
 app = FastAPI(
     title="skill-api",
     version="0.1.0",
-    description="Multi-skill extraction API service backed by OpenClaw gateway.",
+    description="Multi-skill extraction API service backed by an OpenAI-compatible LLM.",
 )
 
 # Skill.run 是同步契约，统一放到有界线程池，避免文件转换和 LLM 请求阻塞事件循环，
-# 同时限制对 OpenClaw 网关的并发压力。
+# 同时限制对 LLM 服务的并发压力。
 _skill_executor = ThreadPoolExecutor(
     max_workers=settings.skill_max_concurrency,
     thread_name_prefix="skill-runner",
@@ -97,6 +96,12 @@ async def _read_upload(file: UploadFile) -> bytes:
             code="file_too_large",
             details={"max_bytes": settings.api_max_upload_bytes},
         )
+    if not content:
+        raise BadRequestError(
+            "uploaded file is empty",
+            code="empty_file",
+            details={"file": file.filename or "unnamed"},
+        )
     return content
 
 
@@ -133,10 +138,7 @@ async def _extract_order_text(text: str):
     tags=["orders"],
     summary="Extract and create an order from free text",
 )
-async def create_order_from_text(
-    body: CreateOrderFromTextRequest,
-    _: Annotated[None, Depends(require_api_key)],
-) -> dict[str, Any]:
+async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, Any]:
     validate_order_api_config()
     text = body.content.strip()
     encoded = text.encode("utf-8")
@@ -168,7 +170,6 @@ def _make_extract_route(skill: SkillBase):
 
     async def handler(
         file: Annotated[UploadFile, File()],
-        _: Annotated[None, Depends(require_api_key)],
     ) -> dict[str, Any]:
         content = await _read_upload(file)
         out = await _run_skill(skill, content, file.filename or "unnamed")
@@ -192,11 +193,14 @@ def _make_batch_extract_route(skill: SkillBase):
         try:
             content = await _read_upload(f)
             out = await _run_skill(skill, content, f.filename or "unnamed")
-            return {
+            result = {
                 "file": f.filename or "unnamed",
                 "result": out["result"],
                 "meta": out.get("meta", {}),
             }
+            if skill.include_content:
+                result["content"] = out.get("content", "")
+            return result
         except SkillAPIError as e:
             return {
                 "file": f.filename or "unnamed",
@@ -211,7 +215,6 @@ def _make_batch_extract_route(skill: SkillBase):
 
     async def handler(
         files: Annotated[list[UploadFile], File()],
-        _: Annotated[None, Depends(require_api_key)],
     ) -> dict[str, Any]:
         if len(files) > settings.api_batch_max_files:
             raise BadRequestError(

@@ -19,14 +19,13 @@
 HTTP 层     →  app/main.py（路由自动注册）
 调度层      →  app/core/{skill_base, registry}
 Skill 层    →  app/skills/<name>/
-LLM 层      →  app/llm/openclaw.py（唯一出口）
+LLM 层      →  app/llm/client.py（唯一出口）
 ```
 
-### 龙虾运行环境
+### LLM 运行环境
 
-本服务部署在龙虾 / OpenClaw 环境中，通过 OpenAI 兼容协议调用同环境提供的
-OpenClaw 网关。网关地址、API Key、并发数等必须通过部署环境变量注入，不要把
-真实凭证或固定环境地址写进代码和 `.env.example`。
+本服务通过 OpenAI-compatible API 调用外部 LLM。服务地址、API Key、模型名和并发数
+必须通过部署环境变量注入，不要把真实凭证或固定环境地址写进代码和 `.env.example`。
 
 `SkillBase.run()` 保持同步契约，但 FastAPI handler **不得直接调用同步 run()**。
 `app/main.py` 会统一把 Skill 放进有界线程池执行：
@@ -189,14 +188,14 @@ messages = [
 ```
 
 模型默认名以 `app/config.py` 和部署环境的 `LLM_MODEL_DEFAULT` 为准。
-文档中不要假定具体底层供应商模型，因为龙虾网关可能按 agent 或环境路由。
+文档中不要假定部署环境一定使用某个特定 LLM 供应商。
 需要指定其他模型时向 `chat()` / `chat_json()` 传 `model=`，不要直接读取不存在的配置项。
 
 ### 图片与扫描 PDF
 
 - 普通图片直接转 data URL 走 vision
 - 带文本层的 PDF 先转 Markdown
-- 文本层过短的扫描 PDF 会渲染前 `VISION_MAX_PDF_PAGES` 页为 PNG，再作为多图 vision 输入
+- 文本层过短的扫描 PDF 会完整渲染为 PNG；超过 `VISION_MAX_PDF_PAGES` 时直接报错，禁止截断
 - `VISION_PDF_RENDER_SCALE` 控制渲染清晰度和内存占用
 - `.doc` 无法通过 LibreOffice 转换时返回 `ConvertError`，不要只把 `SCAN_OR_IMAGE_HINT` 文本交给 LLM
 
@@ -207,7 +206,6 @@ messages = [
 用 `app/errors.py` 里的类型：
 
 - `BadRequestError` (400) — 客户端输入问题
-- `UnauthorizedError` (401) — 鉴权失败
 - `SkillNotFoundError` (404)
 - `ConvertError` (422) — 格式转换失败
 - `LLMError` (502) — 网关/模型问题
