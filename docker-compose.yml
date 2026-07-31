@@ -8,6 +8,8 @@ services:
       - "9000:9000"
     env_file:
       - .env
+    environment:
+      MINERU_BASE_URL: http://mineru:8888
     depends_on:
       mineru:
         condition: service_healthy
@@ -37,6 +39,8 @@ services:
       MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     expose:
       - "8888"
+    ports:
+      - "8888:8888"
     healthcheck:
       test:
         ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/docs', timeout=3)"]
