@@ -377,36 +377,86 @@ def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseRes
     except Exception as exc:
         raise ValueError("pdf quality probe failed") from exc
 
-    pages: list[ParsedPage] = []
+    # Phase 1: probe every page and format qualified text-layer pages inside
+    # the pdfplumber context (page objects are only valid while the PDF is
+    # open).  OCR candidates are collected for parallel processing below.
+    ocr_jobs: list[tuple[int, PageQuality]] = []
+    formatted_pages: dict[int, ParsedPage] = {}
+    total_pages = 0
     try:
         for page_index, page in enumerate(pdf.pages):
+            total_pages += 1
             quality = probe_pdf_page(page)
             if quality.text_layer_qualified:
-                pages.append(
-                    ParsedPage(
-                        page_number=page_index + 1,
-                        parser="pdfplumber",
-                        markdown=_format_pdf_page(page, page_index + 1),
-                        quality=quality,
-                    )
+                formatted_pages[page_index] = ParsedPage(
+                    page_number=page_index + 1,
+                    parser="pdfplumber",
+                    markdown=_format_pdf_page(page, page_index + 1),
+                    quality=quality,
                 )
             else:
-                parsed_page = _parse_ocr_page(file_bytes, filename, page_index, quality)
-                pages.append(parsed_page)
-                vision_page_count = sum(page.vision_image is not None for page in pages)
-                if vision_page_count > settings.vision_max_pdf_pages:
-                    raise ConvertError(
-                        "PDF has too many pages for complete vision conversion",
-                        code="pdf_page_limit_exceeded",
-                        details={
-                            "vision_page_count": vision_page_count,
-                            "max_pages": settings.vision_max_pdf_pages,
-                        },
-                    )
+                ocr_jobs.append((page_index, quality))
     finally:
         pdf.close()
-    if not pages:
+
+    if not total_pages:
         raise ConvertError("PDF has no pages")
+
+    # Phase 2: run MinerU OCR on unqualified pages in parallel.  Each call
+    # opens its own httpx client and pypdfium2 document, so they are safe to
+    # run concurrently.  Bounded by mineru_ocr_concurrency to avoid
+    # overwhelming the local MinerU service.
+    ocr_results: dict[int, ParsedPage] = {}
+    if ocr_jobs:
+        if len(ocr_jobs) == 1:
+            page_index, quality = ocr_jobs[0]
+            ocr_results[page_index] = _parse_ocr_page(
+                file_bytes, filename, page_index, quality
+            )
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            max_workers = min(len(ocr_jobs), settings.mineru_ocr_concurrency)
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="mineru-ocr",
+            ) as pool:
+                future_to_index = {
+                    pool.submit(
+                        _parse_ocr_page,
+                        file_bytes,
+                        filename,
+                        page_index,
+                        quality,
+                    ): page_index
+                    for page_index, quality in ocr_jobs
+                }
+                for future in as_completed(future_to_index):
+                    page_index = future_to_index[future]
+                    ocr_results[page_index] = future.result()
+
+    # Merge pages back in document order.
+    pages = [
+        ocr_results.get(i) or formatted_pages.get(i)
+        for i in range(total_pages)
+    ]
+    if any(p is None for p in pages):
+        raise ConvertError("PDF page routing left a gap")
+
+    # Enforce vision page limit after the fact.  Pre-checking would be
+    # stricter, but counting actual vision_image pages keeps the original
+    # semantics: a page that MinerU handles with high confidence does not
+    # carry a vision_image and should not count against the budget.
+    vision_page_count = sum(page.vision_image is not None for page in pages)
+    if vision_page_count > settings.vision_max_pdf_pages:
+        raise ConvertError(
+            "PDF has too many pages for complete vision conversion",
+            code="pdf_page_limit_exceeded",
+            details={
+                "vision_page_count": vision_page_count,
+                "max_pages": settings.vision_max_pdf_pages,
+            },
+        )
     return ParseResult(input_format="pdf", pages=pages)
 
 

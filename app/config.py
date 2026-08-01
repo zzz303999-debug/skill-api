@@ -8,7 +8,6 @@ from typing import Any
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 # 使用基于 __file__ 的绝对路径，避免工作目录不同导致 .env 无法加载
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -43,6 +42,8 @@ class Settings(BaseSettings):
     # Vision
     vision_max_pdf_pages: int = Field(default=10, ge=1, le=10)
     vision_pdf_render_scale: float = Field(default=2.0, gt=0, le=4.0)
+    # 图片高置信时跳过 LLM vision 交叉核验，只用 MinerU OCR 文本走 LLM 以提速
+    image_vision_skip_when_confident: bool = True
 
     # PDF 文本层页级质量探测
     parser_text_min_chars: int = Field(default=50, ge=1, le=1000)
@@ -56,6 +57,7 @@ class Settings(BaseSettings):
     mineru_expected_version: str = "2.5.4"
     mineru_timeout_seconds: int = Field(default=120, ge=1, le=1800)
     mineru_fallback_enabled: bool = True
+    mineru_ocr_concurrency: int = Field(default=4, ge=1, le=16)
 
     # 存储
     storage_dir: Path = Path("./storage")

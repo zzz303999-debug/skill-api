@@ -334,12 +334,13 @@ def test_parser_fallback_issue_reaches_final_output(monkeypatch):
     assert response["meta"]["page_routes"][0]["parser"] == "vision"
 
 
-def test_high_confidence_mineru_image_is_cross_checked_against_original(monkeypatch):
+def test_high_confidence_mineru_image_skips_vision_for_speed(monkeypatch):
+    """MinerU 高置信时跳过 LLM vision 交叉核验，只用 OCR 文本走 LLM 以提速。"""
     import app.skills.tuoshu.skill as skill_module
     from app.document_parsers.models import ParsedPage, ParseResult
 
     image_bytes = b"\x89PNG\r\n\x1a\nimage"
-    parsed_text = "备注：出口清关的装完箱后请及时进港 作业资水！"
+    parsed_text = "备注：出口清关的装完箱后请及时进港"
     captured: dict = {}
     parse_result = ParseResult(
         input_format="png",
@@ -360,6 +361,47 @@ def test_high_confidence_mineru_image_is_cross_checked_against_original(monkeypa
 
     monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
 
+    result = TuoshuSkill().run(file_bytes=image_bytes, filename="order.png")
+
+    user_content = captured["messages"][-1]["content"]
+    # 高置信 MinerU 跳过 LLM vision，走纯文本通道
+    assert isinstance(user_content, str)
+    assert parsed_text in user_content
+    assert "image_url" not in user_content
+    # 标注跳过了 vision 交叉核验，提示人工抽检关键字段
+    issues = result["result"].get("review_issues", [])
+    assert any(i["code"] == "vision_cross_check_skipped" for i in issues)
+
+
+def test_low_confidence_mineru_image_keeps_vision_cross_check(monkeypatch):
+    """MinerU 低置信/fallback 时仍携原图走 LLM vision 交叉核验。"""
+    import app.skills.tuoshu.skill as skill_module
+    from app.document_parsers.models import ParsedPage, ParseResult
+
+    image_bytes = b"\x89PNG\r\n\x1a\nimage"
+    parsed_text = "备注：出口清关的装完箱后请及时进港"
+    captured: dict = {}
+    parse_result = ParseResult(
+        input_format="png",
+        pages=[
+            ParsedPage(
+                page_number=1,
+                parser="vision",
+                markdown=parsed_text,
+                confidence="low",
+                vision_image=image_bytes,
+                vision_mime="image/png",
+            )
+        ],
+    )
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+
+    def fake_chat_json(messages, **_kwargs):
+        captured["messages"] = messages
+        return {"source": {}}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+
     TuoshuSkill().run(file_bytes=image_bytes, filename="order.png")
 
     user_content = captured["messages"][-1]["content"]
@@ -369,7 +411,7 @@ def test_high_confidence_mineru_image_is_cross_checked_against_original(monkeypa
     assert "OCR 中存在但图片上看不到的词句必须剔除" in text_content
     assert len(images) == 1
     assert images[0]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert images[0]["image_url"]["detail"] == "low"
+    assert images[0]["image_url"]["detail"] == "high"
 
 
 def test_upload_limit(monkeypatch):

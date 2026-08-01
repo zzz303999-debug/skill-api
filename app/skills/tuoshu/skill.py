@@ -163,7 +163,8 @@ class TuoshuSkill(SkillBase):
         parser_review_issues: list[dict] = []
         route_text = filename
 
-        # 图片优先原图直传 MinerU；硬失败或低置信时才携原图走 vision。
+        # 图片优先原图直传 MinerU；高置信时跳过 LLM vision 只用 OCR 文本提速，
+        # 硬失败或低置信时才携原图走 vision 交叉核验。
         if is_image(ext):
             parse_result = convert_image_to_parse_result(file_bytes, filename)
             doc_format = parse_result.input_format
@@ -171,7 +172,12 @@ class TuoshuSkill(SkillBase):
             parser_review_issues = parse_result.review_issues()
             source_text = parse_result.markdown or None
             route_text = f"{filename}\n{source_text or ''}"
-            if parse_result.vision_images:
+            skip_vision = (
+                settings.image_vision_skip_when_confident
+                and parse_result.parser == "mineru"
+                and not parse_result.parser_fallback
+            )
+            if parse_result.vision_images and not skip_vision:
                 data_urls = [
                     image_to_data_url(image, mime=mime)
                     for image, mime in parse_result.vision_inputs
@@ -192,6 +198,16 @@ class TuoshuSkill(SkillBase):
                     ),
                 )
             else:
+                if skip_vision:
+                    parser_review_issues.append(
+                        {
+                            "code": "vision_cross_check_skipped",
+                            "field": "source",
+                            "message": "MinerU 高置信，已跳过 LLM vision 交叉核验以提速，建议人工抽检关键编号与数值",
+                            "source_values": [],
+                            "blocking": False,
+                        }
+                    )
                 user_content = build_user_message_text(
                     source_text or "",
                     filename=filename,
