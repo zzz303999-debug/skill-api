@@ -9,8 +9,11 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# 使用基于 __file__ 的绝对路径，避免工作目录不同导致 .env 无法加载
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
 
     # API
     api_host: str = "0.0.0.0"
