@@ -15,6 +15,7 @@ from __future__ import annotations
 import io
 import os
 import posixpath
+import re
 import shutil
 import subprocess
 import sys
@@ -616,6 +617,40 @@ def convert_docx(path: str) -> tuple[str, dict[str, object]]:
     return buf.getvalue(), package_report
 
 
+# ---------- 临时目录 ----------
+
+_SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _make_temp_dir(*, prefix: str = "") -> tempfile.TemporaryDirectory[str]:
+    """创建可写的临时目录，候选优先级：`$TMPDIR` → 系统默认 → 工作区 `.tmp`。
+
+    macOS 上 `tempfile.gettempdir()` 可能缓存到 `/tmp`，而系统服务（如
+    textutil）无权写入 `/tmp`，会报 `You don't have permission`；而
+    `$TMPDIR`（`/var/folders/.../T`）是用户私有且始终可写的目录，必须优先。
+    """
+    bases: list[Path] = []
+    env_tmp = os.environ.get("TMPDIR")
+    if env_tmp:
+        bases.append(Path(env_tmp))
+    bases.append(Path(tempfile.gettempdir()))
+    bases.append(Path.cwd() / ".tmp")
+    for base in bases:
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            return tempfile.TemporaryDirectory(prefix=prefix, dir=str(base))
+        except OSError:
+            continue
+    return tempfile.TemporaryDirectory(prefix=prefix)
+
+
+def _safe_stem(name: str) -> str:
+    """把文件名 stem 中非 ASCII 字符替换为 `_`，规避 textutil 等系统工具
+    对非 ASCII 输出路径的写入失败问题。"""
+    safe = _SAFE_STEM_RE.sub("_", name).strip("._")
+    return safe or "document"
+
+
 # ---------- 分支：doc（需 libreoffice） ----------
 
 def _find_soffice() -> str | None:
@@ -744,9 +779,8 @@ def convert_doc(path: str) -> tuple[str, dict[str, object] | None]:
             None,
         )
 
-    with tempfile.TemporaryDirectory() as tmpd:
-        stem = Path(path).stem
-        docx_path = Path(tmpd) / f"{stem}.docx"
+    with _make_temp_dir(prefix="tuoshu-doc-") as tmpd:
+        docx_path = Path(tmpd) / f"{_safe_stem(Path(path).stem)}.docx"
         if soffice:
             command = [soffice, "--headless", "--convert-to", "docx", "--outdir", tmpd, path]
             converter_name = "libreoffice"
@@ -768,7 +802,7 @@ def convert_doc(path: str) -> tuple[str, dict[str, object] | None]:
             detail = f"{e}"
             if stderr_text:
                 detail += f" | stderr: {stderr_text}"
-            detail += f" | tmpdir={tempfile.gettempdir()} env_TMPDIR={os.environ.get('TMPDIR')}"
+            detail += f" | tmpdir={tempfile.gettempdir()} env_TMPDIR={os.environ.get('TMPDIR')} workdir={tmpd}"
             return f"SCAN_OR_IMAGE_HINT: {path}  # {converter_name} 转换失败: {detail}", None
 
         if not docx_path.exists():

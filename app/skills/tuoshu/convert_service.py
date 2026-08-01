@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import io
 import re
-import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -608,7 +607,8 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
             raise ConvertError(f"MinerU contract check failed: {exc}") from exc
 
     handler = _DISPATCH[ext]
-    with tempfile.TemporaryDirectory(prefix="tuoshu-convert-") as tmp_dir:
+    with _conv._make_temp_dir(prefix="tuoshu-convert-") as tmp_dir:
+        # 保持原名落盘：markdown 首行标题取自文件名（golden 已固定）。
         tmp_path = Path(tmp_dir) / (Path(filename).name or f"document{ext}")
         tmp_path.write_bytes(file_bytes)
         try:

@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skill-api 请求日志</title>
+<style>
+  :root {
+    --bg: #0f172a;
+    --panel: #1e293b;
+    --border: #334155;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --ok: #22c55e;
+    --warn: #eab308;
+    --err: #ef4444;
+    --accent: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  header {
+    position: sticky; top: 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 20px;
+    z-index: 10;
+  }
+  h1 { margin: 0 0 10px; font-size: 18px; }
+  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filters input {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 10px;
+    min-width: 150px;
+  }
+  .filters input:focus { outline: 1px solid var(--accent); }
+  .filters button {
+    background: var(--accent);
+    border: none; color: #0f172a;
+    border-radius: 6px; padding: 6px 14px;
+    font-weight: 600; cursor: pointer;
+  }
+  .filters label { color: var(--muted); user-select: none; }
+  #count { color: var(--muted); margin-left: auto; }
+  main { padding: 12px 20px 40px; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--panel);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td { padding: 8px 12px; text-align: left; white-space: nowrap; }
+  th {
+    background: #17223b;
+    color: var(--muted);
+    font-weight: 600;
+    position: sticky; top: 118px;
+  }
+  td { border-top: 1px solid var(--border); }
+  td.file { white-space: normal; word-break: break-all; min-width: 180px; }
+  td.path { font-family: ui-monospace, Menlo, monospace; }
+  .method { font-weight: 700; }
+  .badge {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+  }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .err { color: var(--err); }
+  .muted { color: var(--muted); }
+  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  #btn-more {
+    display: block; margin: 16px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px; padding: 8px 24px;
+    cursor: pointer;
+  }
+  #btn-more:disabled { opacity: 0.4; cursor: default; }
+</style>
+</head>
+<body>
+<header>
+  <h1>请求日志</h1>
+  <div class="filters">
+    <input id="f-file" placeholder="按文件名过滤">
+    <input id="f-path" placeholder="按路径过滤">
+    <input id="f-status" placeholder="状态码" type="number" min="100" max="599">
+    <button id="btn-refresh">刷新</button>
+    <label><input type="checkbox" id="auto-refresh" checked> 自动刷新 10s</label>
+    <span id="count"></span>
+  </div>
+</header>
+<main>
+  <table>
+    <thead>
+      <tr>
+        <th>时间</th><th>方法</th><th>路径</th><th>文件</th>
+        <th>耗时</th><th>状态</th><th>错误码</th><th>请求 ID</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none">暂无日志</div>
+  <button id="btn-more" style="display:none">加载更多</button>
+</main>
+<script>
+const LIMIT = 200;
+let offset = 0;
+let total = 0;
+let busy = false;
+
+const $ = (id) => document.getElementById(id);
+
+function fmtTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+    " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
+  );
+}
+
+function statusClass(code) {
+  if (code < 300) return "ok";
+  if (code < 500) return "warn";
+  return "err";
+}
+
+function esc(s) {
+  const div = document.createElement("div");
+  div.textContent = s == null ? "" : String(s);
+  return div.innerHTML;
+}
+
+function buildQuery(reset) {
+  if (reset) offset = 0;
+  const params = new URLSearchParams();
+  params.set("limit", LIMIT);
+  params.set("offset", offset);
+  const file = $("f-file").value.trim();
+  const path = $("f-path").value.trim();
+  const status = $("f-status").value.trim();
+  if (file) params.set("file", file);
+  if (path) params.set("path", path);
+  if (status) params.set("status", status);
+  return params;
+}
+
+async function load(reset) {
+  if (busy) return;
+  busy = true;
+  try {
+    const resp = await fetch("/api/logs?" + buildQuery(reset).toString());
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    total = data.total;
+    const tbody = $("rows");
+    if (reset) tbody.innerHTML = "";
+    if (!data.items.length && reset) {
+      $("empty").style.display = "block";
+    } else {
+      $("empty").style.display = "none";
+    }
+    for (const item of data.items) {
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        "<td class='muted'>" + fmtTime(item.ts) + "</td>" +
+        "<td><span class='method'>" + esc(item.method) + "</span></td>" +
+        "<td class='path'>" + esc(item.path) + "</td>" +
+        "<td class='file'>" + esc(item.file) + "</td>" +
+        "<td>" + (item.duration_ms != null ? esc(item.duration_ms) + " ms" : "") + "</td>" +
+        "<td><span class='badge " + statusClass(item.status) + "'>" + esc(item.status) + "</span></td>" +
+        "<td class='" + (item.error_code ? "err" : "muted") + "'>" + esc(item.error_code || "") + "</td>" +
+        "<td class='muted'>" + esc(item.request_id) + "</td>";
+      tbody.appendChild(tr);
+    }
+    offset = data.offset + data.items.length;
+    $("count").textContent = "共 " + total + " 条";
+    $("btn-more").style.display = offset < total ? "block" : "none";
+    $("btn-more").disabled = false;
+  } catch (e) {
+    console.error("load logs failed:", e);
+  } finally {
+    busy = false;
+  }
+}
+
+$("btn-refresh").addEventListener("click", () => load(true));
+$("btn-more").addEventListener("click", () => load(false));
+for (const id of ["f-file", "f-path"]) {
+  const el = $(id);
+  let timer = null;
+  el.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => load(true), 400);
+  });
+}
+$("f-status").addEventListener("change", () => load(true));
+
+setInterval(() => {
+  if ($("auto-refresh").checked) load(true);
+}, 10000);
+
+load(true);
+</script>
+</body>
+</html>

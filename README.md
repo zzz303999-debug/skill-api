@@ -1,8 +1,6 @@
 # skill-api
 
-统一的 skill 抽取 API 服务。把散落的 Claude/OpenCode skill 封装成带强类型契约的
-HTTP 接口，供业务系统调用。目前内置海运托书抽取，并支持通过 MinerU 增强 PDF/图片
-结构化解析。
+统一的 skill 抽取 API 服务。把散落的 skill 封装成带强类型契约的 HTTP 接口，供业务系统调用。目前内置托书抽取，并支持通过 MinerU 增强 PDF/图片结构化解析。
 
 ## 特性
 
@@ -11,6 +9,8 @@ HTTP 接口，供业务系统调用。目前内置海运托书抽取，并支持
 - **统一 LLM 出口**：所有 skill 通过 `app.llm` 调用 OpenAI-compatible API
 - **页级质量路由**：合格 PDF 页走 `pdfplumber`，扫描/残缺页走 MinerU
 - **图片原图解析**：按文件签名校验格式后直传 MinerU，失败或低置信时转视觉模型
+- **订单自由文本抽取**：`POST /orders` 只读显式标签生成订单数据并调用下单接口，不调用 LLM
+- **性能可调**：`LLM_THINKING_MODE=disabled` 降低 reasoning token 与耗时；图片 OCR 高置信时跳过 vision 交叉核验
 - **零静默错误**：解析降级、模板哨兵失败和 Mapper/AI 冲突均进入 blocking 复核项
 - **同步 API**：先跑可行版本，后续可无缝加异步任务队列
 - **Docker 部署**：`docker compose up -d` 一键起
@@ -20,29 +20,49 @@ HTTP 接口，供业务系统调用。目前内置海运托书抽取，并支持
 ```
 skill-api/
 ├── app/
-│   ├── main.py                  # FastAPI 入口，启动时自动注册 skill
-│   ├── config.py                # 环境变量
-│   ├── errors.py                # 统一错误类型
-│   ├── logging_conf.py          # JSON 日志
-│   ├── llm/client.py            # OpenAI-compatible 客户端（唯一 LLM 出口）
-│   ├── document_parsers/
-│   │   └── mineru.py            # MinerU HTTP 客户端与响应解析
+│   ├── main.py                  # FastAPI 入口：路由注册、有界线程池、统一错误处理
+│   ├── config.py                # 环境变量（pydantic-settings，基于 __file__ 定位 .env）
+│   ├── errors.py                # 统一错误类型（SkillAPIError）
+│   ├── logging_conf.py          # JSON 结构化日志
 │   ├── core/
-│   │   ├── skill_base.py        # SkillBase 抽象
-│   │   └── registry.py          # 注册中心 + 自动发现
+│   │   ├── skill_base.py        # SkillBase 抽象基类 + SkillMeta
+│   │   └── registry.py          # Skill 注册中心 + 自动发现
+│   ├── llm/
+│   │   └── client.py            # OpenAI-compatible 客户端（唯一 LLM 出口；thinking/json_schema 探测降级）
+│   ├── document_parsers/
+│   │   ├── mineru.py            # MinerU HTTP 客户端与响应解析
+│   │   └── models.py            # 解析结果共享数据结构
+│   ├── orders/                  # 自由文本订单抽取（POST /orders）
+│   │   ├── schema.py            # 输入输出契约
+│   │   ├── extractor.py         # 只读显式“字段：值”，不补全、不推断、不归一化
+│   │   ├── mapper.py            # 校验抽取结果并生成下游 data 参数
+│   │   └── client.py            # 订单创建 HTTP 客户端（创建请求不自动重试）
 │   └── skills/
-│       └── tuoshu/              # 托书抽取 skill
+│       └── tuoshu/              # 海运托书抽取 skill
 │           ├── __init__.py      # register(TuoshuSkill())
-│           ├── skill.py         # 编排：convert → prompt → LLM → 校验
-│           ├── schema.py        # Pydantic 输出 schema
-│           ├── prompt.py        # prompt 组装
-│           ├── convert_service.py  # bytes → markdown 包装层
-│           ├── converter.py     # 从 tuoshu-extractor 复用的转换器
-│           └── references/      # 业务知识 + few-shot
+│           ├── skill.py         # 编排：convert → prompt → LLM → 后处理 → 校验
+│           ├── schema.py        # Pydantic 输出 schema（强类型，进 OpenAPI）
+│           ├── chinese_schema.py  # 英文结果 → 中文 key 展示适配器
+│           ├── prompt.py        # prompt 组装（规则 + few-shot 本地路由）
+│           ├── convert_service.py  # bytes → markdown 转换包装层
+│           ├── converter.py     # doc/docx/xlsx/pdf/图片 → markdown 转换器（soffice/textutil/pdfplumber）
+│           ├── deterministic_mapper.py  # 模板指纹 + 确定性字段映射
+│           ├── normalizer.py    # LLM 输出字段归一化
+│           ├── post_common.py   # 后处理公共工具：issue 管理、显式字段提取（含跨段提取）
+│           ├── post_checks.py   # 后处理校验与修复：单据、容器、发货人、grounding
+│           ├── postprocessor.py # 后处理编排：确定性映射 + review_issues 复核
+│           └── references/      # 业务知识（ports/carriers/aliases/…）+ few-shot examples
+├── mineru/
+│   └── Dockerfile               # MinerU CPU 镜像构建（模型随镜像发布）
+├── scripts/
+│   └── deploy.sh                # 服务器部署脚本（拉码、构建、健康检查、回滚）
+├── tests/                       # 单元测试 + golden 资产（tests/golden/tuoshu/）
 ├── Dockerfile
-├── docker-compose.yml
-├── Makefile
+├── docker-compose.yml           # 本地/单机部署（skill-api + MinerU）
+├── docker-compose.deploy.yml    # 生产部署（镜像发布 + 构建 MinerU）
+├── Makefile                     # install/dev/test/lint/docker 等命令
 ├── pyproject.toml
+├── uv.lock
 └── .env.example
 ```
 
@@ -287,6 +307,24 @@ server {
 存活检查，返回 API 状态和已注册 skill。该接口不调用 LLM、MinerU 或订单
 接口，因此 `200` 只表示 FastAPI 进程可响应，不表示端到端抽取可用。
 
+### `GET /logs`
+内置的请求日志查看页面（浏览器直接访问）。表格展示每条请求的时间、方法、
+路径、上传文件名、耗时、状态码、错误码和请求 ID，支持按文件名/路径/状态码
+筛选、自动刷新（10s）与分页加载。日志写入 `storage/logs/requests.jsonl`，
+服务重启后仍可查询历史；`/logs` 与 `/api/logs` 自身的请求不记录。
+
+### `GET /api/logs`
+请求访问日志查询接口，返回 JSON（时间倒序）：
+
+- `limit`/`offset`：分页，默认 `limit=200`、`offset=0`
+- `file`/`path`：按文件名、路径子串过滤
+- `status`：按状态码过滤
+- `request_id`：按请求 ID 过滤（请求可携带 `X-Request-ID` 头透传）
+
+```bash
+curl "http://localhost:9000/api/logs?file=托书&limit=20"
+```
+
 ### `POST /skills/{skill_name}/extract`
 运行指定 skill，返回结构化 JSON。
 
@@ -367,9 +405,13 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 
 | 变量 | 说明 |
 |------|------|
+| `API_HOST` | 监听地址，默认 `0.0.0.0` |
+| `API_PORT` | 监听端口，默认 `9000` |
 | `LLM_BASE_URL` | OpenAI-compatible API 地址，默认 `https://api.openai.com/v1` |
 | `LLM_API_KEY` | LLM 服务的 Bearer Token |
 | `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `gpt-5.4` |
+| `LLM_TIMEOUT_SECONDS` | LLM 调用超时秒数，默认 180 |
+| `LLM_MAX_RETRIES` | LLM 调用重试次数，默认 2 |
 | `LLM_THINKING_MODE` | 思考模式 `disabled`/`enabled`，默认 `disabled`（结构化抽取可大幅降低 reasoning token 与响应耗时；模型不支持时自动降级） |
 | `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
@@ -383,15 +425,20 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `ORDER_API_TIMEOUT_SECONDS` | 下单接口超时秒数，默认 30；创建请求不自动重试 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 可完整处理的最大页数，默认 10；超过时返回错误，不截断 |
 | `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |
+| `IMAGE_VISION_SKIP_WHEN_CONFIDENT` | 图片 MinerU OCR 高置信时跳过 LLM vision 交叉核验以提速，默认 `true` |
 | `PARSER_TEXT_MIN_CHARS` | PDF 单页合格文本层的最少字符数，默认 50 |
 | `PARSER_GARBLED_RATIO_THRESHOLD` | PDF 单页允许的最大乱码率，默认 0.05 |
-| `MINERU_ENABLED` | 是否启用低质量 PDF 页和图片的 MinerU 解析，默认 `true` |
+| `MINERU_ENABLED` | 是否启用低质量 PDF 页和图片的 MinerU 解析，代码默认 `false`；Compose 部署经 `.env.example` 开启为 `true` |
 | `MINERU_BASE_URL` | MinerU HTTP 服务地址 |
 | `MINERU_ENDPOINT` | MinerU 解析接口路径，默认 `/file_parse` |
 | `MINERU_API_KEY` | 可选 Bearer Token；留空时不发送鉴权头 |
 | `MINERU_EXPECTED_VERSION` | MinerU 版本锁，默认 `2.5.4`；服务返回版本头时必须完全一致 |
-| `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 300 |
+| `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 120 |
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
+| `MINERU_OCR_CONCURRENCY` | MinerU OCR 并发数，默认 4 |
+| `STORAGE_DIR` | 存储目录，默认 `./storage` |
+| `STORAGE_KEEP_HOURS` | 存储文件保留小时数，默认 24 |
+| `LOG_LEVEL` | 日志级别，默认 `INFO` |
 
 ### MinerU 解析服务
 
@@ -414,50 +461,3 @@ MINERU_TIMEOUT_SECONDS=120
 MINERU_FALLBACK_ENABLED=true
 ```
 
-`MINERU_BASE_URL` 取决于部署位置：
-
-| skill-api | MinerU | 地址示例 |
-|-----------|--------|----------|
-| 非 Docker 本机运行 | 同机运行 | `http://127.0.0.1:8888` |
-| Docker 容器 | macOS/Windows 宿主机 | `http://host.docker.internal:8888` |
-| Docker 容器 | Linux 宿主机 | 先配置 `host-gateway`，再用 `http://host.docker.internal:8888` |
-| 同一 Compose 网络 | `mineru` 服务 | `http://mineru:8888` |
-| 独立服务器 | 可达的 MinerU 主机 | `http://<mineru-host>:8888` |
-
-当前客户端兼容常见的 `POST /file_parse` 接口：以 `files` 字段上传 PDF 或原始图片，并发送
-`backend`、`parse_method`、`lang_list` 等表单参数。响应可以是 JSON（Markdown 字段为
-`md_content`、`markdown_content` 或 `markdown`）、直接返回的 Markdown 文本，或包含
-`.md` 文件的 ZIP。
-
-PDF 解析链路如下：
-
-1. 每个 PDF 页先探测字符数、乱码率和关键 label bbox。
-2. 合格文本页使用 `pdfplumber`，不发送给 OCR。
-3. 无文本层、文本残缺或关键 label 重叠页渲染后发送给 MinerU。
-4. 图片按真实文件签名校验后以原始字节发送给 MinerU，不转换成 PDF。
-5. MinerU 硬失败或低置信且允许 fallback 时转 vision，并生成 blocking
-   `mineru_failed` 或 `mineru_low_confidence`；禁止静默降级。
-6. `MINERU_FALLBACK_ENABLED=false` 时 MinerU 失败直接返回转换错误。
-
-可通过响应的 `meta.parser` 判断最终解析器：`local`、`mineru`、`pdfplumber`、`vision`
-或 `mixed`。`meta.page_routes` 保留每页解析器、质量指标、置信度和问题代码。
-`meta.source_sha256` 和 `meta.content_sha256` 分别标识原附件与转换文本，
-`meta.conversion_status` 为 `converted` 或 `needs_review`。纯 vision、无转换文本或存在解析器
-复核项时固定返回 `needs_review`，不能静默进入可下单状态。
-Excel/Word 还会返回 `meta.coverage`：Excel 记录工作表、合并区域、公式和缓存值覆盖；
-Word 记录 story parts、文本框和内嵌图片覆盖。`coverage.complete=false` 时同样固定为
-`needs_review`。
-MinerU 请求参数由代码中的 `MINERU_REQUEST_PROFILE` 固定。服务若返回
-`X-MinerU-Version`（或 `MinerU-Version`）响应头，必须与 `MINERU_EXPECTED_VERSION`
-完全一致；缺少版本头时记录 `mineru_version_header_missing` 警告并继续解析，明确返回的
-版本不一致时才作为契约错误处理且不执行 fallback。
-
-抽取 prompt 会根据文档标题/字段和已知模板指纹本地路由，只注入一个相关 few-shot
-样例；结构化输出 schema 由网关的 `response_format` 传递，不再重复注入 Markdown
-版 schema 和展示规范。MinerU 返回的正文保持全量传给模型，不做截断。`tuoshu_prompt_built`
-日志会记录 `system_chars`、`few_shot_chars` 和 `document_chars`，可与网关返回的
-`usage.prompt_tokens` 对照排查成本变化。
-
-四份已人工核验文档、固定解析文本、期望路由和期望 JSON 位于 `tests/golden/tuoshu/`。
-普通 `pytest` 会校验资产哈希、本地解析输出和最终 Schema；`make test-golden` 会调用
-LLM 并输出字段级 diff，`make test-mineru-golden` 会调用 MinerU 并输出原始解析层 diff。

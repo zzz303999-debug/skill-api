@@ -226,6 +226,53 @@ def test_doc_uses_textutil_when_libreoffice_is_unavailable(monkeypatch, tmp_path
     assert captured["kwargs"]["timeout"] == 120
 
 
+def test_doc_textutil_output_uses_ascii_filename(monkeypatch, tmp_path):
+    source = tmp_path / "2×40HQ余姚-上海排柜托书.doc"
+    source.write_bytes(b"legacy-word")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(converter, "_find_soffice", lambda: None)
+    monkeypatch.setattr(converter, "_find_textutil", lambda: "/usr/bin/textutil")
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        out = Path(command[command.index("-output") + 1])
+        captured["out_name"] = out.name
+        out.write_bytes(b"converted-docx")
+
+    monkeypatch.setattr(converter.subprocess, "run", fake_run)
+    monkeypatch.setattr(converter, "convert_docx", lambda _path: ("", {}))
+
+    converter.convert_doc(str(source))
+
+    out_name = str(captured["out_name"])
+    assert all(char.isascii() for char in out_name)
+    assert out_name.endswith(".docx")
+
+
+def test_make_temp_dir_prefers_tmpdir_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(converter.tempfile, "gettempdir", lambda: "/nonexistent-system-tmp")
+
+    with converter._make_temp_dir(prefix="probe-") as tmpd:
+        assert str(tmpd).startswith(str(tmp_path))
+        assert Path(tmpd).exists()
+        assert Path(tmpd).name.startswith("probe-")
+
+
+def test_make_temp_dir_falls_back_when_tmpdir_unwritable(monkeypatch, tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    blocked.chmod(0o500)
+    monkeypatch.setenv("TMPDIR", str(blocked))
+    try:
+        with converter._make_temp_dir(prefix="probe-") as tmpd:
+            assert Path(tmpd).exists()
+            assert not str(tmpd).startswith(str(blocked))
+    finally:
+        blocked.chmod(0o700)
+
+
 def test_doc_prefers_libreoffice_when_both_converters_exist(monkeypatch, tmp_path):
     source = tmp_path / "legacy.doc"
     source.write_bytes(b"legacy-word")

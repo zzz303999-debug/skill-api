@@ -10,15 +10,19 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import FastAPI, File, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, create_model
 
+from app import access_log
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
@@ -50,6 +54,41 @@ _skill_executor = ThreadPoolExecutor(
     thread_name_prefix="skill-runner",
 )
 
+# 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
+_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
+    """请求访问日志：记录时间、方法、路径、上传文件、耗时、状态与错误码。
+
+    handler 通过 `request.state.file_name` 透传上传文件名，
+    错误处理通过 `request.state.error_code` 透传业务错误码。
+    """
+    if request.url.path in _SKIP_ACCESS_LOG_PATHS:
+        return await call_next(request)
+    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    start = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception:
+        raise
+    finally:
+        access_log.record(
+            {
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "file": getattr(request.state, "file_name", None),
+                "status": status_code,
+                "error_code": getattr(request.state, "error_code", None),
+                "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+            }
+        )
+    return response
+
 
 @app.exception_handler(SkillAPIError)
 async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONResponse:
@@ -57,6 +96,7 @@ async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONRespon
         "skill_api_error",
         extra={"code": exc.code, "error_message": exc.message, "details": exc.details},
     )
+    _.state.error_code = exc.code
     return JSONResponse(
         status_code=exc.http_status,
         content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
@@ -71,6 +111,33 @@ def healthz() -> dict:
 @app.get("/skills", response_model=list[SkillMeta], tags=["meta"])
 def list_skills() -> list[SkillMeta]:
     return [s.meta() for s in registry.all_skills()]
+
+
+@app.get("/api/logs", tags=["meta"])
+def list_request_logs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    path: str | None = Query(default=None),
+    file: str | None = Query(default=None),
+    status: int | None = Query(default=None, ge=100, le=599),
+    request_id: str | None = Query(default=None),
+) -> dict:
+    """请求访问日志列表（时间倒序），支持分页与过滤。"""
+    return access_log.query(
+        limit=limit,
+        offset=offset,
+        path=path,
+        file=file,
+        status=status,
+        request_id=request_id,
+    )
+
+
+@app.get("/logs", include_in_schema=False)
+def request_logs_page() -> FileResponse:
+    """内置的请求日志查看页面。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "logs.html")
 
 
 def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
@@ -173,8 +240,10 @@ def _make_extract_route(skill: SkillBase):
 
     async def handler(
         file: Annotated[UploadFile, File()],
+        request: Request,
     ) -> dict[str, Any]:
         content = await _read_upload(file)
+        request.state.file_name = file.filename or "unnamed"
         out = await _run_skill(skill, content, file.filename or "unnamed")
         response = {
             "skill": skill.name,
@@ -218,6 +287,7 @@ def _make_batch_extract_route(skill: SkillBase):
 
     async def handler(
         files: Annotated[list[UploadFile], File()],
+        request: Request,
     ) -> dict[str, Any]:
         if len(files) > settings.api_batch_max_files:
             raise BadRequestError(
@@ -225,6 +295,7 @@ def _make_batch_extract_route(skill: SkillBase):
                 code="too_many_files",
                 details={"max_files": settings.api_batch_max_files},
             )
+        request.state.file_name = ", ".join(f.filename or "unnamed" for f in files)
         # 并行执行所有文件识别
         raw_results = await asyncio.gather(*[_run_one(f) for f in files])
         results = [r for r in raw_results if "error" not in r]
