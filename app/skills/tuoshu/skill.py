@@ -94,6 +94,21 @@ def _clean_json_schema(schema: dict) -> dict:
     return _resolve(schema)
 
 
+def _extract_review_issues_list(raw: dict | list) -> list | None:
+    """从修复响应中提取 review_issues 数组（兼容裸数组或 {"review_issues": [...]}）。"""
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        issues = raw.get("review_issues")
+        if isinstance(issues, list):
+            return issues
+        # 部分模型可能用中文 key
+        issues = raw.get("复核问题")
+        if isinstance(issues, list):
+            return issues
+    return None
+
+
 def _normalize_with_review_issue_repair(
     data: dict,
     meta: dict,
@@ -101,7 +116,11 @@ def _normalize_with_review_issue_repair(
     messages: list[dict],
     output_schema: dict,
 ) -> tuple[dict, dict]:
-    """Retry once when the model emits an incomplete structured review issue."""
+    """Retry once when the model emits an incomplete structured review issue.
+
+    重试时只让模型重发 review_issues 数组（而非重输出整个 JSON），
+    输出显著变短，重试耗时从 ~80s 降到 ~20s。
+    """
     try:
         return normalize_llm_output(data), meta
     except ParseError as exc:
@@ -127,18 +146,27 @@ def _normalize_with_review_issue_repair(
                 "content": (
                     "上一份 JSON 的 review_issues 结构无效："
                     f"index={details.get('index')}, reason={details.get('reason')}。"
-                    "请完整重新输出整个 JSON 对象，不要删除任何复核项。"
-                    "review_issues 的每一项都必须是对象，且 code、field、message "
-                    "必须是非空字符串；source_values 必须是字符串数组；blocking 必须是布尔值。"
+                    "不要重复输出整个 JSON 对象，只重新输出 review_issues 数组本身。"
+                    "数组的每一项都必须是对象，且 code、field、message 必须是非空字符串；"
+                    "source_values 必须是字符串数组（没有候选值时用 []）；"
+                    "blocking 必须是布尔值。其余字段保持原样。"
                 ),
             },
         ]
-        repaired_data, repaired_meta = chat_json(
+        repaired_raw, repaired_meta = chat_json(
             repair_messages,
             temperature=0.0,
-            json_schema=output_schema,
+            # 目标是裸数组，不套用完整对象 schema，避免约束模型输出整个 JSON
+            json_schema=None,
         )
-        return normalize_llm_output(repaired_data), repaired_meta
+        repaired_issues = _extract_review_issues_list(repaired_raw)
+        if repaired_issues is None:
+            raise ParseError(
+                _INVALID_REVIEW_ISSUE_MESSAGE,
+                details={"index": "n/a", "reason": "repair response is not a review_issues array"},
+            ) from None
+        data["review_issues"] = repaired_issues
+        return normalize_llm_output(data), repaired_meta
 
 
 class TuoshuSkill(SkillBase):
@@ -229,8 +257,17 @@ class TuoshuSkill(SkillBase):
                     }
             if markdown.startswith("SCAN_OR_IMAGE_HINT:"):
                 if ext != ".pdf":
+                    # hint 行尾 `# 原因` 携带转换器具体失败原因，透传给调用方
+                    hint_detail = ""
+                    if "#" in markdown:
+                        hint_detail = markdown.split("#", 1)[1].strip()
+                    log.warning(
+                        "tuoshu_convert_scan_hint",
+                        extra={"file": filename, "ext": ext, "hint": hint_detail},
+                    )
                     raise ConvertError(
-                        "document has no extractable text; convert it to PDF/image or install LibreOffice"
+                        "document has no extractable text; convert it to PDF/image or install LibreOffice",
+                        details={"file": Path(filename).name, "reason": hint_detail},
                     )
                 page_images = render_pdf_pages(
                     file_bytes,

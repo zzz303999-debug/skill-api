@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     llm_model_default: str = "gpt-5.4"
     llm_timeout_seconds: int = 180
     llm_max_retries: int = 2
+    # 关闭思考模式（disabled）可大幅降低 reasoning token 与响应耗时；
+    # 结构化抽取任务默认关闭；模型不支持该参数时 client 会自动降级重试
+    llm_thinking_mode: str = "disabled"
 
     # Vision
     vision_max_pdf_pages: int = Field(default=10, ge=1, le=10)

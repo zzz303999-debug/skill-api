@@ -73,6 +73,7 @@ HTTP 200 表示正常。K8s liveness/readiness probe 都用这个。
 | `API_PORT` | `9000` | 监听端口 |
 | `LLM_TIMEOUT_SECONDS` | `180` | LLM 调用超时 |
 | `LLM_MAX_RETRIES` | `2` | LLM 调用重试次数 |
+| `LLM_THINKING_MODE` | `disabled` | 思考模式 `disabled`/`enabled`；disabled 降低 reasoning token 与耗时，模型不支持时自动降级 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `STORAGE_DIR` | `./storage` | 本地存储目录（当前版本未强用） |
 

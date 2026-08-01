@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Annotated, Any
@@ -52,6 +53,10 @@ _skill_executor = ThreadPoolExecutor(
 
 @app.exception_handler(SkillAPIError)
 async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONResponse:
+    log.warning(
+        "skill_api_error",
+        extra={"code": exc.code, "error_message": exc.message, "details": exc.details},
+    )
     return JSONResponse(
         status_code=exc.http_status,
         content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
@@ -105,31 +110,29 @@ async def _read_upload(file: UploadFile) -> bytes:
     return content
 
 
-async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
+async def _run_in_executor(call: Callable[[], Any]) -> Any:
+    """在有界线程池中执行同步调用，避免阻塞事件循环。"""
     loop = asyncio.get_running_loop()
-    call = partial(
-        skill.run,
-        file_bytes=content,
-        filename=filename,
-        options=None,
-    )
     return await loop.run_in_executor(_skill_executor, call)
 
 
-async def _publish_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _skill_executor,
-        partial(publish_create_order, order_data, room_id=room_id),
+async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
+    return await _run_in_executor(
+        partial(
+            skill.run,
+            file_bytes=content,
+            filename=filename,
+            options=None,
+        )
     )
+
+
+async def _publish_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
+    return await _run_in_executor(partial(publish_create_order, order_data, room_id=room_id))
 
 
 async def _extract_order_text(text: str):
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _skill_executor,
-        partial(extract_order_text, text),
-    )
+    return await _run_in_executor(partial(extract_order_text, text))
 
 
 @app.post(

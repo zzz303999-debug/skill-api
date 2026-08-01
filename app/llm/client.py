@@ -18,6 +18,10 @@ from app.logging_conf import get_logger
 log = get_logger(__name__)
 
 _client: OpenAI | None = None
+# 网关是否支持 json_schema structured output；None=未知，True/False=已探测
+_json_schema_supported: bool | None = None
+# 网关/模型是否接受 thinking 参数；None=未知，False=已确认不支持（降级重试后缓存）
+_thinking_disabled_supported: bool | None = None
 
 
 def get_client() -> OpenAI:
@@ -37,6 +41,24 @@ def image_to_data_url(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def _thinking_parameter_rejected(error_text: str) -> bool:
+    """判断 API 错误是否由 thinking 参数不被支持引起。"""
+    return "thinking" in error_text or "reasoning" in error_text
+
+
+def _classify_api_error(e: APIError) -> None:
+    """把 APIError 分类为响应格式不支持或其他上游错误。"""
+    error_text = str(e).lower()
+    response_format_error = (
+        "response_format" in error_text
+        or "json_schema" in error_text
+        or "structured output" in error_text
+    )
+    code = "llm_response_format_unsupported" if response_format_error else "llm_upstream"
+    log.warning("llm_upstream_error", extra={"code": code}, exc_info=True)
+    raise LLMError("LLM gateway rejected the request", code=code) from e
+
+
 def chat(
     messages: list[dict[str, Any]],
     *,
@@ -48,8 +70,12 @@ def chat(
     """调用一次 chat/completions。
 
     返回 (content_text, meta)。meta 包含 model / usage。
+    当配置 llm_thinking_mode="disabled" 时默认注入 thinking: disabled 以降低
+    reasoning token 与响应耗时；调用方显式传入 thinking/reasoning_effort 时
+    以调用方为准。网关/模型不支持该参数时会自动去掉重试一次，并缓存结果。
     """
     model = model or settings.llm_model_default
+    global _thinking_disabled_supported
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -61,21 +87,40 @@ def chat(
     if extra_body:
         kwargs["extra_body"] = extra_body
 
+    thinking_injected = False
+    if (
+        settings.llm_thinking_mode == "disabled"
+        and _thinking_disabled_supported is not False
+        and "thinking" not in (extra_body or {})
+        and "reasoning_effort" not in (extra_body or {})
+    ):
+        kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
+        thinking_injected = True
+
     try:
         resp = get_client().chat.completions.create(**kwargs)
     except (APITimeoutError, APIConnectionError) as e:
         log.warning("llm_network_error", exc_info=True)
         raise LLMError("LLM gateway network error", code="llm_network") from e
     except APIError as e:
-        error_text = str(e).lower()
-        response_format_error = (
-            "response_format" in error_text
-            or "json_schema" in error_text
-            or "structured output" in error_text
-        )
-        code = "llm_response_format_unsupported" if response_format_error else "llm_upstream"
-        log.warning("llm_upstream_error", extra={"code": code}, exc_info=True)
-        raise LLMError("LLM gateway rejected the request", code=code) from e
+        if thinking_injected and _thinking_parameter_rejected(str(e).lower()):
+            # 网关/模型不接受 thinking 参数：去掉后重试一次，后续请求不再注入
+            _thinking_disabled_supported = False
+            log.warning("llm_thinking_disabled_fallback", extra={"model": model})
+            kwargs["extra_body"] = {
+                key: value
+                for key, value in kwargs.get("extra_body", {}).items()
+                if key != "thinking"
+            }
+            try:
+                resp = get_client().chat.completions.create(**kwargs)
+            except (APITimeoutError, APIConnectionError) as retry_err:
+                log.warning("llm_network_error", exc_info=True)
+                raise LLMError("LLM gateway network error", code="llm_network") from retry_err
+            except APIError as retry_err:
+                _classify_api_error(retry_err)
+        else:
+            _classify_api_error(e)
     except Exception as e:
         log.exception("llm_unexpected_error")
         raise LLMError("LLM request failed") from e
@@ -95,6 +140,25 @@ def chat(
     return content, meta
 
 
+def _json_object_fallback_messages(
+    messages: list[dict[str, Any]], json_schema: dict
+) -> list[dict[str, Any]]:
+    """构造 json_object 降级消息：插入 schema 指令，要求模型按 schema 输出。"""
+    schema_instruction = {
+        "role": "system",
+        "content": (
+            "网关不支持 structured output。仍须严格按以下 JSON Schema 输出对象：\n"
+            + json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))
+        ),
+    }
+    insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+    return [
+        *messages[:insert_at],
+        schema_instruction,
+        *messages[insert_at:],
+    ]
+
+
 def chat_json(
     messages: list[dict[str, Any]],
     *,
@@ -104,50 +168,53 @@ def chat_json(
 ) -> tuple[dict, dict]:
     """要求模型输出 JSON 对象。返回 (parsed_dict, meta)。
 
-    当提供 json_schema 时，使用 structured output 模式
-    （json_schema），强制模型按指定字段名和类型输出。
-    网关不支持时自动降级为 json_object。
+    当提供 json_schema 时，优先使用 structured output 模式
+    （json_schema）强制模型按指定字段名和类型输出；
+    网关不支持时降级为 json_object + schema 指令。
+    降级能力会被缓存，避免每次调用都先失败一次。
     """
-    response_format: dict = {"type": "json_object"}
-    if json_schema:
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "response",
-                "strict": False,
-                "schema": json_schema,
-            },
-        }
-    try:
-        content, meta = chat(
-            messages,
-            model=model,
-            temperature=temperature,
-            response_format=response_format,
-        )
-    except LLMError as e:
-        if not json_schema or e.code != "llm_response_format_unsupported":
-            raise
-        log.warning("llm_json_schema_fallback", extra={"model": model})
-        schema_instruction = {
-            "role": "system",
-            "content": (
-                "网关不支持 structured output。仍须严格按以下 JSON Schema 输出对象：\n"
-                + json.dumps(json_schema, ensure_ascii=False, separators=(",", ":"))
-            ),
-        }
-        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
-        fallback_messages = [
-            *messages[:insert_at],
-            schema_instruction,
-            *messages[insert_at:],
-        ]
+    global _json_schema_supported
+    if json_schema and _json_schema_supported is False:
+        # 已确认网关不支持 json_schema，直接走降级路径
+        fallback_messages = _json_object_fallback_messages(messages, json_schema)
         content, meta = chat(
             fallback_messages,
             model=model,
             temperature=temperature,
             response_format={"type": "json_object"},
         )
+    else:
+        response_format: dict = {"type": "json_object"}
+        if json_schema:
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "strict": False,
+                    "schema": json_schema,
+                },
+            }
+        try:
+            content, meta = chat(
+                messages,
+                model=model,
+                temperature=temperature,
+                response_format=response_format,
+            )
+            if json_schema:
+                _json_schema_supported = True
+        except LLMError as e:
+            if not json_schema or e.code != "llm_response_format_unsupported":
+                raise
+            _json_schema_supported = False
+            log.warning("llm_json_schema_fallback", extra={"model": model})
+            fallback_messages = _json_object_fallback_messages(messages, json_schema)
+            content, meta = chat(
+                fallback_messages,
+                model=model,
+                temperature=temperature,
+                response_format={"type": "json_object"},
+            )
     try:
         data = json.loads(content)
     except json.JSONDecodeError:

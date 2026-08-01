@@ -370,6 +370,7 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `LLM_BASE_URL` | OpenAI-compatible API 地址，默认 `https://api.openai.com/v1` |
 | `LLM_API_KEY` | LLM 服务的 Bearer Token |
 | `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `gpt-5.4` |
+| `LLM_THINKING_MODE` | 思考模式 `disabled`/`enabled`，默认 `disabled`（结构化抽取可大幅降低 reasoning token 与响应耗时；模型不支持时自动降级） |
 | `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
