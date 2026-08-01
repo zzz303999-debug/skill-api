@@ -385,7 +385,7 @@ def test_pdf_falls_back_to_original_converter(monkeypatch):
         raise MinerUError("unavailable")
 
     def fake_pdf_converter(_path):
-        print("# pdfplumber Markdown")
+        return "# pdfplumber Markdown", {}
 
     monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
     monkeypatch.setitem(convert_service._DISPATCH, ".pdf", fake_pdf_converter)

@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any
+
+from .normalizer import (
+    extract_number,
+    is_separator_row,
+    normalize_label,
+    parse_date_or_none,
+    parse_html_table_rows,
+    pipe_row_cells,
+)
 
 
 @dataclass
@@ -48,8 +55,8 @@ def _table_rows(markdown: str) -> list[list[str]]:
         line = raw_line.strip()
         if not line.startswith("|") or not line.endswith("|"):
             continue
-        cells = [cell.strip().replace("\\|", "|") for cell in line[1:-1].split("|")]
-        if not cells or all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+        cells = pipe_row_cells(line)
+        if not cells or is_separator_row(cells):
             continue
         if cells[0] == "_row/col_":
             continue
@@ -60,20 +67,7 @@ def _table_rows(markdown: str) -> list[list[str]]:
         return rows
 
     # MinerU may emit an HTML table for DOCX templates instead of pipe rows.
-    decoded = html.unescape(markdown)
-    for raw_row in re.findall(r"<tr\b[^>]*>(.*?)</tr>", decoded, re.IGNORECASE | re.DOTALL):
-        cells = [
-            re.sub(r"<[^>]+>", "", cell).strip()
-            for cell in re.findall(r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>", raw_row, re.IGNORECASE | re.DOTALL)
-        ]
-        if cells:
-            rows.append(cells)
-    return rows
-
-
-def _normalize_label(value: str) -> str:
-    """Normalize layout whitespace without changing the value cells."""
-    return re.sub(r"\s+", "", value).rstrip("：:").lower()
+    return [row for row in parse_html_table_rows(markdown) if row]
 
 
 def _header_sequence(rows: list[list[str]]) -> tuple[tuple[str, ...], ...]:
@@ -99,24 +93,24 @@ def _paired_table_values(rows: list[list[str]]) -> dict[str, str]:
 
 
 def _table_value_for_labels(rows: list[list[str]], labels: tuple[str, ...]) -> str | None:
-    expected = {_normalize_label(label) for label in labels}
+    expected = {normalize_label(label) for label in labels}
     known_labels = {
-        _normalize_label(label)
+        normalize_label(label)
         for _, field_labels in _NEIZHUANG_LABELS
         for label in field_labels
     }
     for row_index, row in enumerate(rows):
         for column, cell in enumerate(row):
-            if _normalize_label(cell) not in expected:
+            if normalize_label(cell) not in expected:
                 continue
             # Inline tables alternate label/value cells on the same row.
             if column + 1 < len(row):
                 inline_value = row[column + 1].strip()
-                if inline_value and _normalize_label(inline_value) not in known_labels:
+                if inline_value and normalize_label(inline_value) not in known_labels:
                     return inline_value
             # Paired tables put labels in one row and values in the next.
             for next_row in rows[row_index + 1 :]:
-                if not next_row or all(re.fullmatch(r":?-{3,}:?", part.replace(" ", "")) for part in next_row):
+                if is_separator_row(next_row):
                     continue
                 if column < len(next_row) and next_row[column].strip():
                     return next_row[column].strip()
@@ -132,16 +126,6 @@ def _mixed_row_value(rows: list[list[str]], label: str) -> str | None:
                 value = row[index + 1].strip()
                 if value:
                     return value
-    return None
-
-
-def _parse_date(value: str) -> str | None:
-    normalized = value.strip().replace("/", "-").replace(".", "-")
-    for pattern in ("%Y-%m-%d", "%y-%m-%d"):
-        try:
-            return datetime.strptime(normalized, pattern).date().isoformat()
-        except ValueError:
-            continue
     return None
 
 
@@ -176,7 +160,7 @@ def _extract_bingsheng(markdown: str, rows: list[list[str]]) -> tuple[dict[str, 
                 break
         if date_value:
             break
-    doc_date = _parse_date(date_value or "")
+    doc_date = parse_date_or_none(date_value or "")
     mbl_no = table_values.get("主单号")
     sentinel_errors: list[str] = []
     if not mbl_no or re.search(r"[\u4e00-\u9fff]", mbl_no) or not re.fullmatch(
@@ -206,9 +190,9 @@ def _extract_bingsheng(markdown: str, rows: list[list[str]]) -> tuple[dict[str, 
     container: dict[str, Any] = {
         "type": container_match.group(2) if container_match else (container_text or None),
         "qty": int(container_match.group(1)) if container_match else 1,
-        "packages": _number(table_values.get("件数"), integer=True),
-        "gross_weight_kg": _number(table_values.get("毛重")),
-        "volume_cbm": _number(table_values.get("体积")),
+        "packages": extract_number(table_values.get("件数"), integer=True),
+        "gross_weight_kg": extract_number(table_values.get("毛重")),
+        "volume_cbm": extract_number(table_values.get("体积")),
     }
 
     address_value = table_values.get("地址", "")
@@ -227,7 +211,7 @@ def _extract_bingsheng(markdown: str, rows: list[list[str]]) -> tuple[dict[str, 
         "pol": table_values.get("起运港"),
         "pod": table_values.get("目的港"),
         "terminal": table_values.get("码头") or None,
-        "etd": _parse_date(table_values.get("ETD", "")),
+        "etd": parse_date_or_none(table_values.get("ETD", "")),
         "transit_port": table_values.get("中转港代码") or None,
         "containers": [container],
         "factory": {
@@ -244,22 +228,12 @@ def _extract_bingsheng(markdown: str, rows: list[list[str]]) -> tuple[dict[str, 
     return values, []
 
 
-def _number(value: str | None, *, integer: bool = False) -> int | float | None:
-    if not value:
-        return None
-    match = re.search(r"-?\d+(?:\.\d+)?", value.replace(",", ""))
-    if not match:
-        return None
-    number = float(match.group(0))
-    return int(number) if integer and number.is_integer() else number
-
-
 def map_template(markdown: str | None) -> MapperResult:
     if not markdown:
         return MapperResult()
     rows = _table_rows(markdown)
     neizhuang_values = _extract_neizhuang_booking(markdown, rows)
-    normalized_source = _normalize_label(markdown)
+    normalized_source = normalize_label(markdown)
     if (
         ("内装箱委托书" in normalized_source and len(neizhuang_values) >= 3)
         or all(field in neizhuang_values for field, _ in _NEIZHUANG_LABELS)

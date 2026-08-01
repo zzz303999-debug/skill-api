@@ -168,7 +168,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 | `TO`/`致`/非空`ATTN` | `recipient` | null |
 | `FM` 后的原文值；缺失时取明确客户栏、`客户简称+装箱/做箱通知`抬头或正文抬头公司 | `customer` | null + blocking `missing_customer` |
 | 正文抬头或落款公司 | `shipper_agent` | null |
-| 正文明示`发货人`/`托运人`/`SHIPPER` | `shipper_company` | null + blocking `missing_shipper_company` |
+| 正文明示`发货人`/`托运人`/`SHIPPER` | `shipper_company` | null |
 | `FROM`/`FM` 联系人 | `sender_contact` | null |
 | `日期`/`DATE`（含相邻碎片） | `doc_date` | null |
 | 无结构字段可承载的原文 | `remark` | null |
@@ -179,6 +179,19 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 `shipper_agent` 和 `shipper_company`。
 其他模板不得把工厂、抬头货代当作托运人。结构化后的收件方、公司、联系人不得重复进
 `remark`/`c_note`。
+
+缺失复核提示（`review_issues`）仅限以下必提取字段缺失时生成：提单号 `mbl_no`、
+箱型 `containers[].type`、客户 `customer`、地址 `factory.address`、做箱日期
+`loading_time`、件数 `containers[].packages`、毛重 `containers[].gross_weight_kg`、
+体积 `containers[].volume_cbm`；其余字段（承运人、船名航次、ETD、工厂名等）缺失一律
+填 null，不生成任何缺失提示。`review_issues` 的 `code` 只能使用上述缺失提示及
+本提示已明确给出的复核 code（如 `ungrounded_text`、`unknown_container_type`、
+`conflicting_container_data`、`carrier_by_mbl` 等），严禁自创 `missing_*` 等
+未定义的 code；`field` 必须使用标准字段路径，禁止 `containers[]` 这类无索引占位。
+每一项必须严格按下表字段输出，字段缺失、类型不符都会导致整份结果作废重试：
+`code`(非空字符串)、`field`(非空字符串)、`message`(非空字符串)、`source_values`(字符串数组，无候选时输出 [])、`blocking`(必须 true 或 false)。
+完整格式示例：{{"code":"carrier_by_mbl","field":"carrier","message":"承运人由提单号前缀推断，需人工确认","source_values":["HLCUSHA2111JWDA1"],"blocking":true}}。
+写不出某项的完整字段时就丢弃该项，严禁输出缺字段、null 字段或字符串形式的 source_values。
 
 # 抽取规则
 1. 编号和人名逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
@@ -193,6 +206,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 10. `carrier` 只有原文明示承运人/船公司才是直接值；由主单前缀或船名推断时加 blocking `carrier_by_mbl/carrier_by_vessel` 并列依据；原文明示值优先，只有原文缺失时才使用前缀/船名兜底。
 11. 港口州/国家修饰信息不得丢弃，`COLUMBUS(OH)` 归一为 `COLUMBUS, OH`。`source` 使用用户给出的 file/doc_format/extracted_at；所有复核项只写 `review_issues`，每个 code 只允许一条且禁止 `unstructured_review_issue`。每项必须完整包含非空字符串 `code`、`field`、`message`，以及字符串数组 `source_values` 和布尔值 `blocking`。
 12. `remark`、`containers[].remark`、`seal_no` 等自由文本必须能在来源中找到依据；禁止补写原文没有的操作要求、术语或语句。图片输入时，MinerU 文本只是 OCR 辅助，原图可见文字才是最终依据；OCR 中出现但图片上看不到的词句必须剔除，并写 blocking `ungrounded_text`。`customer` 优先逐字取 `FM` 后的值（公司名称、简称或其他原文称呼），缺失时依次取明确的客户栏、`海丰装箱通知` 这类“客户简称+装箱/做箱通知”抬头和正文抬头公司；仍缺失时填 null，并添加 blocking `missing_customer` 说明。`sender_contact` 仅在 `FM/FROM` 值明确是人名时填写，页脚“联系人/我司联系人”不得填入。
+13. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落、中间隔着多个空段，值甚至可能出现在标签之前。此时把标签后第一个非空、非标签（不以冒号结尾、不含冒号）的段落当作该标签的值；`提单号/主提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位，但排除纯数字（电话/日期）、纯字母（船名/人名）以及 `数字+单位`（如 `1100CTNS`）形式的词。
 
 `doc_type` 仅 PACKING_NOTICE/TRANSPORT_ORDER/TRUCKING_ORDER/BOOKING_NOTE/UNKNOWN。标题优先；“做箱通知”若以提箱、进港、司机为主则 TRUCKING_ORDER。本地提示：doc_type={route_doc_type}，template_hint={route_template_hint}；与原文冲突时以原文为准。
 """

@@ -224,7 +224,6 @@ def test_bsse_incident_acceptance_baseline():
     issue_codes = {issue["code"] for issue in result["review_issues"]}
     assert {
         "missing_container_measurements",
-        "missing_factory_name",
         "carrier_by_vessel",
     } <= issue_codes
     assert "missing_shipper_company" not in issue_codes
@@ -254,7 +253,6 @@ def test_kflse220216031_acceptance_baseline():
     issue_codes = [issue["code"] for issue in issues]
     assert issue_codes == [
         "missing_container_measurements",
-        "missing_shipper_company",
         "carrier_by_mbl",
     ]
     assert len(issue_codes) == len(set(issue_codes))

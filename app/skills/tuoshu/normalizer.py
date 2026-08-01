@@ -6,6 +6,7 @@ LLM 有时返回中文字段名、不同命名风格、或结构差异。
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import datetime
 from typing import Any
@@ -555,6 +556,102 @@ def normalize_container_type(value: str) -> str:
 def is_known_container_type(value: str) -> bool:
     lookup_key = re.sub(r"['’\s]", "", value).upper()
     return lookup_key in KNOWN_CONTAINER_TYPES
+
+
+# ---------- 通用文本工具（deterministic_mapper / postprocessor 共用） ----------
+
+
+def normalize_label(value: str) -> str:
+    """Normalize layout whitespace without changing the value cells."""
+    return re.sub(r"\s+", "", value).rstrip("：:").lower()
+
+
+def pipe_row_cells(line: str) -> list[str]:
+    """Split a pipe table row into cells, undoing escaped pipes."""
+    return [cell.strip().replace("\\|", "|") for cell in line.strip("|").split("|")]
+
+
+def parse_html_table_rows(source: str) -> list[list[str]]:
+    """Parse every HTML table row (tr/td/th) into stripped cell lists."""
+    decoded = html.unescape(source)
+    return [
+        [
+            re.sub(r"<[^>]+>", "", cell).strip()
+            for cell in re.findall(
+                r"<(?:td|th)\b[^>]*>(.*?)</(?:td|th)>",
+                raw_row,
+                re.IGNORECASE | re.DOTALL,
+            )
+        ]
+        for raw_row in re.findall(
+            r"<tr\b[^>]*>(.*?)</tr>", decoded, re.IGNORECASE | re.DOTALL
+        )
+    ]
+
+
+def is_separator_row(row: list[str]) -> bool:
+    """A Markdown table separator such as ``| --- | :--: |``."""
+    return not row or all(
+        re.fullmatch(r":?-{3,}:?", part.replace(" ", "")) for part in row
+    )
+
+
+_DATE_SEPARATOR_TRANSLATION = str.maketrans({"／": "/", "．": ".", "－": "-", "：": ":"})
+
+_DATE_PATTERN = re.compile(
+    r"(\d{4}|\d{2})(?!\d)\s*(?:年\s*|[./-]\s*)"
+    r"(\d{1,2})\s*(?:月\s*|[./-]\s*)"
+    r"(\d{1,2})(?!\d)(?:\s*日)?"
+    r"(?:[T\s]+(\d{1,2})\s*(?::|时)\s*(\d{1,2})"
+    r"(?:\s*(?::|分)\s*(\d{1,2})(?:\.\d+)?\s*秒?)?)?"
+    r"(?:Z|[+-]\d{2}:?\d{2})?",
+    re.IGNORECASE,
+)
+
+
+def parse_date_or_none(value: str, *, allow_time: bool = False) -> str | None:
+    """Extract the first unambiguous year-first date inside text, else None.
+
+    Accepts ``2026-07-15``, Chinese ``2026年7月15日``, 2-digit years
+    (``21.5.28``), and an optional time component. Invalid calendar dates
+    and unrelated text return None so callers can fall back to review issues.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().translate(_DATE_SEPARATOR_TRANSLATION)
+    # OCR commonly joins the time directly to the Chinese day suffix, for
+    # example ``2026年7月15日0:00``.
+    text = re.sub(r"日(?=\d{1,2}\s*(?::|时))", "日 ", text)
+    match = _DATE_PATTERN.search(text)
+    if not match:
+        return None
+    year_text = match.group(1)
+    year = int(year_text)
+    if len(year_text) == 2:
+        # strptime ``%y`` semantics: 00-68 -> 2000-2068, 69-99 -> 1969-1999.
+        year += 2000 if year < 69 else 1900
+    hour = int(match.group(4) or 0)
+    minute = int(match.group(5) or 0)
+    second = int(match.group(6) or 0)
+    try:
+        parsed = datetime(year, int(match.group(2)), int(match.group(3)), hour, minute, second)
+    except ValueError:
+        return None
+    normalized_date = parsed.date().isoformat()
+    if not allow_time or match.group(4) is None:
+        return normalized_date
+    return f"{normalized_date}T{hour:02d}:{minute:02d}:{second:02d}"
+
+
+def extract_number(value: str | None, *, integer: bool = False) -> int | float | None:
+    """Extract the first number embedded in a value (e.g. ``约 1200 KG``)."""
+    if not value:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", value.replace(",", ""))
+    if not match:
+        return None
+    number = float(match.group(0))
+    return int(number) if integer and number.is_integer() else number
 
 
 def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:

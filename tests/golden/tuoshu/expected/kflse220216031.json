@@ -54,13 +54,6 @@
       "blocking": true
     },
     {
-      "code": "missing_shipper_company",
-      "field": "shipper_company",
-      "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
-      "source_values": [],
-      "blocking": true
-    },
-    {
       "code": "carrier_by_mbl",
       "field": "carrier",
       "message": "承运人并非原文明示值，而是由主提单号前缀推断，需人工确认",

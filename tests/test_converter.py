@@ -51,11 +51,10 @@ def _make_complex_docx(tmp_path: Path) -> Path:
     return source
 
 
-def test_docx_story_text_textboxes_and_images_are_discovered(tmp_path, capsys):
+def test_docx_story_text_textboxes_and_images_are_discovered(tmp_path):
     source = _make_complex_docx(tmp_path)
 
-    report = converter.convert_docx(str(source))
-    output = capsys.readouterr().out
+    output, report = converter.convert_docx(str(source))
 
     assert "正文提单号：TEST001" in output
     assert output.count("Word 合并标题") == 1
@@ -145,7 +144,7 @@ def test_xlsx_formula_and_missing_cached_value_are_explicit(tmp_path):
     assert issue["blocking"] is True
 
 
-def test_word_2003_xml_is_converted_without_external_tool(monkeypatch, tmp_path, capsys):
+def test_word_2003_xml_is_converted_without_external_tool(monkeypatch, tmp_path):
     source = tmp_path / "wordml.doc"
     source.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
@@ -166,15 +165,14 @@ def test_word_2003_xml_is_converted_without_external_tool(monkeypatch, tmp_path,
         lambda: (_ for _ in ()).throw(AssertionError("office lookup should not run")),
     )
 
-    converter.convert_doc(str(source))
+    output, _ = converter.convert_doc(str(source))
 
-    output = capsys.readouterr().out
     assert "_format: word_xml_" in output
     assert "_p1_ 配舱通知" in output
     assert "| 1 | 提单号 | SITG001 |" in output
 
 
-def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path, capsys):
+def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path):
     source = tmp_path / "flat-opc.doc"
     source.write_text(
         """<?xml version="1.0" encoding="UTF-8"?>
@@ -192,9 +190,8 @@ def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path, capsys)
         lambda: (_ for _ in ()).throw(AssertionError("office lookup should not run")),
     )
 
-    converter.convert_doc(str(source))
+    output, _ = converter.convert_doc(str(source))
 
-    output = capsys.readouterr().out
     assert "_format: word_xml_" in output
     assert "_p1_ 放箱号 0156" in output
     assert "pkg:package" not in output
@@ -217,7 +214,7 @@ def test_doc_uses_textutil_when_libreoffice_is_unavailable(monkeypatch, tmp_path
     monkeypatch.setattr(
         converter,
         "convert_docx",
-        lambda path: captured.update(converted_path=path),
+        lambda path: (captured.update(converted_path=path), ("", {}))[1],
     )
 
     converter.convert_doc(str(source))
@@ -247,33 +244,31 @@ def test_doc_prefers_libreoffice_when_both_converters_exist(monkeypatch, tmp_pat
         (output_dir / "legacy.docx").write_bytes(b"converted-docx")
 
     monkeypatch.setattr(converter.subprocess, "run", fake_run)
-    monkeypatch.setattr(converter, "convert_docx", lambda _path: None)
+    monkeypatch.setattr(converter, "convert_docx", lambda _path: ("", {}))
 
     converter.convert_doc(str(source))
 
     assert captured["command"][:2] == ["/usr/bin/soffice", "--headless"]
 
 
-def test_doc_without_local_converter_emits_actionable_hint(monkeypatch, tmp_path, capsys):
+def test_doc_without_local_converter_emits_actionable_hint(monkeypatch, tmp_path):
     source = tmp_path / "legacy.doc"
     source.write_bytes(b"legacy-word")
     monkeypatch.setattr(converter, "_find_soffice", lambda: None)
     monkeypatch.setattr(converter, "_find_textutil", lambda: None)
 
-    converter.convert_doc(str(source))
+    output, _ = converter.convert_doc(str(source))
 
-    output = capsys.readouterr().out
     assert output.startswith("SCAN_OR_IMAGE_HINT:")
     assert "LibreOffice" in output
     assert "textutil" in output
 
 
-def test_concurrent_local_conversions_do_not_mix_process_stdout(monkeypatch):
+def test_concurrent_local_conversions_do_not_mix_outputs(monkeypatch):
     def fake_converter(path):
         name = Path(path).name
-        print(f"{name}:start")
         time.sleep(0.03)
-        print(f"{name}:end")
+        return f"{name}:start\n{name}:end\n", {}
 
     monkeypatch.setitem(convert_service._DISPATCH, ".docx", fake_converter)
     monkeypatch.setattr(convert_service, "validate_document_content", lambda *_args: "docx")
@@ -299,7 +294,7 @@ def test_document_extension_mismatch_is_rejected():
 
 def test_empty_converter_output_is_rejected(monkeypatch):
     monkeypatch.setattr(convert_service, "validate_document_content", lambda *_args: "docx")
-    monkeypatch.setitem(convert_service._DISPATCH, ".docx", lambda _path: None)
+    monkeypatch.setitem(convert_service._DISPATCH, ".docx", lambda _path: ("", {}))
 
     with pytest.raises(ConvertError) as exc_info:
         convert_service.convert_to_markdown(b"document", "empty.docx")

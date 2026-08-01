@@ -21,8 +21,15 @@ import sys
 import tempfile
 import zipfile
 from datetime import date, datetime, time
+from functools import partial
 from pathlib import Path
 from xml.etree import ElementTree
+
+
+# 每个转换函数把 Markdown 写入局部 StringIO，最后返回 (markdown, report)。
+# 不使用 print 到进程全局 stdout，避免并发转换时互相污染输出。
+def _writer(buf: io.StringIO) -> partial:
+    return partial(print, file=buf)
 
 # ---------- 通用工具 ----------
 
@@ -79,7 +86,7 @@ def _format_xlsx_value(value, number_format: str) -> str:
 
 # ---------- 分支：xlsx ----------
 
-def convert_xlsx(path: str) -> dict[str, object]:
+def convert_xlsx(path: str) -> tuple[str, dict[str, object]]:
     import openpyxl
 
     # 用 BytesIO 绕过 openpyxl 对扩展名的检查（有些 .xls 实际是 xlsx）
@@ -87,9 +94,11 @@ def convert_xlsx(path: str) -> dict[str, object]:
         data = fh.read()
     value_wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
     formula_wb = openpyxl.load_workbook(io.BytesIO(data), data_only=False)
-    print(f"# {Path(path).name}")
-    print("_format: xlsx_")
-    print()
+    buf = io.StringIO()
+    _emit = _writer(buf)
+    _emit(f"# {Path(path).name}")
+    _emit("_format: xlsx_")
+    _emit()
 
     formula_count = 0
     formula_values_available = 0
@@ -99,8 +108,8 @@ def convert_xlsx(path: str) -> dict[str, object]:
 
     for ws in value_wb.worksheets:
         formula_ws = formula_wb[ws.title]
-        print(f"## Sheet: {ws.title}")
-        print()
+        _emit(f"## Sheet: {ws.title}")
+        _emit()
 
         # Only the anchor owns a merged value. Repeating it into every covered
         # cell creates false records and makes Markdown diverge from Excel.
@@ -119,8 +128,8 @@ def convert_xlsx(path: str) -> dict[str, object]:
         max_col = ws.max_column or 0
 
         if max_row == 0 or max_col == 0:
-            print("_empty sheet_")
-            print()
+            _emit("_empty sheet_")
+            _emit()
             continue
 
         # 修剪尾部纯空的行/列（结构中间的空行空列保留，只去外围的填充空白）
@@ -148,15 +157,15 @@ def convert_xlsx(path: str) -> dict[str, object]:
             max_col -= 1
 
         if max_row == 0 or max_col == 0:
-            print("_empty sheet_")
-            print()
+            _emit("_empty sheet_")
+            _emit()
             continue
 
         # 输出 markdown 表格（保留结构中的空行/空列）
         header = "| " + " | ".join(["_row/col_"] + [_cell_col_letter(c) for c in range(1, max_col + 1)]) + " |"
         sep = "| " + " | ".join(["---"] * (max_col + 1)) + " |"
-        print(header)
-        print(sep)
+        _emit(header)
+        _emit(sep)
 
         for r in range(1, max_row + 1):
             row_cells: list[str] = [str(r)]
@@ -178,15 +187,15 @@ def convert_xlsx(path: str) -> dict[str, object]:
                         formula_values_available += 1
                 rendered = _format_xlsx_value(value, value_cell.number_format)
                 row_cells.append(rendered.replace("|", "\\|"))
-            print("| " + " | ".join(row_cells) + " |")
-        print()
+            _emit("| " + " | ".join(row_cells) + " |")
+        _emit()
 
         if merged_ranges:
-            print("### Merged ranges")
-            print()
+            _emit("### Merged ranges")
+            _emit()
             for merged_range in merged_ranges:
-                print(f"- `{merged_range}`")
-            print()
+                _emit(f"- `{merged_range}`")
+            _emit()
 
         formula_rows: list[tuple[str, str, str]] = []
         for row in formula_ws.iter_rows(min_row=1, max_row=max_row, min_col=1, max_col=max_col):
@@ -202,19 +211,19 @@ def convert_xlsx(path: str) -> dict[str, object]:
                 )
                 formula_rows.append((formula_cell.coordinate, formula, cached))
         if formula_rows:
-            print("### Formula cells")
-            print()
-            print("| Cell | Formula | Cached value |")
-            print("| --- | --- | --- |")
+            _emit("### Formula cells")
+            _emit()
+            _emit("| Cell | Formula | Cached value |")
+            _emit("| --- | --- | --- |")
             for coordinate, formula, cached in formula_rows:
-                print(
+                _emit(
                     "| "
                     + " | ".join(
                         value.replace("|", "\\|") for value in (coordinate, formula, cached)
                     )
                     + " |"
                 )
-            print()
+            _emit()
 
     report = {
         "coverage": {
@@ -230,12 +239,12 @@ def convert_xlsx(path: str) -> dict[str, object]:
     }
     value_wb.close()
     formula_wb.close()
-    return report
+    return buf.getvalue(), report
 
 
 # ---------- 分支：xls ----------
 
-def convert_xls(path: str) -> dict[str, object]:
+def convert_xls(path: str) -> tuple[str, dict[str, object]]:
     import xlrd
     from xlrd import xldate
 
@@ -250,18 +259,20 @@ def convert_xls(path: str) -> dict[str, object]:
 
     book = xlrd.open_workbook(path, formatting_info=False)
     datemode = book.datemode
-    print(f"# {Path(path).name}")
-    print("_format: xls_")
-    print()
+    buf = io.StringIO()
+    _emit = _writer(buf)
+    _emit(f"# {Path(path).name}")
+    _emit("_format: xls_")
+    _emit()
 
     for sheet in book.sheets():
-        print(f"## Sheet: {sheet.name}")
-        print()
+        _emit(f"## Sheet: {sheet.name}")
+        _emit()
 
         nrows, ncols = sheet.nrows, sheet.ncols
         if nrows == 0 or ncols == 0:
-            print("_empty sheet_")
-            print()
+            _emit("_empty sheet_")
+            _emit()
             continue
 
         # xlrd 的 merged_cells 是 [(rlo, rhi, clo, chi), ...]，含前不含后
@@ -304,14 +315,14 @@ def convert_xls(path: str) -> dict[str, object]:
             ncols -= 1
 
         if nrows == 0 or ncols == 0:
-            print("_empty sheet_")
-            print()
+            _emit("_empty sheet_")
+            _emit()
             continue
 
         header = "| " + " | ".join(["_row/col_"] + [_cell_col_letter(c + 1) for c in range(ncols)]) + " |"
         sep = "| " + " | ".join(["---"] * (ncols + 1)) + " |"
-        print(header)
-        print(sep)
+        _emit(header)
+        _emit(sep)
 
         for r in range(nrows):
             row_cells = [str(r + 1)]
@@ -321,16 +332,16 @@ def convert_xls(path: str) -> dict[str, object]:
                 if isinstance(v, float) and v.is_integer():
                     v = int(v)
                 row_cells.append(_clean_cell(v).replace("|", "\\|"))
-            print("| " + " | ".join(row_cells) + " |")
-        print()
+            _emit("| " + " | ".join(row_cells) + " |")
+        _emit()
         if merged_ranges:
-            print("### Merged ranges")
-            print()
+            _emit("### Merged ranges")
+            _emit()
             for merged_range in merged_ranges:
-                print(f"- `{merged_range}`")
-            print()
+                _emit(f"- `{merged_range}`")
+            _emit()
 
-    return {
+    return buf.getvalue(), {
         "coverage": {
             "sheet_count": book.nsheets,
             "merged_ranges": sum(len(sheet.merged_cells) for sheet in book.sheets()),
@@ -494,16 +505,18 @@ def _inspect_docx_package(data: bytes) -> dict[str, object]:
     }
 
 
-def convert_docx(path: str) -> dict[str, object]:
+def convert_docx(path: str) -> tuple[str, dict[str, object]]:
     from docx import Document
     from docx.oxml.ns import qn
 
     data = Path(path).read_bytes()
     package_report = _inspect_docx_package(data)
     doc = Document(path)
-    print(f"# {Path(path).name}")
-    print("_format: docx_")
-    print()
+    buf = io.StringIO()
+    _emit = _writer(buf)
+    _emit(f"# {Path(path).name}")
+    _emit("_format: docx_")
+    _emit()
 
     # 按 body 顺序遍历段落和表格
     body = doc.element.body
@@ -523,35 +536,35 @@ def convert_docx(path: str) -> dict[str, object]:
             p_idx += 1
             if text.strip() == "":
                 # 保留空行为一个明确的占位，便于人工/LLM 定位段落断点
-                print(f"_p{p_idx}: (empty)_")
+                _emit(f"_p{p_idx}: (empty)_")
             elif "\n" in text:
                 # 段内软换行（shift-enter）：每个子行独立成 markdown 行，便于 LLM 逐字段抽取
                 lines = [ln for ln in text.split("\n")]
                 for sub_i, sub in enumerate(lines, start=1):
                     if sub.strip() == "":
-                        print(f"_p{p_idx}.{sub_i}: (empty)_")
+                        _emit(f"_p{p_idx}.{sub_i}: (empty)_")
                     else:
-                        print(f"_p{p_idx}.{sub_i}_ {sub.rstrip()}")
+                        _emit(f"_p{p_idx}.{sub_i}_ {sub.rstrip()}")
             else:
-                print(f"_p{p_idx}_ {text}")
-            print()
+                _emit(f"_p{p_idx}_ {text}")
+            _emit()
         elif tag == qn("w:tbl"):
             tbl = next(t_iter, None)
             if tbl is None:
                 continue
             t_idx += 1
-            print(f"### Table {t_idx}")
-            print()
+            _emit(f"### Table {t_idx}")
+            _emit()
             rows = tbl.rows
             if not rows:
-                print("_empty table_")
-                print()
+                _emit("_empty table_")
+                _emit()
                 continue
             ncols = max(len(r.cells) for r in rows)
             header = "| " + " | ".join(["_row/col_"] + [_cell_col_letter(c + 1) for c in range(ncols)]) + " |"
             sep = "| " + " | ".join(["---"] * (ncols + 1)) + " |"
-            print(header)
-            print(sep)
+            _emit(header)
+            _emit(sep)
             seen_table_cells: set[int] = set()
             for r_idx, row in enumerate(rows, start=1):
                 row_cells = [str(r_idx)]
@@ -567,40 +580,40 @@ def convert_docx(path: str) -> dict[str, object]:
                     else:
                         v = ""
                     row_cells.append(_clean_cell(v).replace("|", "\\|"))
-                print("| " + " | ".join(row_cells) + " |")
-            print()
+                _emit("| " + " | ".join(row_cells) + " |")
+            _emit()
 
     for part_name, paragraphs in package_report["story_sections"]:
-        print(f"## Story: {part_name}")
-        print()
+        _emit(f"## Story: {part_name}")
+        _emit()
         for paragraph_index, text in enumerate(paragraphs, 1):
-            print(f"_p{paragraph_index}_ {text}")
-            print()
+            _emit(f"_p{paragraph_index}_ {text}")
+            _emit()
 
     text_boxes = package_report["text_boxes"]
     if text_boxes:
-        print("## Text boxes")
-        print()
+        _emit("## Text boxes")
+        _emit()
         for text_box_index, (part_name, text) in enumerate(text_boxes, 1):
-            print(f"### Text box {text_box_index}")
-            print(f"_source: {part_name}_")
-            print()
-            print(text)
-            print()
+            _emit(f"### Text box {text_box_index}")
+            _emit(f"_source: {part_name}_")
+            _emit()
+            _emit(text)
+            _emit()
 
     embedded_images = package_report["embedded_images"]
     if embedded_images:
-        print("## Embedded images")
-        print()
+        _emit("## Embedded images")
+        _emit()
         for image_index, image in enumerate(embedded_images, 1):
-            print(f"### Image {image_index}: {image['filename']}")
-            print(
+            _emit(f"### Image {image_index}: {image['filename']}")
+            _emit(
                 f"_source: {image['part']}#{image['relationship_id']}; "
                 "content is routed separately for image verification_"
             )
-            print()
+            _emit()
 
-    return package_report
+    return buf.getvalue(), package_report
 
 
 # ---------- 分支：doc（需 libreoffice） ----------
@@ -666,16 +679,18 @@ def _word_xml_text(element: ElementTree.Element) -> str:
     return "".join(parts).strip()
 
 
-def convert_word_xml(path: str) -> None:
+def convert_word_xml(path: str) -> str:
     """Convert Word 2003 XML or Flat OPC XML without external office tools."""
     root = ElementTree.parse(path).getroot()
     body = next((node for node in root.iter() if _xml_local_name(node.tag) == "body"), None)
     if body is None:
         raise ValueError("Word XML document has no body")
 
-    print(f"# {Path(path).name}")
-    print("_format: word_xml_")
-    print()
+    buf = io.StringIO()
+    _emit = _writer(buf)
+    _emit(f"# {Path(path).name}")
+    _emit("_format: word_xml_")
+    _emit()
     paragraph_index = 0
     table_index = 0
     for child in body:
@@ -683,19 +698,19 @@ def convert_word_xml(path: str) -> None:
         if name == "p":
             paragraph_index += 1
             value = _word_xml_text(child)
-            print(f"_p{paragraph_index}_ {value}" if value else f"_p{paragraph_index}: (empty)_")
-            print()
+            _emit(f"_p{paragraph_index}_ {value}" if value else f"_p{paragraph_index}: (empty)_")
+            _emit()
             continue
         if name != "tbl":
             continue
 
         table_index += 1
         rows = [node for node in child if _xml_local_name(node.tag) == "tr"]
-        print(f"### Table {table_index}")
-        print()
+        _emit(f"### Table {table_index}")
+        _emit()
         if not rows:
-            print("_empty table_")
-            print()
+            _emit("_empty table_")
+            _emit()
             continue
         parsed_rows = [
             [_word_xml_text(cell) for cell in row if _xml_local_name(cell.tag) == "tc"]
@@ -705,32 +720,29 @@ def convert_word_xml(path: str) -> None:
         header = "| " + " | ".join(
             ["_row/col_", *[_cell_col_letter(index + 1) for index in range(column_count)]]
         ) + " |"
-        print(header)
-        print("| " + " | ".join(["---"] * (column_count + 1)) + " |")
+        _emit(header)
+        _emit("| " + " | ".join(["---"] * (column_count + 1)) + " |")
         for row_index, row in enumerate(parsed_rows, start=1):
             cells = [str(row_index)]
             cells.extend(_clean_cell(value).replace("|", "\\|") for value in row)
             cells.extend([""] * (column_count - len(row)))
-            print("| " + " | ".join(cells) + " |")
-        print()
+            _emit("| " + " | ".join(cells) + " |")
+        _emit()
+    return buf.getvalue()
 
 
-def convert_doc(path: str) -> dict[str, object] | None:
+def convert_doc(path: str) -> tuple[str, dict[str, object] | None]:
     if _is_word_xml(path):
-        convert_word_xml(path)
-        return
+        return convert_word_xml(path), None
 
     soffice = _find_soffice()
     textutil = _find_textutil() if not soffice else None
     if not soffice and not textutil:
-        emit_scan_hint(
-            path,
-            reason=(
-                "doc 需 LibreOffice 或 macOS textutil 转换（均未找到）；"
-                "请安装 LibreOffice 或改用 OCR"
-            ),
+        return (
+            f"SCAN_OR_IMAGE_HINT: {path}  # "
+            "doc 需 LibreOffice 或 macOS textutil 转换（均未找到）；请安装 LibreOffice 或改用 OCR",
+            None,
         )
-        return
 
     with tempfile.TemporaryDirectory() as tmpd:
         stem = Path(path).stem
@@ -750,15 +762,20 @@ def convert_doc(path: str) -> dict[str, object] | None:
                 timeout=120,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-            emit_scan_hint(path, reason=f"{converter_name} 转换失败: {e}")
-            return
+            stderr_text = ""
+            if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                stderr_text = e.stderr.decode("utf-8", errors="replace").strip()
+            detail = f"{e}"
+            if stderr_text:
+                detail += f" | stderr: {stderr_text}"
+            detail += f" | tmpdir={tempfile.gettempdir()} env_TMPDIR={os.environ.get('TMPDIR')}"
+            return f"SCAN_OR_IMAGE_HINT: {path}  # {converter_name} 转换失败: {detail}", None
 
         if not docx_path.exists():
             # libreoffice 有时会改名，回退用目录里唯一的 docx
             candidates = list(Path(tmpd).glob("*.docx"))
             if not candidates:
-                emit_scan_hint(path, reason="libreoffice 未产出 docx")
-                return
+                return f"SCAN_OR_IMAGE_HINT: {path}  # libreoffice 未产出 docx", None
             docx_path = candidates[0]
 
         return convert_docx(str(docx_path))
@@ -766,7 +783,7 @@ def convert_doc(path: str) -> dict[str, object] | None:
 
 # ---------- 分支：pdf ----------
 
-def convert_pdf(path: str) -> None:
+def convert_pdf(path: str) -> tuple[str, dict[str, object] | None]:
     import pdfplumber
 
     with pdfplumber.open(path) as pdf:
@@ -777,29 +794,30 @@ def convert_pdf(path: str) -> None:
 
         # 全文极短 → 扫描件，交 OCR
         if total_text_len < 40:
-            emit_scan_hint(path, reason=f"pdf 文本层过短 ({total_text_len} 字符)，判定为扫描件")
-            return
+            return f"SCAN_OR_IMAGE_HINT: {path}  # pdf 文本层过短 ({total_text_len} 字符)，判定为扫描件", None
 
-        print(f"# {Path(path).name}")
-        print(f"_format: pdf_ pages: {len(pdf.pages)}")
-        print()
+        buf = io.StringIO()
+        _emit = _writer(buf)
+        _emit(f"# {Path(path).name}")
+        _emit(f"_format: pdf_ pages: {len(pdf.pages)}")
+        _emit()
 
         for page_idx, page in enumerate(pdf.pages, start=1):
-            print(f"## Page {page_idx}")
-            print()
+            _emit(f"## Page {page_idx}")
+            _emit()
 
             # 文本层
             text = page.extract_text() or ""
             text = text.strip()
             if text:
-                print("### Text")
-                print()
+                _emit("### Text")
+                _emit()
                 for line_i, line in enumerate(text.split("\n"), start=1):
-                    print(f"_l{line_i}_ {line.rstrip()}")
-                print()
+                    _emit(f"_l{line_i}_ {line.rstrip()}")
+                _emit()
             else:
-                print("_no text layer on this page_")
-                print()
+                _emit("_no text layer on this page_")
+                _emit()
 
             # 表格层（若有）
             tables = []
@@ -809,24 +827,25 @@ def convert_pdf(path: str) -> None:
                 tables = []
 
             for t_idx, table in enumerate(tables, start=1):
-                print(f"### Table {page_idx}.{t_idx}")
-                print()
+                _emit(f"### Table {page_idx}.{t_idx}")
+                _emit()
                 if not table:
-                    print("_empty table_")
-                    print()
+                    _emit("_empty table_")
+                    _emit()
                     continue
                 ncols = max(len(r) for r in table)
                 header = "| " + " | ".join(["_row/col_"] + [_cell_col_letter(c + 1) for c in range(ncols)]) + " |"
                 sep = "| " + " | ".join(["---"] * (ncols + 1)) + " |"
-                print(header)
-                print(sep)
+                _emit(header)
+                _emit(sep)
                 for r_idx, row in enumerate(table, start=1):
                     cells = [str(r_idx)]
                     for c_idx in range(ncols):
                         v = row[c_idx] if c_idx < len(row) else ""
                         cells.append(_clean_cell(v).replace("|", "\\|"))
-                    print("| " + " | ".join(cells) + " |")
-                print()
+                    _emit("| " + " | ".join(cells) + " |")
+                _emit()
+    return buf.getvalue(), None
 
 
 # ---------- 分支：图片 ----------
@@ -869,7 +888,8 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
-        handler(path)
+        markdown, _report = handler(path)
+        sys.stdout.write(markdown)
     except Exception as e:
         print(f"convert error: {e.__class__.__name__}: {e}", file=sys.stderr)
         return 1

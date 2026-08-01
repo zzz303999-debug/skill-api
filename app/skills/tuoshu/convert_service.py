@@ -1,7 +1,7 @@
 """托书格式转换：bytes → markdown 文本。
 
-复用 `converter.py`（原 tuoshu-extractor/scripts/to_text.py），
-通过临时文件 + stdout 重定向的方式包装成函数调用，避免重写 400+ 行。
+复用 `converter.py`（原 tuoshu-extractor/scripts/to_text.py）的转换函数，
+每个 handler 直接返回 (markdown, report)，无 stdout 重定向，可安全并发。
 """
 
 from __future__ import annotations
@@ -9,9 +9,7 @@ from __future__ import annotations
 import io
 import re
 import tempfile
-import threading
 import zipfile
-from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 
@@ -28,10 +26,6 @@ log = get_logger(__name__)
 # 复用底层字典
 _DISPATCH = _conv.DISPATCH
 _IMAGE_EXTS = _conv.IMAGE_EXTS
-
-# redirect_stdout replaces process-global sys.stdout, so local converters must
-# not overlap when SkillBase.run() executes in the bounded worker pool.
-_CONVERSION_STDOUT_LOCK = threading.Lock()
 
 SUPPORTED_EXTS = list(_DISPATCH.keys()) + list(_IMAGE_EXTS)
 
@@ -72,22 +66,28 @@ _IMAGE_SIGNATURES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 )
 
 
+def _detect_image_signature(
+    file_bytes: bytes,
+) -> tuple[str, str, tuple[str, ...]] | None:
+    """按 magic bytes 识别栅格图片格式，返回 (mime, format, accepted_exts)。"""
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return _IMAGE_SIGNATURES[0]
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return _IMAGE_SIGNATURES[1]
+    if file_bytes.startswith((b"GIF87a", b"GIF89a")):
+        return _IMAGE_SIGNATURES[2]
+    if file_bytes.startswith(b"BM"):
+        return _IMAGE_SIGNATURES[3]
+    if file_bytes.startswith((b"II*\x00", b"MM\x00*")):
+        return _IMAGE_SIGNATURES[4]
+    if len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
+        return _IMAGE_SIGNATURES[5]
+    return None
+
+
 def detect_image_mime(file_bytes: bytes, filename: str) -> tuple[str, str]:
     """Validate image content by magic bytes instead of trusting the suffix."""
-    detected: tuple[str, str, tuple[str, ...]] | None = None
-    if file_bytes.startswith(b"\xff\xd8\xff"):
-        detected = _IMAGE_SIGNATURES[0]
-    elif file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        detected = _IMAGE_SIGNATURES[1]
-    elif file_bytes.startswith((b"GIF87a", b"GIF89a")):
-        detected = _IMAGE_SIGNATURES[2]
-    elif file_bytes.startswith(b"BM"):
-        detected = _IMAGE_SIGNATURES[3]
-    elif file_bytes.startswith((b"II*\x00", b"MM\x00*")):
-        detected = _IMAGE_SIGNATURES[4]
-    elif len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
-        detected = _IMAGE_SIGNATURES[5]
-
+    detected = _detect_image_signature(file_bytes)
     if detected is None:
         raise BadRequestError(
             "uploaded image content is not a supported raster format",
@@ -114,18 +114,9 @@ def detect_document_format(file_bytes: bytes) -> str:
     """Detect the container format without trusting the uploaded filename."""
     if not file_bytes:
         return "empty"
-    if file_bytes.startswith(b"\xff\xd8\xff"):
-        return "jpeg"
-    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if file_bytes.startswith((b"GIF87a", b"GIF89a")):
-        return "gif"
-    if file_bytes.startswith(b"BM"):
-        return "bmp"
-    if file_bytes.startswith((b"II*\x00", b"MM\x00*")):
-        return "tiff"
-    if len(file_bytes) >= 12 and file_bytes[:4] == b"RIFF" and file_bytes[8:12] == b"WEBP":
-        return "webp"
+    detected_image = _detect_image_signature(file_bytes)
+    if detected_image is not None:
+        return detected_image[1]
 
     prefix = file_bytes[:4096].lstrip()
     if b"%PDF-" in file_bytes[:1024]:
@@ -285,23 +276,32 @@ def _format_pdf_page(page: Any, page_number: int) -> str:
     return "\n".join(lines).strip()
 
 
+def _render_page_to_png(page: Any, scale: float) -> bytes:
+    """Render one pdfium page to PNG bytes, closing only its bitmap."""
+    bitmap = None
+    try:
+        bitmap = page.render(scale=scale)
+        image = bitmap.to_pil()
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    finally:
+        if bitmap is not None:
+            bitmap.close()
+
+
 def _render_pdf_page(file_bytes: bytes, page_index: int, *, scale: float) -> bytes:
     try:
         import pypdfium2 as pdfium
 
         pdf = pdfium.PdfDocument(file_bytes)
-        page = pdf[page_index]
-        bitmap = None
         try:
-            bitmap = page.render(scale=scale)
-            image = bitmap.to_pil()
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG")
-            return buffer.getvalue()
+            page = pdf[page_index]
+            try:
+                return _render_page_to_png(page, scale)
+            finally:
+                page.close()
         finally:
-            if bitmap is not None:
-                bitmap.close()
-            page.close()
             pdf.close()
     except Exception as exc:
         raise ConvertError(
@@ -612,11 +612,7 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
         tmp_path = Path(tmp_dir) / (Path(filename).name or f"document{ext}")
         tmp_path.write_bytes(file_bytes)
         try:
-            buf = io.StringIO()
-            with _CONVERSION_STDOUT_LOCK:
-                with redirect_stdout(buf):
-                    conversion_report = handler(str(tmp_path))
-            converted = buf.getvalue()
+            converted, conversion_report = handler(str(tmp_path))
             if not converted.strip():
                 raise ConvertError(
                     "converter returned empty content",
@@ -760,16 +756,9 @@ def render_pdf_pages(
                 )
             for page_index in range(page_count):
                 page = pdf[page_index]
-                bitmap = None
                 try:
-                    bitmap = page.render(scale=scale)
-                    image = bitmap.to_pil()
-                    buf = io.BytesIO()
-                    image.save(buf, format="PNG")
-                    images.append(buf.getvalue())
+                    images.append(_render_page_to_png(page, scale))
                 finally:
-                    if bitmap is not None:
-                        bitmap.close()
                     page.close()
         finally:
             pdf.close()
