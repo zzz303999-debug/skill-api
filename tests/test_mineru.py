@@ -377,24 +377,23 @@ def test_pdf_prefers_mineru(monkeypatch):
     assert converted.parser_fallback is False
 
 
-def test_pdf_falls_back_to_original_converter(monkeypatch):
+def test_pdf_fallback_raises_actionable_error_when_mineru_fails(monkeypatch):
+    # pdfplumber 打不开（触发 ValueError）且 MinerU 也失败时，不再落回本地
+    # 解析器（必然再次失败），而是给出可行动的错误提示
     monkeypatch.setattr(settings, "mineru_enabled", True)
     monkeypatch.setattr(settings, "mineru_fallback_enabled", True)
 
     def fail_mineru(_file_bytes, _filename):
         raise MinerUError("unavailable")
 
-    def fake_pdf_converter(_path):
-        return "# pdfplumber Markdown", {}
-
     monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
-    monkeypatch.setitem(convert_service._DISPATCH, ".pdf", fake_pdf_converter)
 
-    converted = convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
+    with pytest.raises(ConvertError) as exc_info:
+        convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
 
-    assert converted.strip() == "# pdfplumber Markdown"
-    assert converted.parser == "pdfplumber"
-    assert converted.parser_fallback is True
+    assert exc_info.value.code == "pdf_parse_failed"
+    assert "convert the PDF to images" in exc_info.value.message
+    assert exc_info.value.details["mineru_error"].startswith("MinerUError")
 
 
 def test_pdf_can_disable_fallback(monkeypatch):

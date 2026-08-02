@@ -206,25 +206,50 @@ class TuoshuSkill(SkillBase):
                 and not parse_result.parser_fallback
             )
             if parse_result.vision_images and not skip_vision:
-                data_urls = [
-                    image_to_data_url(image, mime=mime)
-                    for image, mime in parse_result.vision_inputs
-                ]
-                user_content = build_user_message_vision(
-                    data_urls,
-                    filename=filename,
-                    doc_format=doc_format,
-                    extracted_at=extracted_at,
-                    parsed_text=source_text,
-                    # MinerU already supplies the structure.  The image is a
-                    # low-cost independent check against OCR hallucinations,
-                    # not a second full-document extraction pass.
-                    image_detail=(
-                        "low"
-                        if parse_result.parser == "mineru" and not parse_result.parser_fallback
-                        else "high"
-                    ),
-                )
+                images = list(parse_result.vision_inputs)
+                total_image_bytes = sum(len(image) for image, _ in images)
+                if total_image_bytes > settings.vision_max_image_bytes:
+                    # 原图 base64 直传会超网关请求体限制（base64 膨胀约 1/3）；
+                    # 降级为纯文本抽取并标记必须人工复核
+                    parser_review_issues.append(
+                        {
+                            "code": "vision_image_too_large",
+                            "field": "source",
+                            "message": (
+                                f"图片总大小 {total_image_bytes} 字节超过 vision 直传上限 "
+                                f"{settings.vision_max_image_bytes} 字节，已跳过 LLM vision "
+                                "交叉核验，必须人工复核"
+                            ),
+                            "source_values": [],
+                            "blocking": True,
+                        }
+                    )
+                    user_content = build_user_message_text(
+                        source_text or "",
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                    )
+                else:
+                    data_urls = [
+                        image_to_data_url(image, mime=mime)
+                        for image, mime in images
+                    ]
+                    user_content = build_user_message_vision(
+                        data_urls,
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                        parsed_text=source_text,
+                        # MinerU already supplies the structure.  The image is a
+                        # low-cost independent check against OCR hallucinations,
+                        # not a second full-document extraction pass.
+                        image_detail=(
+                            "low"
+                            if parse_result.parser == "mineru" and not parse_result.parser_fallback
+                            else "high"
+                        ),
+                    )
             else:
                 if skip_vision:
                     parser_review_issues.append(

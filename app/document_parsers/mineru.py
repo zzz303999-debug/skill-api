@@ -279,6 +279,7 @@ def parse_document(
                 headers=headers,
                 data=form,
                 files={"files": (safe_filename, file_bytes, upload_mime)},
+                follow_redirects=True,
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:

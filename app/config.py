@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     vision_pdf_render_scale: float = Field(default=2.0, gt=0, le=4.0)
     # 图片高置信时跳过 LLM vision 交叉核验，只用 MinerU OCR 文本走 LLM 以提速
     image_vision_skip_when_confident: bool = True
+    # 原图 base64 直传 LLM 的字节数上限；超过则跳过 vision 并标记人工复核
+    # （base64 会膨胀约 1/3，避免超网关请求体限制）
+    vision_max_image_bytes: int = Field(
+        default=8 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024
+    )
 
     # PDF 文本层页级质量探测
     parser_text_min_chars: int = Field(default=50, ge=1, le=1000)

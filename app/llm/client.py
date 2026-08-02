@@ -85,7 +85,8 @@ def chat(
     if response_format is not None:
         kwargs["response_format"] = response_format
     if extra_body:
-        kwargs["extra_body"] = extra_body
+        # 拷贝后使用，避免后续注入 thinking 等参数时污染调用方传入的 dict
+        kwargs["extra_body"] = dict(extra_body)
 
     thinking_injected = False
     if (

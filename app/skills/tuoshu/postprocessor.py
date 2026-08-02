@@ -72,6 +72,7 @@ _ALWAYS_BLOCKING_CODES = {
     "mineru_failed",
     "mineru_low_confidence",
     "confirmed_ocr_artifact",
+    "vision_image_too_large",
     "ungrounded_text",
     "sender_contact_not_from_from_field",
     "carrier_prefix_mismatch",

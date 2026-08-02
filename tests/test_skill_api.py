@@ -381,6 +381,53 @@ def test_low_confidence_mineru_image_keeps_vision_cross_check(monkeypatch):
     assert images[0]["image_url"]["detail"] == "high"
 
 
+def test_oversized_image_degrades_to_text_and_flags_manual_review(monkeypatch):
+    """原图总大小超过 vision 直传上限时降级纯文本，并保留 blocking 复核标记。"""
+    import app.skills.tuoshu.skill as skill_module
+    from app.config import settings
+    from app.document_parsers.models import ParsedPage, ParseResult
+
+    parsed_text = "提单号：KMTCSHAP950393；船名：RESURGENCE"
+    captured: dict = {}
+    parse_result = ParseResult(
+        input_format="png",
+        pages=[
+            ParsedPage(
+                page_number=1,
+                parser="vision",
+                markdown=parsed_text,
+                confidence="low",
+                vision_image=b"\x00" * (settings.vision_max_image_bytes + 1),
+                vision_mime="image/png",
+            )
+        ],
+    )
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+
+    def fake_chat_json(messages, **_kwargs):
+        captured["messages"] = messages
+        return {"source": {}}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+
+    result = TuoshuSkill().run(
+        file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+    )
+
+    user_content = captured["messages"][-1]["content"]
+    # 超限降级为纯文本通道，不再携带 base64 图片
+    assert isinstance(user_content, str)
+    assert parsed_text in user_content
+    assert "image_url" not in user_content
+    # blocking 复核标记必须保留在后处理白名单中（vision_image_too_large）
+    issues = result["result"].get("review_issues", [])
+    issue = next(
+        item for item in issues if item["code"] == "vision_image_too_large"
+    )
+    assert issue["blocking"] is True
+    assert result["result"]["ready_for_order"] is False
+
+
 def test_skill_uses_deterministic_route_when_llm_misclassifies_doc_type(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 

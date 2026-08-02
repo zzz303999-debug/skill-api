@@ -69,7 +69,11 @@ def _format_xlsx_value(value, number_format: str) -> str:
     """Format date/time cells without inventing a midnight component."""
     fmt = (number_format or "").lower()
     has_date = any(token in fmt for token in ("yy", "dd"))
-    has_time = any(token in fmt for token in ("h", "s"))
+    # 时间 token h/s 必须独立成串（h[h]/s[s]），避免把含字母的自定义
+    # 文本格式（如 "Height"）误判为时间格式
+    has_time = bool(
+        re.search(r"(?<![a-z])h{1,2}(?![a-z])|(?<![a-z])s{1,2}(?![a-z])", fmt)
+    )
     has_seconds = "s" in fmt
     if isinstance(value, datetime):
         if has_date and has_time:

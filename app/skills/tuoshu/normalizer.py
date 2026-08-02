@@ -394,11 +394,16 @@ def _normalize_dict(data: dict[str, Any], aliases: dict[str, str]) -> dict[str, 
     result: dict[str, Any] = {}
     for key, value in data.items():
         canonical = aliases.get(key, key)
+        stripped_alias = None
         if canonical == key and isinstance(key, str) and re.search(r"\s", key):
-            canonical = aliases.get(re.sub(r"\s+", "", key), key)
+            stripped_alias = aliases.get(re.sub(r"\s+", "", key))
+            if stripped_alias:
+                canonical = stripped_alias
         if canonical in result:
-            # 正式 key 已存在，跳过别名值（除非正式 key 的值是 None）
-            if result[canonical] is None:
+            # 正式 key 已存在：正式 key 的值优先，别名值只补 None 空位
+            if key == canonical and stripped_alias is None:
+                result[canonical] = value
+            elif result[canonical] is None:
                 result[canonical] = value
         else:
             result[canonical] = value
@@ -536,7 +541,10 @@ def _split_vessel_voyage(value: Any) -> tuple[str | None, str | None]:
     match = re.fullmatch(r"(.+?)\s+V\.\s*([^\s]+)", text, flags=re.IGNORECASE)
     if match:
         return match.group(1).strip() or None, match.group(2).strip() or None
-    return None, None
+    # 无分隔符：整段视为船名（与订单文本解析器行为一致），纯航次例外
+    if re.fullmatch(r"(?:V\.?|VOY\.?)\s*[A-Za-z0-9-]+", text, re.IGNORECASE):
+        return None, text
+    return text, None
 
 
 def _split_container_type_qty(value: Any) -> tuple[str | None, int | None]:
@@ -654,12 +662,21 @@ def extract_number(value: str | None, *, integer: bool = False) -> int | float |
     return int(number) if integer and number.is_integer() else number
 
 
+# LLM 口语化数字常见的前缀词与尾部修饰词
+_CLEAN_NUMBER_LEAD = re.compile(
+    r"^(?:约|大约|大概|約|approx(?:oximately)?\.?|about)\s*", re.IGNORECASE
+)
+_CLEAN_NUMBER_TRAIL = re.compile(r"(?:左右|上下|以内|以上)$")
+
+
 def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:
     if value is None or isinstance(value, (int, float)):
         return value, None
     if not isinstance(value, str):
         return value, None
     text = value.replace(",", "").strip()
+    # LLM 口语化输出常带前缀（"约 1200KG"），先剥离再匹配数字
+    text = _CLEAN_NUMBER_LEAD.sub("", text)
     match = re.fullmatch(r"([-+]?\d+(?:\.\d+)?)\s*([^\d\s].*)?", text)
     if not match:
         return value, None
@@ -671,6 +688,8 @@ def _clean_number(value: Any, *, integral: bool) -> tuple[Any, str | None]:
     else:
         cleaned = number
     unit = match.group(2).strip().upper() if match.group(2) else None
+    if unit:
+        unit = _CLEAN_NUMBER_TRAIL.sub("", unit)
     return cleaned, unit
 
 
@@ -680,6 +699,7 @@ def normalize_date_value(value: Any, *, allow_time: bool) -> Any:
     Only unambiguous ``year-month-day`` values are changed. Invalid calendar
     dates and unrelated text are deliberately left untouched so schema
     validation can still reject them instead of silently inventing a value.
+    与 ``parse_date_or_none`` 一致，支持 2 位年份（``21.5.28`` → 2021-05-28）。
     """
     if not isinstance(value, str):
         return value
@@ -691,9 +711,9 @@ def normalize_date_value(value: Any, *, allow_time: bool) -> Any:
     # example ``2026年7月15日0:00``.
     text = re.sub(r"日(?=\d{1,2}\s*(?::|时))", "日 ", text)
     match = re.fullmatch(
-        r"(\d{4})\s*(?:年\s*|[./-]\s*)"
+        r"(\d{2}|\d{4})(?!\d)\s*(?:年\s*|[./-]\s*)"
         r"(\d{1,2})\s*(?:月\s*|[./-]\s*)"
-        r"(\d{1,2})\s*日?"
+        r"(\d{1,2})(?!\d)\s*日?"
         r"(?:[T\s]+(\d{1,2})\s*(?::|时)\s*(\d{1,2})"
         r"(?:\s*(?::|分)\s*(\d{1,2})(?:\.\d+)?\s*秒?)?)?"
         r"(?:Z|[+-]\d{2}:?\d{2})?",
@@ -703,7 +723,12 @@ def normalize_date_value(value: Any, *, allow_time: bool) -> Any:
     if not match:
         return value
 
-    year, month, day = (int(match.group(index)) for index in range(1, 4))
+    year_text = match.group(1)
+    year = int(year_text)
+    if len(year_text) == 2:
+        # strptime ``%y`` semantics: 00-68 -> 2000-2068, 69-99 -> 1969-1999.
+        year += 2000 if year < 69 else 1900
+    month, day = (int(match.group(index)) for index in range(2, 4))
     hour = int(match.group(4) or 0)
     minute = int(match.group(5) or 0)
     second = int(match.group(6) or 0)

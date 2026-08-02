@@ -334,5 +334,10 @@ def merge_deterministic_values(data: dict[str, Any], result: MapperResult) -> di
     if not result.matched:
         return data
     for key, mapped in result.values.items():
+        if key == "doc_type":
+            # 文档类型由确定性模板锁定（模板指纹命中优先于路由/LLM 猜测），
+            # 两者不同不算冲突，否则模板正确命中时会被误报 blocking 而阻塞下单。
+            data[key] = mapped
+            continue
         _merge_value(data, key, mapped, key, issues)
     return data

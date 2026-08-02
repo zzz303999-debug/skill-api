@@ -599,10 +599,17 @@ def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
                     raise ConvertError(
                         f"MinerU convert failed: {exc.__class__.__name__}"
                     ) from exc
-                log.warning(
-                    "mineru_parse_fallback",
-                    extra={"file": filename, "error_type": exc.__class__.__name__},
-                )
+                # 本地 pdfplumber 正是因打不开该文件才进入此分支，再走本地
+                # 解析必然失败；改为给出可行动的错误提示（转图片走 vision）。
+                raise ConvertError(
+                    "PDF cannot be opened by the local parser and MinerU parse failed; "
+                    "convert the PDF to images and retry so it can go through vision",
+                    code="pdf_parse_failed",
+                    details={
+                        "file": Path(filename).name,
+                        "mineru_error": f"{exc.__class__.__name__}: {exc}",
+                    },
+                ) from exc
         except mineru.MinerUContractError as exc:
             raise ConvertError(f"MinerU contract check failed: {exc}") from exc
 
