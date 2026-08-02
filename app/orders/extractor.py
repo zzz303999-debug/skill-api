@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from pydantic import ValidationError
+
+from app.errors import BadRequestError
+
 from .schema import BoxItem, DriverItem, OrderTextExtraction
 
 _LABELS: dict[str, tuple[str, ...]] = {
@@ -72,21 +76,32 @@ def _split_vessel_voyage(value: str) -> tuple[str | None, str | None]:
 
 
 def _parse_boxes(value: str | None) -> list[BoxItem]:
+    """解析箱型箱量文本，支持两种写法混用（如 ``40HQ*3+2*20GP``）。
+
+    两种 pattern（数量*箱型 / 箱型*数量）都会被匹配，按原文出现顺序输出；
+    同一箱型多次出现时数量累加。箱量为 0 或负数的条目视为无效并忽略，
+    避免把 OCR 噪声或非法数量带进订单。
+    """
     if not value:
         return []
-    boxes: list[BoxItem] = []
+    found: list[tuple[int, str, int]] = []
     for pattern in _BOX_PATTERNS:
-        matches = list(pattern.finditer(value))
-        if matches:
-            boxes.extend(
-                BoxItem(
-                    b_type=match.group("type"),
-                    box_num=int(match.group("qty")),
-                )
-                for match in matches
-            )
-            break
-    return boxes
+        for match in pattern.finditer(value):
+            try:
+                qty = int(match.group("qty"))
+            except ValueError:
+                continue
+            if qty < 1:
+                continue
+            found.append((match.start(), match.group("type"), qty))
+    quantities: dict[str, int] = {}
+    order: list[str] = []
+    for _position, b_type, qty in sorted(found, key=lambda item: item[0]):
+        if b_type not in quantities:
+            order.append(b_type)
+            quantities[b_type] = 0
+        quantities[b_type] += qty
+    return [BoxItem(b_type=b_type, box_num=quantities[b_type]) for b_type in order]
 
 
 def extract_order_text(text: str) -> tuple[OrderTextExtraction, dict[str, Any]]:
@@ -104,28 +119,36 @@ def extract_order_text(text: str) -> tuple[OrderTextExtraction, dict[str, Any]]:
         "mt": fields.get("marks"),
     }
     loading_time = fields.get("loading_time")
-    extracted = OrderTextExtraction.model_validate(
-        {
-            "order_num1": fields.get("order_num1"),
-            "c_title": fields.get("c_title"),
-            "c_name": fields.get("c_name"),
-            "c_phone": fields.get("c_phone"),
-            "b_ship_name": vessel,
-            "b_ship_num": voyage,
-            "b_ship_company": fields.get("b_ship_company"),
-            "factory_name": fields.get("factory_name"),
-            "factory_bei": fields.get("factory_bei"),
-            "b_factory_not": fields.get("b_factory_not"),
-            "b_start_dock": fields.get("b_start_dock"),
-            "b_end_port": fields.get("b_end_port"),
-            "b_end_dock": fields.get("b_end_dock"),
-            "b_wharf": fields.get("b_wharf"),
-            "b_open_ship_time": fields.get("b_open_ship_time"),
-            "c_sn": fields.get("c_sn"),
-            "c_note": fields.get("c_note"),
-            "data": [cargo_values] if any(cargo_values.values()) else [],
-            "box": _parse_boxes(fields.get("box_text")),
-            "driver": [DriverItem(b_date=loading_time)] if loading_time else [],
-        }
-    )
+    try:
+        extracted = OrderTextExtraction.model_validate(
+            {
+                "order_num1": fields.get("order_num1"),
+                "c_title": fields.get("c_title"),
+                "c_name": fields.get("c_name"),
+                "c_phone": fields.get("c_phone"),
+                "b_ship_name": vessel,
+                "b_ship_num": voyage,
+                "b_ship_company": fields.get("b_ship_company"),
+                "factory_name": fields.get("factory_name"),
+                "factory_bei": fields.get("factory_bei"),
+                "b_factory_not": fields.get("b_factory_not"),
+                "b_start_dock": fields.get("b_start_dock"),
+                "b_end_port": fields.get("b_end_port"),
+                "b_end_dock": fields.get("b_end_dock"),
+                "b_wharf": fields.get("b_wharf"),
+                "b_open_ship_time": fields.get("b_open_ship_time"),
+                "c_sn": fields.get("c_sn"),
+                "c_note": fields.get("c_note"),
+                "data": [cargo_values] if any(cargo_values.values()) else [],
+                "box": _parse_boxes(fields.get("box_text")),
+                "driver": [DriverItem(b_date=loading_time)] if loading_time else [],
+            }
+        )
+    except ValidationError as exc:
+        # 解析器内部的 Pydantic 校验失败不泄漏成 500，转成业务错误码
+        raise BadRequestError(
+            "extracted order text failed schema validation",
+            code="order_text_parse_failed",
+            details={"errors": exc.errors(include_input=False)},
+        ) from exc
     return extracted, {"extractor": "explicit_labels", "value_mode": "verbatim"}

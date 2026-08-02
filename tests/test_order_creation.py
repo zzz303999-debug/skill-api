@@ -121,7 +121,6 @@ def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
 
     _configure(monkeypatch)
     monkeypatch.setattr(settings, "order_api_url", "https://orders.example/create")
-    monkeypatch.setattr(settings, "order_api_order_info", [{"test": 1}])
     captured = {}
 
     class FakeResponse:
@@ -153,7 +152,6 @@ def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
                 "ext_app_id": "89",
                 "ext_user_id": "jijuTms",
                 "jxt_open_id": "open-id",
-                "order_info": [{"test": 1}],
             },
             "data": order_data,
             "userId": "dony",

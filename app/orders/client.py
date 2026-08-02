@@ -17,40 +17,17 @@ from .schema import OrderApiResponse
 log = get_logger(__name__)
 
 
-class OrderConfigurationError(SkillAPIError):
-    http_status = 503
-    code = "order_api_not_configured"
-
-
 class OrderUpstreamError(SkillAPIError):
     http_status = 502
     code = "order_upstream_error"
 
 
-def validate_order_api_config() -> None:
-    required = {
-        "ORDER_API_URL": settings.order_api_url,
-        "ORDER_API_EXT_APP_ID": settings.order_api_ext_app_id,
-        "ORDER_API_EXT_USER_ID": settings.order_api_ext_user_id,
-        "ORDER_API_JXT_OPEN_ID": settings.order_api_jxt_open_id,
-        "ORDER_API_USER_ID": settings.order_api_user_id,
-    }
-    missing = [name for name, value in required.items() if not value.strip()]
-    if missing:
-        raise OrderConfigurationError(
-            "order API configuration is incomplete",
-            details={"missing": missing},
-        )
-
-
 def publish_create_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
-    validate_order_api_config()
     payload = {
         "apiKeyInfo": {
             "ext_app_id": settings.order_api_ext_app_id,
             "ext_user_id": settings.order_api_ext_user_id,
             "jxt_open_id": settings.order_api_jxt_open_id,
-            "order_info": settings.order_api_order_info,
         },
         "data": order_data,
         "userId": settings.order_api_user_id,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,9 +26,6 @@ class Settings(BaseSettings):
     order_api_ext_user_id: str = ""
     order_api_jxt_open_id: str = ""
     order_api_user_id: str = ""
-    order_api_order_info: list[dict[str, Any]] = Field(
-        default_factory=lambda: [{"test": 1}]
-    )
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
     # OpenAI-compatible LLM

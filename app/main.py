@@ -35,7 +35,6 @@ from app.orders import (
     extract_order_text,
     parse_source_fields,
     publish_create_order,
-    validate_order_api_config,
 )
 
 setup_logging()
@@ -276,7 +275,6 @@ async def _extract_order_text(text: str):
     summary="Extract and create an order from free text",
 )
 async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, Any]:
-    validate_order_api_config()
     text = body.content.strip()
     encoded = text.encode("utf-8")
     if len(encoded) > settings.api_max_upload_bytes:

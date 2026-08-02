@@ -230,7 +230,6 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `ORDER_API_EXT_USER_ID` | 下单账号 `ext_user_id` |
 | `ORDER_API_JXT_OPEN_ID` | 下单账号 `jxt_open_id`，同时映射到订单 `c_id` |
 | `ORDER_API_USER_ID` | 发送人 `userId` |
-| `ORDER_API_ORDER_INFO` | `apiKeyInfo.order_info` JSON 数组 |
 | `ORDER_API_TIMEOUT_SECONDS` | 下单接口超时秒数，默认 30；创建请求不自动重试 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 可完整处理的最大页数，默认 10；超过时返回错误，不截断 |
 | `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |
