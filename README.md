@@ -108,21 +108,30 @@ chmod +x scripts/deploy.sh
 接口，因此 `200` 只表示 FastAPI 进程可响应，不表示端到端抽取可用。
 
 ### `GET /logs`
-内置的请求日志查看页面（浏览器直接访问）。表格展示每条请求的时间、方法、
-路径、上传文件名、耗时、状态码、错误码和请求 ID，支持按文件名/路径/状态码
-筛选、自动刷新（10s）与分页加载。日志写入 `storage/logs/requests.jsonl`，
-服务重启后仍可查询历史；`/logs` 与 `/api/logs` 自身的请求不记录。
+内置的请求日志查看页面（浏览器直接访问，云审计留痕入口）。表格展示每条
+请求的**时间、客户端 IP、方法、路径、上传文件名与大小、耗时、状态码、错误码
+和请求 ID**，IP 单元格悬停可看 UA 与 `X-Forwarded-For`；**点击带 ▼ 的行可
+展开查看完整请求体 JSON**（JSON 请求自动美化格式化，截断会标注）。支持按
+IP/文件名/路径/状态码筛选、自动刷新（10s）与分页加载。日志写入
+`storage/logs/requests.jsonl`，服务重启后仍可查询历史；`/logs` 与
+`/api/logs` 自身的请求不记录。
 
 ### `GET /api/logs`
 请求访问日志查询接口，返回 JSON（时间倒序）：
 
 - `limit`/`offset`：分页，默认 `limit=200`、`offset=0`
+- `ip`：按客户端 IP 子串过滤（云场景下为 `X-Forwarded-For` 首地址）
 - `file`/`path`：按文件名、路径子串过滤
 - `status`：按状态码过滤
 - `request_id`：按请求 ID 过滤（请求可携带 `X-Request-ID` 头透传）
 
+每条记录包含审计关键字段：`ip`（客户端 IP）、`user_agent`、`body`（JSON
+请求体，受 `ACCESS_LOG_BODY_MAX_CHARS` 截断）、`body_truncated`、
+`file_size`、`status`、`error_code`、`duration_ms`、`ts`。
+
 ```bash
 curl "http://localhost:9000/api/logs?file=托书&limit=20"
+curl "http://localhost:9000/api/logs?ip=203.0.113.7"
 ```
 
 ### `POST /skills/{skill_name}/extract`
@@ -237,7 +246,10 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
 | `MINERU_OCR_CONCURRENCY` | MinerU OCR 并发数，默认 4 |
 | `STORAGE_DIR` | 存储目录，默认 `./storage` |
-| `STORAGE_KEEP_HOURS` | 存储文件保留小时数，默认 24 |
+| `STORAGE_KEEP_HOURS` | 存储文件保留小时数，默认 24；审计场景建议调大（如 720 = 30 天） |
+| `ACCESS_LOG_RECORD_BODY` | 是否记录 JSON 请求体，默认 `true` |
+| `ACCESS_LOG_BODY_MAX_CHARS` | 请求体记录最大字符数，默认 4096，超出截断 |
+| `ACCESS_LOG_TRUST_PROXY` | 是否信任 `X-Forwarded-For`/`X-Real-IP` 记录真实客户端 IP，默认 `true` |
 | `LOG_LEVEL` | 日志级别，默认 `INFO` |
 
 ### MinerU 解析服务

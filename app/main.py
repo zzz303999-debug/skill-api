@@ -58,16 +58,64 @@ _skill_executor = ThreadPoolExecutor(
 _SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
 
 
+def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
+    """解析客户端 IP，返回 (客户端IP, 原始X-Forwarded-For头)。
+
+    云服务前面通常有 nginx/负载均衡，access_log_trust_proxy 开启时优先取
+    X-Forwarded-For 的第一个地址（真实客户端），其次 X-Real-IP；
+    均不存在或未开启信任时回退到直连地址。
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if settings.access_log_trust_proxy:
+        if forwarded:
+            return forwarded.split(",")[0].strip(), forwarded
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip.strip(), forwarded
+    host = request.client.host if request.client else None
+    return host, forwarded
+
+
+async def _read_json_body(request: Request) -> tuple[str | None, bool]:
+    """读取 JSON 请求体用于审计，返回 (body文本, 是否被截断)。
+
+    只处理 application/json（如 POST /orders）；文件上传等 multipart 请求
+    不读 body，避免破坏文件流。读取后缓存回 request，FastAPI 后续解析
+    body 参数时直接命中缓存，行为与不读时一致。超限请求不读取不记录。
+    """
+    content_type = request.headers.get("content-type", "").lower()
+    if not content_type.startswith("application/json"):
+        return None, False
+    try:
+        length = int(request.headers.get("content-length", "0") or "0")
+    except ValueError:
+        length = 0
+    if length <= 0 or length > settings.api_max_upload_bytes:
+        return None, False
+    raw = await request.body()
+    request._body = raw  # 缓存，供 handler 复用
+    text = raw.decode("utf-8", errors="replace")
+    max_chars = settings.access_log_body_max_chars
+    if max_chars > 0 and len(text) > max_chars:
+        return text[:max_chars], True
+    return text, False
+
+
 @app.middleware("http")
 async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
-    """请求访问日志：记录时间、方法、路径、上传文件、耗时、状态与错误码。
+    """请求访问日志（审计）：记录时间、客户端 IP、UA、方法、路径、上传文件、
+    请求体 JSON、耗时、状态与错误码。
 
-    handler 通过 `request.state.file_name` 透传上传文件名，
-    错误处理通过 `request.state.error_code` 透传业务错误码。
+    handler 通过 `request.state.file_name`/`request.state.file_size` 透传
+    上传文件名与大小，错误处理通过 `request.state.error_code` 透传业务错误码。
     """
     if request.url.path in _SKIP_ACCESS_LOG_PATHS:
         return await call_next(request)
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    client_ip, forwarded_for = _resolve_client_ip(request)
+    body_text, body_truncated = None, False
+    if settings.access_log_record_body:
+        body_text, body_truncated = await _read_json_body(request)
     start = time.perf_counter()
     status_code = 500
     try:
@@ -76,14 +124,29 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     except Exception:
         raise
     finally:
+        error_detail = getattr(request.state, "error_detail", None)
+        if error_detail is None and status_code >= 400:
+            # 非业务异常（如 FastAPI 校验 422）也记录错误信息，保证审计完整
+            error_detail = {
+                "code": f"http_{status_code}",
+                "message": f"HTTP {status_code}",
+                "details": None,
+            }
         access_log.record(
             {
                 "request_id": request_id,
+                "ip": client_ip,
+                "x_forwarded_for": forwarded_for,
+                "user_agent": request.headers.get("user-agent"),
                 "method": request.method,
                 "path": request.url.path,
                 "file": getattr(request.state, "file_name", None),
+                "file_size": getattr(request.state, "file_size", None),
+                "body": body_text,
+                "body_truncated": body_truncated,
                 "status": status_code,
                 "error_code": getattr(request.state, "error_code", None),
+                "error": error_detail,
                 "duration_ms": round((time.perf_counter() - start) * 1000, 1),
             }
         )
@@ -97,6 +160,8 @@ async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONRespon
         extra={"code": exc.code, "error_message": exc.message, "details": exc.details},
     )
     _.state.error_code = exc.code
+    # 完整错误详情透传访问日志，供审计导出错误信息
+    _.state.error_detail = {"code": exc.code, "message": exc.message, "details": exc.details}
     return JSONResponse(
         status_code=exc.http_status,
         content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
@@ -121,6 +186,7 @@ def list_request_logs(
     file: str | None = Query(default=None),
     status: int | None = Query(default=None, ge=100, le=599),
     request_id: str | None = Query(default=None),
+    ip: str | None = Query(default=None),
 ) -> dict:
     """请求访问日志列表（时间倒序），支持分页与过滤。"""
     return access_log.query(
@@ -130,6 +196,7 @@ def list_request_logs(
         file=file,
         status=status,
         request_id=request_id,
+        ip=ip,
     )
 
 
@@ -242,8 +309,10 @@ def _make_extract_route(skill: SkillBase):
         file: Annotated[UploadFile, File()],
         request: Request,
     ) -> dict[str, Any]:
-        content = await _read_upload(file)
+        # 先设置文件名，读取失败时访问日志也能记录到 file
         request.state.file_name = file.filename or "unnamed"
+        content = await _read_upload(file)
+        request.state.file_size = len(content)
         out = await _run_skill(skill, content, file.filename or "unnamed")
         response = {
             "skill": skill.name,
@@ -261,43 +330,52 @@ def _make_extract_route(skill: SkillBase):
 def _make_batch_extract_route(skill: SkillBase):
     """为一个 skill 生成批量处理 handler。接收多个文件，并行识别后汇总。"""
 
-    async def _run_one(f: UploadFile) -> dict:
-        try:
-            content = await _read_upload(f)
-            out = await _run_skill(skill, content, f.filename or "unnamed")
-            result = {
-                "file": f.filename or "unnamed",
-                "result": out["result"],
-                "meta": out.get("meta", {}),
-            }
-            if skill.include_content:
-                result["content"] = out.get("content", "")
-            return result
-        except SkillAPIError as e:
-            return {
-                "file": f.filename or "unnamed",
-                "error": {"code": e.code, "message": e.message, "details": e.details},
-            }
-        except Exception:
-            log.exception("batch_skill_failed", extra={"file": f.filename or "unnamed"})
-            return {
-                "file": f.filename or "unnamed",
-                "error": {"code": "internal_error", "message": "skill execution failed"},
-            }
-
     async def handler(
         files: Annotated[list[UploadFile], File()],
         request: Request,
     ) -> dict[str, Any]:
+        request.state.file_name = ", ".join(f.filename or "unnamed" for f in files)
+        request.state.file_size = 0
+        if not files:
+            raise BadRequestError(
+                "no files uploaded in the batch",
+                code="empty_batch",
+                details={"min_files": 1},
+            )
         if len(files) > settings.api_batch_max_files:
             raise BadRequestError(
                 "too many files in one batch",
                 code="too_many_files",
                 details={"max_files": settings.api_batch_max_files},
             )
-        request.state.file_name = ", ".join(f.filename or "unnamed" for f in files)
+
+        async def run_one(f: UploadFile) -> dict:
+            try:
+                content = await _read_upload(f)
+                request.state.file_size += len(content)
+                out = await _run_skill(skill, content, f.filename or "unnamed")
+                result = {
+                    "file": f.filename or "unnamed",
+                    "result": out["result"],
+                    "meta": out.get("meta", {}),
+                }
+                if skill.include_content:
+                    result["content"] = out.get("content", "")
+                return result
+            except SkillAPIError as e:
+                return {
+                    "file": f.filename or "unnamed",
+                    "error": {"code": e.code, "message": e.message, "details": e.details},
+                }
+            except Exception:
+                log.exception("batch_skill_failed", extra={"file": f.filename or "unnamed"})
+                return {
+                    "file": f.filename or "unnamed",
+                    "error": {"code": "internal_error", "message": "skill execution failed"},
+                }
+
         # 并行执行所有文件识别
-        raw_results = await asyncio.gather(*[_run_one(f) for f in files])
+        raw_results = await asyncio.gather(*[run_one(f) for f in files])
         results = [r for r in raw_results if "error" not in r]
         errors = [r for r in raw_results if "error" in r]
         return {

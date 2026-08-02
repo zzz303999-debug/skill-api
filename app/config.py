@@ -64,7 +64,17 @@ class Settings(BaseSettings):
 
     # 存储
     storage_dir: Path = Path("./storage")
+    # 审计场景建议调大（如 720 = 30 天），保证留痕可追溯
     storage_keep_hours: int = 24
+
+    # 请求访问日志（审计）
+    # 是否记录 JSON 请求体内容；云服务审计建议保持开启
+    access_log_record_body: bool = True
+    # 请求体记录的最大字符数，超出截断并标记 body_truncated
+    access_log_body_max_chars: int = Field(default=4096, ge=0, le=100_000)
+    # 是否信任反向代理头（X-Forwarded-For / X-Real-IP）；
+    # 云服务前面有 nginx/负载均衡时开启，才能拿到真实客户端 IP
+    access_log_trust_proxy: bool = True
 
     # 日志
     log_level: str = "INFO"

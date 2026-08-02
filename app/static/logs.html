@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>skill-api 请求日志</title>
+<title>skill-api 请求日志 · 审计</title>
 <style>
   :root {
-    --bg: #0f172a;
-    --panel: #1e293b;
-    --border: #334155;
-    --text: #e2e8f0;
-    --muted: #94a3b8;
-    --ok: #22c55e;
-    --warn: #eab308;
-    --err: #ef4444;
-    --accent: #38bdf8;
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1f2329;
+    --muted: #8a919c;
+    --ok: #2f9e5f;
+    --warn: #b7791f;
+    --err: #d64545;
+    --accent: #3b6cf6;
   }
   * { box-sizing: border-box; }
   body {
@@ -23,106 +23,191 @@
     background: var(--bg);
     color: var(--text);
     font-size: 13px;
+    line-height: 1.5;
   }
-  header {
-    position: sticky; top: 0;
-    background: var(--bg);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 20px;
-    z-index: 10;
-  }
-  h1 { margin: 0 0 10px; font-size: 18px; }
-  .filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .filters input {
+  header { padding: 16px 20px 12px; }
+  h1 { margin: 0 0 12px; font-size: 17px; font-weight: 600; }
+  .sub { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .toolbar input, .toolbar select {
     background: var(--panel);
     border: 1px solid var(--border);
     color: var(--text);
-    border-radius: 6px;
-    padding: 6px 10px;
-    min-width: 150px;
+    border-radius: 5px;
+    padding: 5px 9px;
+    font-size: 12px;
   }
-  .filters input:focus { outline: 1px solid var(--accent); }
-  .filters button {
+  .toolbar input { width: 128px; }
+  .toolbar input:focus, .toolbar select:focus { outline: none; border-color: var(--accent); }
+  .toolbar button {
     background: var(--accent);
-    border: none; color: #0f172a;
-    border-radius: 6px; padding: 6px 14px;
-    font-weight: 600; cursor: pointer;
+    border: none;
+    color: #fff;
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
   }
-  .filters label { color: var(--muted); user-select: none; }
-  #count { color: var(--muted); margin-left: auto; }
-  main { padding: 12px 20px 40px; }
-  table {
-    width: 100%;
-    border-collapse: collapse;
+  .toolbar button.secondary {
     background: var(--panel);
-    border-radius: 8px;
-    overflow: hidden;
+    border: 1px solid var(--border);
+    color: var(--text);
   }
-  th, td { padding: 8px 12px; text-align: left; white-space: nowrap; }
-  th {
-    background: #17223b;
-    color: var(--muted);
-    font-weight: 600;
-    position: sticky; top: 118px;
-  }
-  td { border-top: 1px solid var(--border); }
-  td.file { white-space: normal; word-break: break-all; min-width: 180px; }
+  .toolbar button:disabled { opacity: .5; cursor: default; }
+  .toolbar label { color: var(--muted); font-size: 12px; user-select: none; display: flex; align-items: center; gap: 4px; }
+  #count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #count b { color: var(--text); font-weight: 600; }
+
+  main { padding: 4px 20px 40px; }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 7px 12px; text-align: left; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--border); }
+  td { border-top: 1px solid #f0f1f4; }
+  tbody tr:first-child td { border-top: none; }
+  tbody tr.row:hover td { background: #f7f9fc; }
+  tr.row.expandable { cursor: pointer; }
+  .expand-hint { color: var(--accent); font-size: 10px; margin-left: 4px; }
+
+  td.file { white-space: normal; word-break: break-all; min-width: 140px; }
   td.path { font-family: ui-monospace, Menlo, monospace; }
-  .method { font-weight: 700; }
-  .badge {
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 10px;
-    font-weight: 600;
-  }
+  .method { font-weight: 600; }
+  .m-get { color: #2f6fd0; }
+  .m-post { color: #2f9e5f; }
+  .m-put { color: #b7791f; }
+  .m-del { color: #d64545; }
+  .badge { display: inline-block; padding: 0 8px; border-radius: 10px; font-weight: 500; }
   .ok { color: var(--ok); }
   .warn { color: var(--warn); }
   .err { color: var(--err); }
   .muted { color: var(--muted); }
-  .empty { text-align: center; color: var(--muted); padding: 40px 0; }
+  .reqid {
+    font-family: ui-monospace, Menlo, monospace;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+  }
+  .op-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .op-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  .body-row td { background: #fafbfc; padding: 0; }
+  .body-row pre {
+    margin: 0; padding: 10px 14px;
+    white-space: pre-wrap; word-break: break-all;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; max-height: 320px; overflow: auto;
+  }
+  .body-truncated { color: var(--warn); font-size: 12px; padding: 0 14px 10px; }
+  .error-box {
+    margin: 10px 14px 0;
+    border: 1px solid #f0c9c9;
+    border-left: 3px solid var(--err);
+    background: #fdf5f5;
+    border-radius: 4px;
+    padding: 8px 12px;
+  }
+  .error-box .error-title { color: var(--err); font-weight: 600; font-size: 12px; margin-bottom: 4px; }
+  .error-box pre {
+    margin: 6px 0 0; padding: 0;
+    white-space: pre-wrap; word-break: break-all;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; color: var(--muted);
+    max-height: none;
+  }
+
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; }
   #btn-more {
     display: block; margin: 16px auto 0;
     background: var(--panel);
     border: 1px solid var(--border);
     color: var(--text);
-    border-radius: 6px; padding: 8px 24px;
+    border-radius: 5px;
+    padding: 7px 22px;
     cursor: pointer;
   }
-  #btn-more:disabled { opacity: 0.4; cursor: default; }
+  #btn-more:disabled { opacity: .4; cursor: default; }
 </style>
 </head>
 <body>
 <header>
-  <h1>请求日志</h1>
-  <div class="filters">
-    <input id="f-file" placeholder="按文件名过滤">
-    <input id="f-path" placeholder="按路径过滤">
+  <h1>请求日志<span class="sub">审计 · 请求 / 错误信息可逐条导出</span></h1>
+  <div class="toolbar">
+    <input id="f-ip" placeholder="IP">
+    <input id="f-file" placeholder="文件名">
+    <input id="f-path" placeholder="路径">
     <input id="f-status" placeholder="状态码" type="number" min="100" max="599">
     <button id="btn-refresh">刷新</button>
     <label><input type="checkbox" id="auto-refresh" checked> 自动刷新 10s</label>
+    <select id="f-limit" title="每页条数">
+      <option>100</option>
+      <option selected>200</option>
+      <option>500</option>
+    </select>
+    <button id="btn-export" class="secondary">导出全部</button>
     <span id="count"></span>
   </div>
 </header>
 <main>
-  <table>
-    <thead>
-      <tr>
-        <th>时间</th><th>方法</th><th>路径</th><th>文件</th>
-        <th>耗时</th><th>状态</th><th>错误码</th><th>请求 ID</th>
-      </tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div id="empty" class="empty" style="display:none">暂无日志</div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th><th>IP</th><th>方法</th><th>路径</th><th>文件</th>
+          <th>耗时</th><th>状态</th><th>错误码</th><th>请求 ID</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div id="empty" class="empty" style="display:none">暂无日志<br><span class="muted" style="font-size:12px">调用任意业务接口后刷新可见；点击带 ▼ 的行查看请求体与错误详情</span></div>
   <button id="btn-more" style="display:none">加载更多</button>
 </main>
 <script>
-const LIMIT = 200;
+const DEFAULT_LIMIT = 200;
 let offset = 0;
 let total = 0;
 let busy = false;
+let loadedStats = { "2xx": 0, "4xx": 0, "5xx": 0 };
+const expandedIds = new Set();
 
 const $ = (id) => document.getElementById(id);
+
+/* ---------- 工具 ---------- */
+
+function getLimit() {
+  return parseInt($("f-limit").value, 10) || DEFAULT_LIMIT;
+}
+
+function getFilters() {
+  return {
+    ip: $("f-ip").value.trim(),
+    file: $("f-file").value.trim(),
+    path: $("f-path").value.trim(),
+    status: $("f-status").value.trim(),
+  };
+}
+
+function buildParams(reset) {
+  if (reset) offset = 0;
+  const params = new URLSearchParams();
+  params.set("limit", getLimit());
+  params.set("offset", offset);
+  const f = getFilters();
+  if (f.ip) params.set("ip", f.ip);
+  if (f.file) params.set("file", f.file);
+  if (f.path) params.set("path", f.path);
+  if (f.status) params.set("status", f.status);
+  return params;
+}
 
 function fmtTime(iso) {
   if (!iso) return "";
@@ -135,10 +220,61 @@ function fmtTime(iso) {
   );
 }
 
+function fmtRel(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+  if (s < 60) return s + " 秒前";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + " 分钟前";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + " 小时前";
+  const days = Math.floor(h / 24);
+  if (days < 30) return days + " 天前";
+  return fmtTime(iso);
+}
+
+function fmtBytes(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(2) + " MB";
+}
+
+function fmtBody(raw, truncated) {
+  const note = truncated ? "\n\n… 请求体已截断（完整内容见 storage/logs/requests.jsonl）" : "";
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2) + note;
+  } catch {
+    return raw + note;
+  }
+}
+
+function fmtDetails(details) {
+  if (!details) return "";
+  try {
+    return JSON.stringify(details, null, 2);
+  } catch {
+    return String(details);
+  }
+}
+
 function statusClass(code) {
   if (code < 300) return "ok";
   if (code < 500) return "warn";
   return "err";
+}
+
+function methodClass(m) {
+  switch ((m || "").toUpperCase()) {
+    case "GET": return "m-get";
+    case "POST": return "m-post";
+    case "PUT":
+    case "PATCH": return "m-put";
+    case "DELETE": return "m-del";
+    default: return "";
+  }
 }
 
 function esc(s) {
@@ -147,50 +283,125 @@ function esc(s) {
   return div.innerHTML;
 }
 
-function buildQuery(reset) {
-  if (reset) offset = 0;
-  const params = new URLSearchParams();
-  params.set("limit", LIMIT);
-  params.set("offset", offset);
-  const file = $("f-file").value.trim();
-  const path = $("f-path").value.trim();
-  const status = $("f-status").value.trim();
-  if (file) params.set("file", file);
-  if (path) params.set("path", path);
-  if (status) params.set("status", status);
-  return params;
+/* ---------- 渲染 ---------- */
+
+function renderRow(item) {
+  const tbody = $("rows");
+  const ipTitle = [
+    item.user_agent ? "UA: " + item.user_agent : "",
+    item.x_forwarded_for ? "X-Forwarded-For: " + item.x_forwarded_for : "",
+  ].filter(Boolean).join(" | ");
+  const expandable = !!item.body;
+  const shouldExpand = expandable && expandedIds.has(item.request_id);
+  const tr = document.createElement("tr");
+  tr.className = "row" + (expandable ? " expandable" : "");
+  tr.innerHTML =
+    "<td class='muted' title='" + esc(fmtTime(item.ts)) + "'>" + fmtRel(item.ts) + "</td>" +
+    "<td title='" + esc(ipTitle) + "'>" + esc(item.ip || "") +
+      (expandable ? "<span class='expand-hint'>" + (shouldExpand ? "▲" : "▼") + "</span>" : "") + "</td>" +
+    "<td><span class='method " + methodClass(item.method) + "'>" + esc(item.method) + "</span></td>" +
+    "<td class='path'>" + esc(item.path) + "</td>" +
+    "<td class='file'>" + esc(item.file) +
+      (item.file_size != null ? " <span class='muted'>(" + fmtBytes(item.file_size) + ")</span>" : "") + "</td>" +
+    "<td>" + (item.duration_ms != null ? esc(item.duration_ms) + " ms" : "") + "</td>" +
+    "<td><span class='badge " + statusClass(item.status) + "'>" + esc(item.status) + "</span></td>" +
+    "<td class='" + (item.error_code ? "err" : "muted") + "'>" + esc(item.error_code || "") + "</td>" +
+    "<td class='reqid muted' title='点击复制'>" + esc(item.request_id) + "</td>" +
+    "<td><button class='op-btn' title='导出该请求完整 JSON（含错误信息）'>导出</button></td>";
+  tbody.appendChild(tr);
+
+  // 单条导出
+  tr.querySelector(".op-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    exportOne(item);
+  });
+
+  // 请求 ID 点击复制
+  const reqTd = tr.querySelector(".reqid");
+  reqTd.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(item.request_id || "");
+      reqTd.textContent = "已复制";
+      setTimeout(() => { reqTd.textContent = item.request_id || ""; }, 1200);
+    } catch { /* 忽略 */ }
+  });
+
+  if (expandable) {
+    const bodyTr = document.createElement("tr");
+    bodyTr.className = "body-row";
+    bodyTr.style.display = shouldExpand ? "" : "none";
+    const td = document.createElement("td");
+    td.colSpan = 10;
+    if (item.error) {
+      const box = document.createElement("div");
+      box.className = "error-box";
+      const title = document.createElement("div");
+      title.className = "error-title";
+      title.textContent = "错误信息（已包含在导出文件中）";
+      box.appendChild(title);
+      const line = document.createElement("div");
+      line.textContent = "[" + (item.error.code || "-") + "] " + (item.error.message || "");
+      box.appendChild(line);
+      if (item.error.details) {
+        const pre = document.createElement("pre");
+        pre.textContent = fmtDetails(item.error.details);
+        box.appendChild(pre);
+      }
+      td.appendChild(box);
+    }
+    const pre = document.createElement("pre");
+    pre.textContent = fmtBody(item.body, item.body_truncated);
+    td.appendChild(pre);
+    if (item.body_truncated) {
+      const note = document.createElement("div");
+      note.className = "body-truncated";
+      note.textContent = "请求体已截断，完整内容见 storage/logs/requests.jsonl";
+      td.appendChild(note);
+    }
+    bodyTr.appendChild(td);
+    tbody.appendChild(bodyTr);
+    const hint = tr.querySelector(".expand-hint");
+    tr.addEventListener("click", () => {
+      const show = bodyTr.style.display === "none";
+      bodyTr.style.display = show ? "" : "none";
+      if (hint) hint.textContent = show ? "▲" : "▼";
+      if (show) expandedIds.add(item.request_id);
+      else expandedIds.delete(item.request_id);
+    });
+  }
 }
+
+function updateSummary() {
+  $("count").innerHTML = "共 <b>" + total + "</b> 条 · 2xx " + loadedStats["2xx"] +
+    " · 4xx " + loadedStats["4xx"] + " · 5xx " + loadedStats["5xx"] +
+    " <span title='统计基于当前已加载数据'>（已加载 " + (loadedStats["2xx"] + loadedStats["4xx"] + loadedStats["5xx"]) + "）</span>";
+}
+
+/* ---------- 加载 ---------- */
 
 async function load(reset) {
   if (busy) return;
   busy = true;
   try {
-    const resp = await fetch("/api/logs?" + buildQuery(reset).toString());
+    const resp = await fetch("/api/logs?" + buildParams(reset).toString());
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
     total = data.total;
     const tbody = $("rows");
-    if (reset) tbody.innerHTML = "";
-    if (!data.items.length && reset) {
-      $("empty").style.display = "block";
-    } else {
-      $("empty").style.display = "none";
+    if (reset) {
+      tbody.innerHTML = "";
+      loadedStats = { "2xx": 0, "4xx": 0, "5xx": 0 };
     }
+    $("empty").style.display = !data.items.length && reset ? "block" : "none";
     for (const item of data.items) {
-      const tr = document.createElement("tr");
-      tr.innerHTML =
-        "<td class='muted'>" + fmtTime(item.ts) + "</td>" +
-        "<td><span class='method'>" + esc(item.method) + "</span></td>" +
-        "<td class='path'>" + esc(item.path) + "</td>" +
-        "<td class='file'>" + esc(item.file) + "</td>" +
-        "<td>" + (item.duration_ms != null ? esc(item.duration_ms) + " ms" : "") + "</td>" +
-        "<td><span class='badge " + statusClass(item.status) + "'>" + esc(item.status) + "</span></td>" +
-        "<td class='" + (item.error_code ? "err" : "muted") + "'>" + esc(item.error_code || "") + "</td>" +
-        "<td class='muted'>" + esc(item.request_id) + "</td>";
-      tbody.appendChild(tr);
+      if (item.status < 400) loadedStats["2xx"] += 1;
+      else if (item.status < 500) loadedStats["4xx"] += 1;
+      else loadedStats["5xx"] += 1;
+      renderRow(item);
     }
     offset = data.offset + data.items.length;
-    $("count").textContent = "共 " + total + " 条";
+    updateSummary();
     $("btn-more").style.display = offset < total ? "block" : "none";
     $("btn-more").disabled = false;
   } catch (e) {
@@ -200,9 +411,73 @@ async function load(reset) {
   }
 }
 
+/* ---------- 导出 ---------- */
+
+function downloadJson(payload, filename) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// 导出单条请求：请求详情 + 错误信息 + 请求体
+function exportOne(item) {
+  const stamp = (item.ts || "").slice(0, 19).replace(/[:T]/g, "-");
+  downloadJson(
+    {
+      exported_at: new Date().toISOString(),
+      request: item,
+      error: item.error || null,
+    },
+    "request-" + (item.request_id || stamp || "unknown") + ".json"
+  );
+}
+
+async function exportAll() {
+  const btn = $("btn-export");
+  btn.disabled = true;
+  btn.textContent = "导出中…";
+  try {
+    const params = new URLSearchParams();
+    const f = getFilters();
+    if (f.ip) params.set("ip", f.ip);
+    if (f.file) params.set("file", f.file);
+    if (f.path) params.set("path", f.path);
+    if (f.status) params.set("status", f.status);
+    const items = [];
+    const page = 500;
+    let off = 0;
+    while (true) {
+      params.set("limit", page);
+      params.set("offset", off);
+      const resp = await fetch("/api/logs?" + params.toString());
+      if (!resp.ok) throw new Error("HTTP " + resp.status);
+      const data = await resp.json();
+      items.push(...data.items);
+      off += data.items.length;
+      if (!data.items.length || off >= data.total) break;
+    }
+    downloadJson(
+      { exported_at: new Date().toISOString(), total: items.length, items },
+      "skill-api-logs-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".json"
+    );
+  } catch (e) {
+    console.error("export failed:", e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "导出全部";
+  }
+}
+
+/* ---------- 事件 ---------- */
+
 $("btn-refresh").addEventListener("click", () => load(true));
 $("btn-more").addEventListener("click", () => load(false));
-for (const id of ["f-file", "f-path"]) {
+$("btn-export").addEventListener("click", exportAll);
+$("f-limit").addEventListener("change", () => load(true));
+for (const id of ["f-ip", "f-file", "f-path"]) {
   const el = $(id);
   let timer = null;
   el.addEventListener("input", () => {
