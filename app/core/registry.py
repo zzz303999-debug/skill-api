@@ -36,6 +36,7 @@ def discover(package: str = "app.skills") -> None:
     """扫描 app.skills 下所有子包，导入触发注册。
 
     每个 skill 子包在自己的 `__init__.py` 里做 `register(XxxSkill())` 即可。
+    单个 skill 导入失败只跳过该 skill（记录错误日志），不让整个应用启动失败。
     """
     pkg = importlib.import_module(package)
     for m in pkgutil.iter_modules(pkg.__path__):
@@ -46,6 +47,6 @@ def discover(package: str = "app.skills") -> None:
             except Exception as e:
                 log.error(
                     "skill_import_failed",
-                    extra={"skill": m.name, "error": str(e)},
+                    extra={"skill": m.name, "error_type": type(e).__name__, "error": str(e)},
+                    exc_info=True,
                 )
-                raise
