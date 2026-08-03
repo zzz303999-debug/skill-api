@@ -96,17 +96,17 @@ docker compose -f docker-compose.deploy.yml ps
 ```bash
 git clone https://github.com/zzz303999-debug/skill-api.git
 cd skill-api
-git checkout knight
+git checkout dev
 cp .env.example .env
 # 编辑 .env，填入生产地址和 Secret
 chmod +x scripts/deploy.sh
 ./scripts/deploy.sh deploy
 ```
 
-脚本流程：`git pull --ff-only origin/knight` → `compose build --pull` → 停旧容器 → 起新容器 → 健康检查，**新容器健康检查失败时自动回滚到部署前的镜像**。要求：
+脚本流程：`git pull --ff-only origin/dev` → `compose build --pull` → 停旧容器 → 起新容器 → 健康检查，**新容器健康检查失败时自动回滚到部署前的镜像**。要求：
 
 - 生产目录的 tracked 文件必须没有本地修改（脚本会拒绝执行）
-- 只在 `knight` 分支执行（脚本会校验）
+- 只在 `dev` 分支执行（脚本会校验）
 - 同时构建并启动 MinerU（`docker-compose.yml`），API 通过 `http://mineru:8888` 访问
 
 ### 4.4 方式 C：uv + systemd（非 Docker，备选）
@@ -176,7 +176,7 @@ sudo journalctl -u skill-api -n 200 --no-pager
 | 变量 | 说明 |
 |------|------|
 | `LLM_BASE_URL` | OpenAI-compatible API 地址，如 `https://api.example.com/v1` |
-| `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `gpt-5.4` |
+| `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `deepseek-v4-flash` |
 | `ORDER_API_URL` | 订单接口地址（仅使用 `/orders` 时必填，需覆盖默认的预发地址） |
 
 ### 可选（有默认值）
@@ -215,7 +215,7 @@ sudo journalctl -u skill-api -n 200 --no-pager
 
 ## 6. 镜像发布（手动，开发侧执行）
 
-代码推送 `knight` 分支**不会**触发任何构建或部署。需要发版时：
+代码推送 `dev` 分支**不会**触发任何构建或部署。需要发版时：
 
 ```bash
 git tag v0.1.0
@@ -255,7 +255,7 @@ docker compose -f docker-compose.deploy.yml up -d
 ./scripts/deploy.sh deploy
 ```
 
-脚本拉取 `knight` 最新代码并本地构建；健康检查失败时自动回滚到部署前的镜像。
+脚本拉取 `dev` 最新代码并本地构建；健康检查失败时自动回滚到部署前的镜像。
 
 ### 方式 A
 
