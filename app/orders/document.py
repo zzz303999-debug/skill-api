@@ -49,6 +49,44 @@ _BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
 # 日期：YYYY-MM-DD
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+# 做箱通知中 TO 行（收件/通知对象）与 FM/FROM 行（发件人/客户）的匹配
+_TO_PREFIX_RE = re.compile(r"^TO[:：]\s*(.+?)\s*$", re.MULTILINE)
+_FROM_FM_RE = re.compile(r"^(?:FM|FROM)\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _extract_company_name(value: str) -> str:
+    """从 FM/FROM 行值中剔除疑似联系人（末段 2-4 个汉字且无公司后缀）。"""
+    parts = re.split(r"[\s　]+", value.strip())
+    if (
+        len(parts) > 1
+        and re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", parts[-1])
+        and not re.search(r"公司|厂|物流|货代|贸易|集团|有限", parts[-1])
+    ):
+        return parts[0]
+    return value.strip()
+
+
+def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> str | None:
+    """兜底修复：c_title 只认 FM/FROM 后的公司名。
+
+    做箱通知类单据无 FM 字段时 LLM 可能把 `TO：xxx` 的收件方当成客户；
+    客户只可能是 FM/FROM 后的值：与 TO 收件方同名时改为 FM/FROM 公司名，
+    原文无 FM/FROM 时返回 None 走人工确认，不放行错误值。
+    """
+    if not raw_value or not source_text:
+        return raw_value
+    from_company: str | None = None
+    for line in source_text.splitlines():
+        match = _FROM_FM_RE.match(line)
+        if match:
+            from_company = _extract_company_name(match.group(1))
+            break
+    for line in source_text.splitlines():
+        to_match = _TO_PREFIX_RE.match(line)
+        if to_match and to_match.group(1).strip() == raw_value.strip():
+            return from_company
+    return raw_value
+
 
 def _clean_json_schema(schema: dict) -> dict:
     """去除 Pydantic 生成的 $defs / anyOf，转成模型友好的简化 schema。"""
@@ -95,7 +133,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | 原文标签/版面角色 | 字段 | 缺失处理 |
 |---|---|---|
 | `提单号`/`主提单号`/`主单号`/`B/L NO`/`MBL NO` | `order_num1` | null |
-| `FM` 后的值；缺失时取明确客户栏、`客户简称+装箱/做箱通知`抬头或正文抬头公司 | `c_title` | null |
+| 文档抬头公司（顶部公司名称）或 `FM`/`FROM` 后的公司名称（发件人/托运人，仅取公司名部分，剔除同行联系人姓名与电话） | `c_title` | null |
 | 做箱/装箱地址（详细街道地址，含省市区县、道路、门牌号） | `factory_bei` | null |
 | `做箱日期`/`装箱日期`/`做箱时间` | `b_date` | null |
 | `开船时间`/`开航时间`/`ETD` | `b_open_ship_time` | null |
@@ -121,7 +159,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
 2. `order_num1` 必须为纯数字或字母数字组合且至少 8 位；不得保留空格、连字符或其他符号；不符合时填 null。
 3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出。
-4. `c_title` 优先逐字取 `FM` 后的值（公司名称、简称或其他原文称呼），缺失时依次取明确的客户栏、`客户简称+装箱/做箱通知`抬头和正文抬头公司；不要取收货人（TO/ATTN）。
+4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title。
 5. `factory_bei` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
 6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。
 7. `packages`/`gross_weight`/`volume` 只清洗单位和千分位：件数为整数；毛重、体积按原文精度保留 2-3 位小数，超过 3 位四舍五入到 3 位，不补无意义的尾零；单位（CTNS/KGS/CBM）可省略。任一值 ≤0 填 null。
@@ -572,6 +610,10 @@ def parse_document_to_order(
     raw, llm_meta = chat_json(messages, temperature=0.0, json_schema=output_schema)
     if not isinstance(raw, dict):
         raise ParseError("LLM output must be a JSON object")
+
+    # 兜底修复：c_title 误取 TO 收件方（做箱通知类单据无 FM 字段时易发生）
+    if raw_value := raw.get("c_title"):
+        raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
 
     extracted = normalize_document_extraction(raw)
     missing = _missing_fields(extracted)

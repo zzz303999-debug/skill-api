@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.orders import document as document_module
 from app.orders.document import (
+    _extract_company_name,
+    _revise_c_title_to_value,
     build_document_order_data,
     normalize_document_extraction,
     parse_document_to_order,
@@ -422,3 +424,60 @@ def test_parse_document_route_needs_manual_confirmation(monkeypatch):
 def test_parse_document_route_requires_file():
     response = client.post("/orders/parse-document")
     assert response.status_code == 422
+
+
+# ---------- c_title 兜底修复（只认 FM/FROM） ----------
+
+_NOTICE_TEXT = (
+    "江苏倍联现代物流有限公司\n"
+    "常州赛格威做箱通知\n"
+    "TO：俊泰\n"
+    "客户编号:（对账时请注明：常州赛格威）\n"
+    "做箱时间：2月28号\n"
+    "关单号：SECU13842\n"
+    "提货联系人及地址：\n"
+    "常州市武进区夏城路395号 赛格威科技有限公司\n"
+    "杨浩三 15851930053\n"
+    "FROM:江苏倍联 陈俐玲"
+)
+
+
+def test_revise_c_title_replaces_to_value_with_from_company():
+    """c_title 等于 TO 后值时，改用 FROM 行中的公司名（客户）。"""
+    assert _revise_c_title_to_value("俊泰", _NOTICE_TEXT) == "江苏倍联"
+
+
+def test_revise_c_title_keeps_non_to_value():
+    """c_title 与 TO 值无关时不改动。"""
+    assert _revise_c_title_to_value("海丰", _NOTICE_TEXT) == "海丰"
+
+
+def test_revise_c_title_returns_none_without_fm_from():
+    """原文无 FM/FROM 行时置空（走人工确认），不放行 TO 收件方。"""
+    text = "TO：俊泰\n关单号：SECU13842\n"
+    assert _revise_c_title_to_value("俊泰", text) is None
+
+
+def test_revise_c_title_handles_none():
+    assert _revise_c_title_to_value(None, _NOTICE_TEXT) is None
+    assert _revise_c_title_to_value("俊泰", None) == "俊泰"
+    assert _revise_c_title_to_value(None, None) is None
+
+
+def test_extract_company_name_strips_contact():
+    assert _extract_company_name("江苏倍联 陈俐玲") == "江苏倍联"
+    assert _extract_company_name("海丰") == "海丰"
+    assert _extract_company_name("CMA CGM") == "CMA CGM"
+    assert _extract_company_name("江苏倍联现代物流有限公司") == "江苏倍联现代物流有限公司"
+
+
+def test_prompt_c_title_only_from_fm_from():
+    """prompt 必须：客户取文档抬头或 FM/FROM 后的值，并禁止 TO/ATTN。"""
+    prompt = document_module._SYSTEM_PROMPT
+    assert "抬头" in prompt
+    assert "FROM" in prompt
+    assert "FM" in prompt
+    assert "TO:" in prompt
+    assert "禁止" in prompt
+    assert "收件/通知对象" in prompt
+    assert "对账时请注明" not in prompt
