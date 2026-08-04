@@ -33,7 +33,7 @@ from app.skills.tuoshu.normalizer import (
     normalize_date_value,
 )
 
-from .schema import DocumentBoxItem, OrderDocumentExtraction
+from .schema import DocumentBoxItem, DocumentCargoItem, OrderDocumentExtraction
 
 log = get_logger(__name__)
 
@@ -69,6 +69,28 @@ _HEADER_LINES = 6
 
 # “客户简称+装箱/做箱通知”标题形式
 _NOTICE_HEADING_RE = re.compile(r"^([^|：:\n]{2,40}?)(?:装箱|做箱)通知(?:书)?$")
+
+# 公司特征词：用于从文档抬头主动识别公司名
+_COMPANY_TOKEN_RE = re.compile(
+    r"公司|物流|货代|贸易|集团|有限|股份|国际|实业|工贸"
+)
+
+# 业务标签词：含这些词的单元格视为字段标签而非公司名
+_LABEL_WORDS_RE = re.compile(
+    r"做箱|装箱|时间|日期|地址|联系人|电话|备注|编号|客户|船名|航次|"
+    r"港区|工厂|件数|毛重|体积|箱型|门点|开船|截单|委托|提单|关单|"
+    r"船期|起运|目的|中转|箱单|货物|唛头|发货方|收货方|收货人|托运人|"
+    r"承运人|通知方"
+)
+
+
+def _is_label_cell(cell: str) -> bool:
+    """单元格是否为字段标签：短文本（≤8 字）且含标签词。
+
+    长文本（如“XX国际货物运输代理有限公司”）即使含“货物”等标签词
+    子串也不视为标签，避免误伤公司名。
+    """
+    return len(cell) <= 8 and bool(_LABEL_WORDS_RE.search(cell))
 
 
 def _extract_company_name(value: str) -> str:
@@ -183,15 +205,66 @@ def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> 
         if value == wanted:
             return wanted
 
-    # 3. 文档抬头区域：整行相等，或“客户简称+装箱/做箱通知”标题前缀
+    # 3. 文档抬头区域：整行相等；或表格单元格相等（非标签行且值像公司名）；
+    #    或“客户简称+装箱/做箱通知”标题前缀
     for line in header_lines:
         if line == wanted:
             return wanted
         heading = _NOTICE_HEADING_RE.fullmatch(line)
         if heading and heading.group(1).strip() == wanted:
             return wanted
+        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+        if not cells or any(_is_label_cell(cell) for cell in cells):
+            continue
+        if wanted in cells and _looks_like_company(wanted):
+            return wanted
 
     # 4. 原文无任何客户来源，置空走人工确认
+    return None
+
+
+def _customer_cell_value(line: str) -> str | None:
+    """从单行文本取明确客户栏的值（行形式“客户：xxx”或表格 | 客户 | xxx |）。"""
+    match = _CUSTOMER_LABEL_RE.match(line)
+    if match:
+        return match.group(1).strip()
+    match = _CUSTOMER_CELL_RE.search(line)
+    if match:
+        return match.group(1).strip().strip("*_` ") or None
+    return None
+
+
+def _extract_header_company(source_text: str | None) -> str | None:
+    """LLM 未提取到客户时，从文档抬头区域主动补全公司名（文档抬头公司即客户）。
+
+    支持普通行与表格行（按 | 拆单元格判断）：优先明确客户栏（客户/客户简称），
+    其次只认含公司特征词的公司名，或“客户简称+装箱/做箱通知”标题前缀
+    （前缀 ≥5 字或含公司特征词）；数字行号、含冒号单元格、字段标签行
+    （装箱工厂/发货方/收货方等）及其值、纯单据标题一律不算。
+    """
+    if not source_text:
+        return None
+    for line in _header_company_lines(source_text):
+        cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+        if customer_value := _customer_cell_value(line):
+            return customer_value
+        # 表格行：含字段标签的行，其值单元格不作为客户来源
+        if len(cells) > 1 and any(_is_label_cell(cell) for cell in cells):
+            continue
+        for cell in cells:
+            if cell.isdigit() or "：" in cell or ":" in cell:
+                continue
+            # “客户简称+装箱/做箱通知”标题优先（否则会被标签词“做箱/装箱”拦截）
+            heading = _NOTICE_HEADING_RE.fullmatch(cell)
+            if heading:
+                company = heading.group(1).strip()
+                if len(company) >= 5 or _COMPANY_TOKEN_RE.search(company):
+                    return company
+                continue
+            if _is_label_cell(cell):
+                continue
+            if _COMPANY_TOKEN_RE.search(cell):
+                return cell
     return None
 
 
@@ -261,6 +334,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | `电话`/`手机`/`TEL`（随联系人出现） | `c_phone` | null |
 | `内部编号`/`业务编号`/`我司业务编号` | `c_sn` | null |
 | `备注`/`注意事项`/`REMARK`/`NOTE` | `c_note` | null |
+| 货物明细行（表格中每个数据行：提单号+件数+毛重+体积，一票多客户/多提单号时每行一条） | `data[]` | null |
 
 # 抽取规则
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
@@ -273,6 +347,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位。
 9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述。
 10. `b_open_ship_time` 与 `b_date` 是不同字段：前者是开船时间，后者是做箱/装箱日期，按标签严格区分，禁止混填；`b_open_ship_time` 同样输出 `YYYY-MM-DD`。
+11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
 """
 
 
@@ -400,7 +475,10 @@ def _convert_file(
         if ext != ".pdf":
             raise ConvertError(
                 "document has no extractable text; convert it to PDF/image",
-                details={"file": Path(filename).name},
+                details={
+                    "file": Path(filename).name,
+                    "convert_hint": markdown.partition("#")[2].strip(),
+                },
             )
         page_images = render_pdf_pages(
             file_bytes,
@@ -485,6 +563,43 @@ def _normalize_container_type(value: Any) -> str | None:
     return cleaned
 
 
+def _normalize_data_items(value: Any) -> list[DocumentCargoItem]:
+    """货物明细行：每行归一化件数/毛重/体积，三项齐全才保留。
+
+    行内 b_order_num 为该行提单号（可空，不强制每行都有）；
+    件数/毛重/体积任一项缺失或非法时整行跳过（不产生脏数据），
+    行内提单号缺失由缺失校验/回退环节把关。
+    """
+    if not isinstance(value, list):
+        return []
+
+    items: list[DocumentCargoItem] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        raw_bill_no = item.get("b_order_num")
+        raw_j = item.get("j")
+        raw_m = item.get("m")
+        raw_t = item.get("t")
+        # LLM 可能输出 JSON number（如 680 而非 "680"），统一转字符串再归一化
+        packages = _normalize_packages(str(raw_j) if raw_j is not None else None)
+        gross_weight = _normalize_weight(str(raw_m) if raw_m is not None else None)
+        volume = _normalize_volume(str(raw_t) if raw_t is not None else None)
+        if not (packages and gross_weight and volume):
+            continue
+        items.append(
+            DocumentCargoItem(
+                b_order_num=_normalize_bill_no(
+                    str(raw_bill_no) if raw_bill_no is not None else None
+                ),
+                j=packages,
+                m=gross_weight,
+                t=volume,
+            )
+        )
+    return items
+
+
 def _normalize_boxes(value: Any) -> list[DocumentBoxItem]:
     if value is None:
         return []
@@ -559,10 +674,35 @@ def _normalize_text(value: Any) -> str | None:
 
 def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtraction:
     """把 LLM raw dict 归一到 OrderDocumentExtraction 并做值校验。"""
+    order_num1 = _normalize_bill_no(data.get("order_num1"))
+    packages = _normalize_packages(data.get("packages"))
+    gross_weight = _normalize_weight(data.get("gross_weight"))
+    volume = _normalize_volume(data.get("volume"))
+    # data 明细行为主；仅当 LLM 未输出 data 键（旧模型兼容）且单值三项齐全时
+    # 回退组装一条完整行；单值不全或显式输出空列表时不回退（走缺失校验 + 人工确认）
+    raw_data = data.get("data")
+    data_items = _normalize_data_items(raw_data)
+    if raw_data is None and (packages and gross_weight and volume):
+        data_items = [
+            DocumentCargoItem(
+                b_order_num=order_num1,
+                j=packages,
+                m=gross_weight,
+                t=volume,
+            )
+        ]
+    if data_items:
+        # 单值字段与 data[0] 对齐（prompt 规则约定），保证响应自洽
+        packages = data_items[0].j
+        gross_weight = data_items[0].m
+        volume = data_items[0].t
+        # 单行明细且行内提单号缺失时回退主提单号（对齐自由文本 mapper 约定）
+        if len(data_items) == 1 and not data_items[0].b_order_num:
+            data_items[0].b_order_num = order_num1
     try:
         return OrderDocumentExtraction.model_validate(
             {
-                "order_num1": _normalize_bill_no(data.get("order_num1")),
+                "order_num1": order_num1,
                 "c_title": _normalize_text(data.get("c_title")),
                 "c_name": _normalize_text(data.get("c_name")),
                 "c_phone": _normalize_text(data.get("c_phone")),
@@ -580,9 +720,10 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
                 "b_date": _normalize_date(data.get("b_date")),
                 "c_sn": _normalize_text(data.get("c_sn")),
                 "c_note": _normalize_text(data.get("c_note")),
-                "packages": _normalize_packages(data.get("packages")),
-                "gross_weight": _normalize_weight(data.get("gross_weight")),
-                "volume": _normalize_volume(data.get("volume")),
+                "packages": packages,
+                "gross_weight": gross_weight,
+                "volume": volume,
+                "data": data_items,
                 "box": _normalize_boxes(data.get("box")),
             }
         )
@@ -612,12 +753,15 @@ def _missing_fields(extracted: OrderDocumentExtraction) -> list[str]:
         missing.append("factory_bei")
     if not extracted.b_date:
         missing.append("b_date")
-    if not extracted.packages:
-        missing.append("packages")
-    if not extracted.gross_weight:
-        missing.append("gross_weight")
-    if not extracted.volume:
-        missing.append("volume")
+    # 件数/毛重/体积以 data 明细行为准（含单值回退条目）：无完整明细行时
+    # 一律标记缺失——build_document_order_data 只从 data 输出这三项，单值字段
+    # 存在但明细行缺失/被跳过时，宁可人工确认也不静默丢数据（避免 data=[]
+    # 且确认标记为绿直接导致下游漏数据）
+    has_complete_row = any(
+        item.j and item.m and item.t for item in extracted.data
+    )
+    if not has_complete_row:
+        missing += ["packages", "gross_weight", "volume"]
     return missing
 
 
@@ -674,11 +818,13 @@ def build_document_order_data(
         "c_note": extracted.c_note,
         "data": [
             {
-                "b_order_num": extracted.order_num1,
-                "j": extracted.packages,
-                "m": extracted.gross_weight,
-                "t": extracted.volume,
+                # 行内无提单号时回填主提单号（对齐自由文本 mapper 契约：下游每行非空）
+                "b_order_num": item.b_order_num or extracted.order_num1,
+                "j": item.j,
+                "m": item.m,
+                "t": item.t,
             }
+            for item in extracted.data
         ],
         "box": [
             {"b_type": item.b_type, "box_num": item.box_num}
@@ -718,9 +864,12 @@ def parse_document_to_order(
     if not isinstance(raw, dict):
         raise ParseError("LLM output must be a JSON object")
 
-    # 兜底修复：c_title 误取 TO 收件方（做箱通知类单据无 FM 字段时易发生）
+    # 兜底修复：c_title 误取 TO 收件方（做箱通知类单据无 FM 字段时易发生）；
+    # LLM 未提取到客户时，从文档抬头主动补全（文档抬头公司即客户）
     if raw_value := raw.get("c_title"):
         raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
+    elif source_text:
+        raw["c_title"] = _extract_header_company(source_text)
 
     extracted = normalize_document_extraction(raw)
     missing = _missing_fields(extracted)

@@ -9,6 +9,7 @@ from app.main import app
 from app.orders import document as document_module
 from app.orders.document import (
     _extract_company_name,
+    _extract_header_company,
     _is_header_company,
     _revise_c_title_to_value,
     build_document_order_data,
@@ -110,6 +111,181 @@ def test_normalize_boxes_rejects_zero_qty():
         {**COMPLETE_RAW, "box": [{"b_type": "40HQ", "box_num": 0}]}
     )
     assert extracted.box == []
+
+
+MULTI_ROW_DATA = [
+    {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+    {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18"},
+    {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66"},
+]
+
+
+def test_normalize_data_items_multiple_rows():
+    """一票多客户/多提单号：data 每行一条，完整保留。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": MULTI_ROW_DATA,
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("OOLU2120860080", "680", "8602", "33.92"),
+        ("OOLU2120860081", "450", "5036", "22.18"),
+        ("OOLU2120860082", "10", "106", "0.66"),
+    ]
+
+
+def test_normalize_data_items_skips_incomplete_row():
+    """行内件数/毛重/体积不全时整行跳过，不产生脏数据。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+                {"b_order_num": "OOLU2120860081", "j": "450", "m": None, "t": "22.18"},
+            ],
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("OOLU2120860080", "680", "8602", "33.92"),
+    ]
+
+
+def test_normalize_data_items_falls_back_to_single_values():
+    """LLM 未输出 data 键时回退到单值字段组装一条（向后兼容）。"""
+    extracted = normalize_document_extraction(COMPLETE_RAW)
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", "100", "1234.568", "25.5"),
+    ]
+
+
+def test_normalize_data_items_no_fallback_when_data_key_empty():
+    """显式输出 data: [] 说明未提取到明细行，不回退（走缺失校验）。"""
+    extracted = normalize_document_extraction(
+        {**COMPLETE_RAW, "data": [], "packages": None, "gross_weight": None, "volume": None}
+    )
+    assert extracted.data == []
+    assert document_module._missing_fields(extracted) == [
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
+
+
+def test_normalize_data_items_ignores_non_list():
+    """data 非列表（如 dict）时忽略，且不触发回退。"""
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "data": {"j": "680"}})
+    assert extracted.data == []
+
+
+def test_normalize_data_items_single_row_falls_back_bill_no():
+    """单行明细且行内提单号缺失/非法时，回退主提单号（对齐 mapper 约定）。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [{"j": "680", "m": "8602", "t": "33.92"}],
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    assert extracted.data[0].b_order_num == "KMTCSHAP950393"
+
+
+def test_normalize_data_items_accepts_numeric_types():
+    """LLM 把 j/m/t 输出为 JSON number 时也能归一化，不整行丢弃。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": 680, "m": 8602, "t": 33.92}
+            ],
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("OOLU2120860080", "680", "8602", "33.92"),
+    ]
+
+
+def test_missing_fields_marks_measurements_when_rows_dropped():
+    """data 行不全被跳过或显式空列表时，即使单值字段存在也标记缺失（防静默丢数据）。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [{"b_order_num": "OOLU2120860080", "j": "680", "m": "8602"}],
+        }
+    )
+    assert extracted.data == []
+    assert document_module._missing_fields(extracted) == [
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
+
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "data": []})
+    assert extracted.data == []
+    assert document_module._missing_fields(extracted) == [
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
+
+
+def test_build_document_order_data_fills_missing_bill_no():
+    """多行明细中无提单号的行在组装层回填主提单号（对齐 mapper 契约）。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+                {"j": "450", "m": "5036", "t": "22.18"},
+            ],
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    order_data = build_document_order_data(extracted)
+    assert [d["b_order_num"] for d in order_data["data"]] == [
+        "OOLU2120860080",
+        "KMTCSHAP950393",
+    ]
+
+
+def test_normalize_data_items_keeps_missing_bill_no_in_multi_row():
+    """多行明细行内无提单号保持 null，不回退整票提单号。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+                {"j": "450", "m": "5036", "t": "22.18"},
+            ],
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    assert [d.b_order_num for d in extracted.data] == ["OOLU2120860080", None]
+
+
+def test_single_values_aligned_with_first_data_row():
+    """单值字段与 data[0] 不一致时，以 data[0] 为准保证响应自洽。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [{"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"}],
+            "packages": "999",
+            "gross_weight": "8888",
+            "volume": "77.7",
+        }
+    )
+    assert extracted.packages == "680"
+    assert extracted.gross_weight == "8602"
+    assert extracted.volume == "33.92"
 
 
 def test_normalize_measurements():
@@ -229,6 +405,53 @@ def test_build_document_order_data_succeeds():
     }
 
 
+def test_build_document_order_data_keeps_all_data_rows():
+    """多客户明细行全部保留进 order_data.data。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": MULTI_ROW_DATA,
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    order_data = build_document_order_data(extracted)
+    assert order_data["data"] == [
+        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18"},
+        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66"},
+    ]
+
+
+def test_missing_fields_satisfied_by_data_rows():
+    """data 含完整明细行时，单值件数/毛重/体积缺失不算缺失。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": MULTI_ROW_DATA,
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+        }
+    )
+    assert document_module._missing_fields(extracted) == []
+
+
+def test_missing_fields_reported_when_no_complete_row():
+    """无完整明细行且单值缺失时，仍按单值字段标记缺失。"""
+    raw = {
+        **{k: v for k, v in COMPLETE_RAW.items() if k not in ("packages", "gross_weight", "volume")},
+        "data": [{"b_order_num": "OOLU2120860080", "j": "680"}],
+    }
+    extracted = normalize_document_extraction(raw)
+    assert document_module._missing_fields(extracted) == [
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
+
+
 def test_missing_fields_returns_all_when_empty():
     extracted = normalize_document_extraction({})
     assert document_module._missing_fields(extracted) == [
@@ -244,8 +467,13 @@ def test_missing_fields_returns_all_when_empty():
 
 
 def test_missing_fields_reports_partial():
+    """单值三项不全时无法组装完整明细行，件数/毛重/体积全部标记缺失。"""
     extracted = normalize_document_extraction({**COMPLETE_RAW, "volume": "ABC"})
-    assert document_module._missing_fields(extracted) == ["volume"]
+    assert document_module._missing_fields(extracted) == [
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
 
 
 # ---------- 主流程 ----------
@@ -562,6 +790,116 @@ def test_revise_c_title_keeps_header_company_line():
     assert _revise_c_title_to_value("江苏倍联现代物流有限公司", text) == "江苏倍联现代物流有限公司"
 
 
+def test_revise_c_title_keeps_table_header_company():
+    """表格形式的文档抬头公司（xlsx 转换场景）仍可通过兜底校验。"""
+    text = "| 1 | 浙江经茂国际货运代理有限公司 |  |\n| 2 | 做箱通知 |  |\n"
+    assert (
+        _revise_c_title_to_value("浙江经茂国际货运代理有限公司", text)
+        == "浙江经茂国际货运代理有限公司"
+    )
+
+
+def test_revise_c_title_rejects_label_row_values():
+    """表格标签行的值（联系人姓名/装箱工厂）不得验证为客户，防止绕过人工确认。"""
+    text = "| 2 | 联系人 | 范颖晰 |\n| 12 | 装箱工厂 | 喜临门家具有限公司 |\n"
+    assert _revise_c_title_to_value("范颖晰", text) is None
+    assert _revise_c_title_to_value("喜临门家具有限公司", text) is None
+
+
+# ---------- 抬头公司主动提取（LLM 未给出 c_title 时补全） ----------
+
+
+def test_extract_header_company_picks_company_line():
+    """普通文档顶部独立公司名行 → 主动提取为客户，不依赖文件名。"""
+    text = "江苏倍联现代物流有限公司\n常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\n"
+    assert _extract_header_company(text) == "江苏倍联现代物流有限公司"
+
+
+def test_extract_header_company_picks_table_company_cell():
+    """xlsx 表格转换的顶部公司名（表格第一行）也能识别。"""
+    text = (
+        "| 1 | 浙江经茂国际货运代理有限公司 |  |\n"
+        "| 2 | 做箱通知 |  |\n"
+        "| 3 | 联系人：徐 | 15925812246 |\n"
+        "| 12 | 装箱工厂 | 喜临门家具 |\n"
+    )
+    assert _extract_header_company(text) == "浙江经茂国际货运代理有限公司"
+
+
+def test_extract_header_company_picks_notice_heading():
+    """“客户简称+做箱通知”标题前缀可作客户来源。"""
+    text = "常州赛格威做箱通知\nTO：俊泰\n做箱地址：常州市武进区夏城路395号\n"
+    assert _extract_header_company(text) == "常州赛格威"
+
+
+def test_extract_header_company_ignores_pure_notice_title_and_factory():
+    """纯单据标题 + 工厂行不作为客户（不误取装箱工厂）。"""
+    text = "做箱通知书\n做箱时间：2021-03-31\n| 12 | 装箱工厂 | 喜临门家具 |\n"
+    assert _extract_header_company(text) is None
+
+
+def test_extract_header_company_ignores_short_abbrev_heading():
+    """2 字简称标题（海丰装箱通知）无法可靠区分，保守不提取。"""
+    text = "海丰装箱通知\n提单号：KMTCSHAP950393\n"
+    assert _extract_header_company(text) is None
+
+
+def test_extract_header_company_skips_label_rows_with_company_token():
+    """表格标签行的值即使含公司特征词（装箱工厂/发货方）也不误取为客户。"""
+    text = (
+        "| 1 | 做箱通知 |  |\n"
+        "| 12 | 装箱工厂 | 喜临门物流有限公司 |\n"
+        "| 2 | 发货方 | 宁波俊泰贸易有限公司 |\n"
+        "| 3 | 收货人 | 宁波俊泰贸易有限公司 |\n"
+    )
+    assert _extract_header_company(text) is None
+
+
+def test_extract_header_company_prefers_customer_label():
+    """明确客户栏（表格形式）位于顶部时优先作为客户来源。"""
+    text = (
+        "| 1 | 客户 | 俊泰物流有限公司 |\n"
+        "| 2 | 浙江经茂国际货运代理有限公司 |  |\n"
+    )
+    assert _extract_header_company(text) == "俊泰物流有限公司"
+    text = "客户简称：特格威\n提单号：ABC1234567\n"
+    assert _extract_header_company(text) == "特格威"
+
+
+def test_extract_header_company_keeps_company_with_goods_token():
+    """含“货物”子串的货代公司名（长文本）不再被标签词拦截，可作抬头客户来源。"""
+    text = "上海威世国际货物运输代理有限公司\n门点装箱通知\nTO: 北跃物流\n"
+    assert _extract_header_company(text) == "上海威世国际货物运输代理有限公司"
+
+
+def test_extract_header_company_handles_none():
+    assert _extract_header_company(None) is None
+    assert _extract_header_company("") is None
+
+
+def test_parse_document_to_order_extracts_header_company_when_llm_empty(monkeypatch):
+    """LLM 未提取客户时，从文档顶部区域主动补全 c_title。"""
+
+    def fake_convert(file_bytes, filename):
+        markdown = (
+            "江苏倍联现代物流有限公司\n"
+            "常州赛格威做箱通知\n"
+            "TO：俊泰\n"
+            "提单号：KMTCSHAP950393\n"
+        )
+        return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
+
+    def fake_chat_json(messages, **_kwargs):
+        return {**COMPLETE_RAW, "c_title": None}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "_convert_file", fake_convert)
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    assert result["extracted"]["c_title"] == "江苏倍联现代物流有限公司"
+    assert result["missing_fields"] == []
+
+
 def test_revise_c_title_handles_none():
     assert _revise_c_title_to_value(None, _NOTICE_TEXT) is None
     assert _revise_c_title_to_value("俊泰", None) == "俊泰"
@@ -585,3 +923,37 @@ def test_prompt_c_title_only_from_fm_from():
     assert "禁止" in prompt
     assert "收件/通知对象" in prompt
     assert "对账时请注明" not in prompt
+
+
+def test_prompt_requires_all_data_rows():
+    """prompt 必须要求列出每一个数据行，禁止只取第一行。"""
+    prompt = document_module._SYSTEM_PROMPT
+    assert "每一个数据行" in prompt
+    assert "禁止只取第一行" in prompt
+    assert "data[0]" in prompt
+
+
+def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
+    """e2e：mock LLM 输出多行 data，order_data 完整保留。"""
+    monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
+
+    def fake_chat_json(messages, **_kwargs):
+        return {
+            **COMPLETE_RAW,
+            "data": MULTI_ROW_DATA,
+            "packages": "680",
+            "gross_weight": "8602",
+            "volume": "33.92",
+        }, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+
+    assert result["extracted"]["data"] == [
+        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
+        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18"},
+        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66"},
+    ]
+    assert result["order_data"]["data"] == result["extracted"]["data"]
+    assert result["missing_fields"] == []

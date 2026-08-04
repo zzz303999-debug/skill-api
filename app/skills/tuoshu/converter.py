@@ -627,21 +627,25 @@ _SAFE_STEM_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 def _make_temp_dir(*, prefix: str = "") -> tempfile.TemporaryDirectory[str]:
-    """创建可写的临时目录，候选优先级：`$TMPDIR` → 系统默认 → 工作区 `.tmp`。
+    """创建可写的临时目录，候选优先级：`$TMPDIR` → 工作区 `.tmp` → 系统默认。
 
     macOS 上 `tempfile.gettempdir()` 可能缓存到 `/tmp`，而系统服务（如
-    textutil）无权写入 `/tmp`，会报 `You don't have permission`；而
-    `$TMPDIR`（`/var/folders/.../T`）是用户私有且始终可写的目录，必须优先。
+    textutil）无权写入 `/tmp`，会报 `You don't have permission`；
+    `$TMPDIR`（`/var/folders/.../T`）是用户私有目录，但沙箱/后台进程的
+    文件系统权限可能同样不可写，因此逐级用 mkdtemp 探测真实可写性，
+    并让工作区 `.tmp`（沙箱允许写工作区）优先于系统默认目录。
     """
     bases: list[Path] = []
     env_tmp = os.environ.get("TMPDIR")
     if env_tmp:
         bases.append(Path(env_tmp))
-    bases.append(Path(tempfile.gettempdir()))
     bases.append(Path.cwd() / ".tmp")
+    bases.append(Path(tempfile.gettempdir()))
     for base in bases:
         try:
             base.mkdir(parents=True, exist_ok=True)
+            probe = tempfile.mkdtemp(prefix=prefix + "probe-", dir=str(base))
+            os.rmdir(probe)
             return tempfile.TemporaryDirectory(prefix=prefix, dir=str(base))
         except OSError:
             continue

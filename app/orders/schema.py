@@ -95,12 +95,29 @@ class DocumentBoxItem(BaseModel):
     box_num: int | None = Field(None, description="箱量")
 
 
+class DocumentCargoItem(BaseModel):
+    """附件文档抽取的货物明细行（不含货名/唛头）。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    b_order_num: str | None = Field(
+        None, description="该行提单号，纯数字或字母数字，至少 8 位"
+    )
+    j: str | None = Field(None, description="件数，纯数字字符串")
+    m: str | None = Field(None, description="毛重，纯数字字符串")
+    t: str | None = Field(None, description="体积，纯数字字符串")
+
+
 class OrderDocumentExtraction(BaseModel):
     """附件文档专用抽取结构，字段名与下单接口 data 对齐。
 
     必填：提单号、箱型、客户、地址、做箱日期、件数、毛重、体积。
     其余字段（船名、船次、船公司、目的港、码头、港区、开船时间、备注等）
     为可选，结构对齐标准订单格式。
+
+    data 为货物明细行列表：一票多客户/多提单号时每行一条
+    （含该行提单号、件数、毛重、体积）；仅一行时也输出一条，
+    packages/gross_weight/volume 单值字段与 data 第一条一致。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -126,6 +143,10 @@ class OrderDocumentExtraction(BaseModel):
     packages: str | None = Field(None, description="件数，数字 + CTNS（单位可省略）")
     gross_weight: str | None = Field(None, description="毛重，数字 + KGS（单位可省略），保留 2-3 位小数")
     volume: str | None = Field(None, description="体积，数字 + CBM（单位可省略），保留 2-3 位小数")
+    data: list[DocumentCargoItem] = Field(
+        default_factory=list,
+        description="货物明细行：每行含该行提单号 b_order_num、件数 j、毛重 m、体积 t"
+    )
     box: list[DocumentBoxItem] = Field(default_factory=list)
 
 
