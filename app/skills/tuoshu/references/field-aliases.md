@@ -217,11 +217,11 @@
 
 只有正文中明确标注的`托运人`/`发货人`/`SHIPPER`栏位可以写入该字段。抬头、落款、图章、水印、logo、收件方（TO）或 `FROM/FM` 不能据此推断托运人公司。缺失时输出 null，由人工补齐订单 `c_title`，并保留 blocking 的 `missing_shipper_company`。
 
-例外：`zuoxiang_std_esff` 模板的`做箱工厂`同时写入 `factory.name` 和
-`shipper_company`；`bingsheng_transport` 模板的标题下抬头公司同时写入
+例外：`bingsheng_transport` 模板的标题下抬头公司同时写入
 `shipper_agent` 和 `shipper_company`；`bolian_segway` 模板的
-“江苏倍联现代物流有限公司”抬头也同时写入这两个字段。三者均用于生成订单 `c_title`，
-且不得扩展到其他模板。
+“江苏倍联现代物流有限公司”抬头也同时写入这两个字段。二者均用于生成订单 `c_title`，
+且不得扩展到其他模板。`zuoxiang_std_esff` 的做箱工厂只是门点工厂，只写入
+`factory.name`，禁止写入 `shipper_company`。
 
 ## shipper_agent（发件方 / 我方公司）
 

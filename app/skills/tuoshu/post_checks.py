@@ -186,8 +186,8 @@ def _validate_shipper_company(
 ) -> None:
     labels = ("托运人公司", "托运人", "发货人公司", "发货公司", "发货人", "SHIPPER")
     explicit_values = _extract_explicit_values(source_text, labels) if source_text else []
-    if not explicit_values and source_text and template_hint == "zuoxiang_std_esff":
-        explicit_values = _extract_explicit_values(source_text, ("做箱工厂",))
+    # 做箱工厂是门点工厂，不是客户/托运人；客户只认 FM/FROM、客户栏或抬头公司
+    # （zuoxiang_std_esff 模板历史上曾用做箱工厂兜底，会误把门点工厂当客户）
     if (
         not explicit_values
         and source_text

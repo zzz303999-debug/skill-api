@@ -49,9 +49,26 @@ _BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
 # 日期：YYYY-MM-DD
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-# 做箱通知中 TO 行（收件/通知对象）与 FM/FROM 行（发件人/客户）的匹配
-_TO_PREFIX_RE = re.compile(r"^TO[:：]\s*(.+?)\s*$", re.MULTILINE)
+# 做箱通知中 FM/FROM 行（发件人/客户）的匹配
 _FROM_FM_RE = re.compile(r"^(?:FM|FROM)\s*[:：]\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
+
+# 明确客户栏（行形式与表格形式）的匹配
+_CUSTOMER_LABEL_RE = re.compile(
+    r"^(?:客户|客户名称|客户简称)\s*[：:]\s*(.+?)\s*$", re.MULTILINE
+)
+_CUSTOMER_CELL_RE = re.compile(
+    r"(?:^|\|)\s*(?:客户|客户名称|客户简称)\s*\|\s*([^|\n]+?)\s*(?=\||$)",
+    re.MULTILINE,
+)
+
+# 老式 .doc 展平段落前缀（_pN_ / _pN: (empty)_）
+_MARKDOWN_STRIP_RE = re.compile(r"^_(?:p|l)\d+(?:: \(empty\))?_\s*", re.IGNORECASE)
+
+# 文档抬头区域取前 N 个非空行
+_HEADER_LINES = 6
+
+# “客户简称+装箱/做箱通知”标题形式
+_NOTICE_HEADING_RE = re.compile(r"^([^|：:\n]{2,40}?)(?:装箱|做箱)通知(?:书)?$")
 
 
 def _extract_company_name(value: str) -> str:
@@ -66,26 +83,116 @@ def _extract_company_name(value: str) -> str:
     return value.strip()
 
 
-def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> str | None:
-    """兜底修复：c_title 只认 FM/FROM 后的公司名。
+def _header_company_lines(source_text: str) -> list[str]:
+    """取文档前部非空行的清洗后内容（用于校验 c_title 的抬头依据）。"""
+    lines: list[str] = []
+    for raw_line in source_text.splitlines():
+        line = _MARKDOWN_STRIP_RE.sub("", raw_line.strip()).strip()
+        line = line.lstrip("# ").strip().strip("*_` ")
+        if line.startswith("|"):
+            line = line.strip("|").strip()
+        if line:
+            lines.append(line)
+        if len(lines) >= _HEADER_LINES:
+            break
+    return lines
 
-    做箱通知类单据无 FM 字段时 LLM 可能把 `TO：xxx` 的收件方当成客户；
-    客户只可能是 FM/FROM 后的值：与 TO 收件方同名时改为 FM/FROM 公司名，
-    原文无 FM/FROM 时返回 None 走人工确认，不放行错误值。
+
+def _looks_like_company(value: str) -> bool:
+    """FM/FROM 值是否像公司名（而非联系人姓名）。
+
+    与 _extract_company_name 的剔除口径一致：含公司后缀词视为公司；
+    否则按"是否为 2-4 个汉字的单段人名"判断——人名（范颖晰/陈小姐）
+    与 2 字公司简称（海丰）无法可靠区分，宁可漏检走人工确认，
+    不把联系人姓名写入客户字段。
+    """
+    if re.search(r"公司|厂|物流|货代|贸易|集团|有限|股份|国际|运输|实业|工贸", value):
+        return True
+    return not re.fullmatch(r"[\u4e00-\u9fa5]{2,4}", value)
+
+
+def _is_header_company(value: str, header_lines: list[str]) -> bool:
+    """FM 公司是否为文档抬头公司（通知发出方/货代）。
+
+    门点装箱通知类单据的 FM 行常是印抬头的货代公司（如
+    "FM: 上海威世国际货物运输代理有限公司"），此时 FM 是通知发出方
+    而非客户，不得作为 c_title。判定规则：
+    - 与某个抬头行整行相等 → 抬头公司；
+    - 标签行（FM/FROM/TO/致/ATTN）本身不算抬头，但其值若与 FM 值相同
+      （如顶部区域 "FM: xxx" 行值即 xxx），说明 FM 就是文档通知发出方
+      ——按保守原则视为货代（顶部区域真实客户 FROM 行也会被拒绝，
+      走人工确认比误放行货代更安全）；
+    - 子串出现仅限"类公司抬头"行：排除标签行、表格行（含 |）与短行，
+      且值至少 3 个字符，避免 2 字简称与表格单元格误伤。
+    """
+    for header in header_lines:
+        if header == value:
+            return True
+        m = re.match(
+            r"^(?:FM|FROM|TO|致|ATTN)\s*[:：]\s*(.+)$", header, re.IGNORECASE
+        )
+        if m:
+            if m.group(1).strip() == value:
+                return True
+            continue
+        if len(value) >= 3 and len(header) >= 8 and "|" not in header and value in header:
+            return True
+    return False
+
+
+def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> str | None:
+    """兜底修复：c_title 只认原文真实存在的客户来源。
+
+    客户只可能来自 FM/FROM 后的公司名（但排除文档抬头货代/通知发出方）、
+    明确客户栏（客户/客户名称/客户简称）或文档抬头公司（顶部区域公司名行
+    或“客户简称+装箱/做箱通知”标题）；原文均无有效来源时返回 None 走人工
+    确认，不放行 LLM 臆造值（例如从文件名前缀推断出的公司名）。
+
+    注意：展平段落流（_pN_/_lN_ 前缀）中的 FM 行不在此匹配——FM 值既可能
+    是公司简称（海丰）也可能是联系人姓名（范颖晰），无法可靠区分，
+    保持漏检走人工确认比误当客户更安全。
     """
     if not raw_value or not source_text:
         return raw_value
-    from_company: str | None = None
+    wanted = raw_value.strip()
+
+    # 1. FM/FROM 后的公司名优先：扫描全部 FM/FROM 行，取第一个
+    #    "像公司名"且非文档抬头货代（通知发出方）的值；单段人名
+    #    （范颖晰/陈小姐）不算公司，抬头货代不作为客户来源，均继续
+    #    扫描后续行而不是直接返回
+    header_lines = _header_company_lines(source_text)
     for line in source_text.splitlines():
         match = _FROM_FM_RE.match(line)
         if match:
-            from_company = _extract_company_name(match.group(1))
-            break
-    for line in source_text.splitlines():
-        to_match = _TO_PREFIX_RE.match(line)
-        if to_match and to_match.group(1).strip() == raw_value.strip():
-            return from_company
-    return raw_value
+            company = _extract_company_name(match.group(1)) or None
+            if (
+                company
+                and _looks_like_company(company)
+                and not _is_header_company(company, header_lines)
+            ):
+                return company
+
+    # 2. 明确客户栏（行形式或表格形式）
+    for raw_line in source_text.splitlines():
+        line = _MARKDOWN_STRIP_RE.sub("", raw_line.strip()).strip()
+        match = _CUSTOMER_LABEL_RE.match(line)
+        if match and match.group(1).strip() == wanted:
+            return wanted
+    for match in _CUSTOMER_CELL_RE.finditer(source_text):
+        value = match.group(1).strip().strip("*_` ")
+        if value == wanted:
+            return wanted
+
+    # 3. 文档抬头区域：整行相等，或“客户简称+装箱/做箱通知”标题前缀
+    for line in header_lines:
+        if line == wanted:
+            return wanted
+        heading = _NOTICE_HEADING_RE.fullmatch(line)
+        if heading and heading.group(1).strip() == wanted:
+            return wanted
+
+    # 4. 原文无任何客户来源，置空走人工确认
+    return None
 
 
 def _clean_json_schema(schema: dict) -> dict:
@@ -159,7 +266,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
 2. `order_num1` 必须为纯数字或字母数字组合且至少 8 位；不得保留空格、连字符或其他符号；不符合时填 null。
 3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出。
-4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title。
+4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title；文件名不是原文，**禁止**从文件名前缀推断 c_title。
 5. `factory_bei` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
 6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。
 7. `packages`/`gross_weight`/`volume` 只清洗单位和千分位：件数为整数；毛重、体积按原文精度保留 2-3 位小数，超过 3 位四舍五入到 3 位，不补无意义的尾零；单位（CTNS/KGS/CBM）可省略。任一值 ≤0 填 null。

@@ -20,14 +20,14 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import FastAPI, File, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, create_model
 
 from app import access_log, rate_limit
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
-from app.errors import BadRequestError, SkillAPIError
+from app.errors import ERROR_CODE_DESCRIPTIONS, BadRequestError, SkillAPIError
 from app.logging_conf import get_logger, setup_logging
 from app.orders import (
     CreateOrderFromTextRequest,
@@ -116,6 +116,7 @@ async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
         request.state.error_detail = {
             "code": "rate_limited",
             "message": "too many requests",
+            "description": ERROR_CODE_DESCRIPTIONS["rate_limited"],
             "details": {"retry_after_seconds": math.ceil(retry_after)},
         }
         return rate_limit.build_rate_limited_response(retry_after)
@@ -147,6 +148,31 @@ async def _read_json_body(request: Request) -> tuple[str | None, bool]:
     return text, False
 
 
+async def _capture_json_response(response: Response) -> tuple[Response, str | None, bool]:
+    """捕获 JSON 响应体用于审计，返回 (重建的 response, 响应体文本, 是否被截断)。
+
+    消费 body_iterator 后重建响应返回——客户端仍收到完整响应，日志只保留
+    截断后的文本（超限标记 response_truncated）。非 JSON 响应（文件下载/
+    静态页）原样返回，不消费流。
+    """
+    content_type = response.headers.get("content-type", "").lower()
+    if not content_type.startswith("application/json"):
+        return response, None, False
+    chunks = [chunk async for chunk in response.body_iterator]
+    body = b"".join(chunks)
+    rebuilt = Response(
+        content=body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+    text = body.decode("utf-8", errors="replace")
+    max_chars = settings.access_log_response_max_chars
+    if max_chars > 0 and len(text) > max_chars:
+        return rebuilt, text[:max_chars], True
+    return rebuilt, text, False
+
+
 @app.middleware("http")
 async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     """请求访问日志（审计）：记录时间、客户端 IP、UA、方法、路径、上传文件、
@@ -164,9 +190,20 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         body_text, body_truncated = await _read_json_body(request)
     start = time.perf_counter()
     status_code = 500
+    response_text, response_truncated = None, False
     try:
         response = await call_next(request)
         status_code = response.status_code
+        if settings.access_log_record_response:
+            try:
+                response, response_text, response_truncated = await _capture_json_response(
+                    response
+                )
+            except Exception:
+                # 捕获失败时响应流可能已被部分消费，继续返回会造成空体与
+                # content-length 不匹配；直接抛出使请求走 500，避免静默损坏响应
+                log.exception("access_log_response_capture_failed")
+                raise
     except Exception:
         raise
     finally:
@@ -190,6 +227,8 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
                 "file_size": getattr(request.state, "file_size", None),
                 "body": body_text,
                 "body_truncated": body_truncated,
+                "response": response_text,
+                "response_truncated": response_truncated,
                 "status": status_code,
                 "error_code": getattr(request.state, "error_code", None),
                 "error": error_detail,
@@ -203,14 +242,31 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
 async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONResponse:
     log.warning(
         "skill_api_error",
-        extra={"code": exc.code, "error_message": exc.message, "details": exc.details},
+        extra={
+            "code": exc.code,
+            "error_message": exc.message,
+            "description": exc.description,
+            "details": exc.details,
+        },
     )
     _.state.error_code = exc.code
-    # 完整错误详情透传访问日志，供审计导出错误信息
-    _.state.error_detail = {"code": exc.code, "message": exc.message, "details": exc.details}
+    # 完整错误详情（含中文说明）透传访问日志，供审计导出错误信息
+    _.state.error_detail = {
+        "code": exc.code,
+        "message": exc.message,
+        "description": exc.description,
+        "details": exc.details,
+    }
     return JSONResponse(
         status_code=exc.http_status,
-        content={"error": {"code": exc.code, "message": exc.message, "details": exc.details}},
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "description": exc.description,
+                "details": exc.details,
+            }
+        },
     )
 
 
@@ -446,13 +502,22 @@ def _make_batch_extract_route(skill: SkillBase):
             except SkillAPIError as e:
                 return {
                     "file": f.filename or "unnamed",
-                    "error": {"code": e.code, "message": e.message, "details": e.details},
+                    "error": {
+                        "code": e.code,
+                        "message": e.message,
+                        "description": e.description,
+                        "details": e.details,
+                    },
                 }
             except Exception:
                 log.exception("batch_skill_failed", extra={"file": f.filename or "unnamed"})
                 return {
                     "file": f.filename or "unnamed",
-                    "error": {"code": "internal_error", "message": "skill execution failed"},
+                    "error": {
+                        "code": "internal_error",
+                        "message": "skill execution failed",
+                        "description": ERROR_CODE_DESCRIPTIONS["internal_error"],
+                    },
                 }
 
         # 并行执行所有文件识别

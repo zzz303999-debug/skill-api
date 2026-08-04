@@ -10,6 +10,7 @@ import io
 import json
 import mimetypes
 import re
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,21 @@ MINERU_REQUEST_PROFILE = {
     "return_content_list": "true",
     "return_images": "false",
 }
+
+# 图片单据（托书/做箱通知）没有数学公式；CPU 容器上公式识别耗时占比高，
+# 关闭以提速。注意：扫描版 PDF 的 OCR 页会先渲染成 {stem}-page-{n}.png 再
+# 传入，同样落入图片分支关闭公式识别（托书场景无公式，行为口径一致）。
+_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
+)
+
+
+def _request_form(filename: str) -> dict[str, str]:
+    """按文件类型构造 MinerU 请求参数（图片/OCR 渲染页关闭公式识别）。"""
+    form = dict(MINERU_REQUEST_PROFILE)
+    if Path(filename).suffix.lower() in _IMAGE_SUFFIXES:
+        form["formula_enable"] = "false"
+    return form
 _MINERU_VERSION_HEADERS = ("x-mineru-version", "mineru-version")
 _KEY_LABELS = (
     "主单号",
@@ -270,8 +286,9 @@ def parse_document(
 
     safe_filename = Path(filename).name or "document.pdf"
     upload_mime = mime_type or mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
-    form = dict(MINERU_REQUEST_PROFILE)
+    form = _request_form(safe_filename)
 
+    start = time.monotonic()
     try:
         with httpx.Client(timeout=settings.mineru_timeout_seconds) as client:
             response = client.post(
@@ -287,7 +304,19 @@ def parse_document(
 
     _check_version(response, expected_version)
     markdown, content_list = _decode_response(response)
-    return _quality_result(markdown, content_list)
+    result = _quality_result(markdown, content_list)
+    log.info(
+        "mineru_parse_done",
+        extra={
+            "file": safe_filename,
+            "bytes": len(file_bytes),
+            "duration_ms": round((time.monotonic() - start) * 1000, 1),
+            "table_count": result.table_count,
+            "low_confidence": result.low_confidence,
+            "low_confidence_reasons": result.low_confidence_reasons,
+        },
+    )
+    return result
 
 
 def parse_pdf(file_bytes: bytes, filename: str) -> str:

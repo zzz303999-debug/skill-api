@@ -33,6 +33,40 @@ def test_request_recorded_with_fields():
     assert entry["ts"]
 
 
+def test_json_response_body_recorded_for_audit():
+    """JSON 响应体（输出结果）记录到日志，供前端 logs 页面展示。"""
+    client = TestClient(app)
+    assert client.get("/healthz").status_code == 200
+    entry = _items(client.get("/api/logs").json())[0]
+    assert entry["path"] == "/healthz"
+    assert entry["response"] is not None
+    assert "ok" in entry["response"]  # healthz 响应体
+    assert entry["response_truncated"] is False
+
+
+def test_response_body_capture_keeps_client_payload_intact(monkeypatch):
+    """日志捕获响应体后，客户端仍收到完整响应（不受截断影响）。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "access_log_response_max_chars", 8)
+    client = TestClient(app)
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"  # 客户端收到完整响应
+    entry = _items(client.get("/api/logs").json())[0]
+    assert entry["response_truncated"] is True
+    assert len(entry["response"]) <= 8
+
+
+def test_non_json_response_not_captured():
+    """非 JSON 响应（HTML 页面）不记录响应体。"""
+    client = TestClient(app)
+    assert client.get("/docs").status_code == 200
+    entry = _items(client.get("/api/logs").json())[0]
+    assert entry["path"] == "/docs"
+    assert entry["response"] is None
+
+
 def test_log_endpoints_not_recorded():
     client = TestClient(app)
     client.get("/logs")
@@ -64,8 +98,13 @@ def test_error_code_recorded_on_skill_error():
     entry = _items(payload)[0]
     assert entry["error_code"] == "empty_file"
     assert entry["file"] == "empty.docx"
-    # 完整错误详情（code/message/details）透传日志，供审计导出
-    assert entry["error"] == {"code": "empty_file", "message": "uploaded file is empty", "details": {"file": "empty.docx"}}
+    # 完整错误详情（code/message/description/details）透传日志，供审计导出
+    assert entry["error"] == {
+        "code": "empty_file",
+        "message": "uploaded file is empty",
+        "description": "上传文件为空，请重新上传有效文件",
+        "details": {"file": "empty.docx"},
+    }
 
 
 def test_extract_records_filename(monkeypatch):

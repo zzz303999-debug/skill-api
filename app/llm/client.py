@@ -23,6 +23,18 @@ _json_schema_supported: bool | None = None
 # 网关/模型是否接受 thinking 参数；None=未知，False=已确认不支持（降级重试后缓存）
 _thinking_disabled_supported: bool | None = None
 
+# 上游错误文本截断长度，避免超大响应体刷日志/响应
+_UPSTREAM_ERROR_MAX_CHARS = 500
+
+
+def _upstream_details(e: Exception, *, status: int | None = None) -> dict[str, Any]:
+    """构造统一的上游错误 details：状态码 + 截断的错误摘要 + 异常类型。"""
+    return {
+        "error_type": e.__class__.__name__,
+        "upstream_status": status,
+        "upstream_message": str(e)[:_UPSTREAM_ERROR_MAX_CHARS],
+    }
+
 
 def get_client() -> OpenAI:
     global _client
@@ -55,8 +67,9 @@ def _classify_api_error(e: APIError) -> None:
         or "structured output" in error_text
     )
     code = "llm_response_format_unsupported" if response_format_error else "llm_upstream"
-    log.warning("llm_upstream_error", extra={"code": code}, exc_info=True)
-    raise LLMError("LLM gateway rejected the request", code=code) from e
+    details = _upstream_details(e, status=getattr(e, "status_code", None))
+    log.warning("llm_upstream_error", extra={"code": code, "details": details}, exc_info=True)
+    raise LLMError("LLM gateway rejected the request", code=code, details=details) from e
 
 
 def chat(
@@ -102,7 +115,11 @@ def chat(
         resp = get_client().chat.completions.create(**kwargs)
     except (APITimeoutError, APIConnectionError) as e:
         log.warning("llm_network_error", exc_info=True)
-        raise LLMError("LLM gateway network error", code="llm_network") from e
+        raise LLMError(
+            "LLM gateway network error",
+            code="llm_network",
+            details=_upstream_details(e),
+        ) from e
     except APIError as e:
         if thinking_injected and _thinking_parameter_rejected(str(e).lower()):
             # 网关/模型不接受 thinking 参数：去掉后重试一次，后续请求不再注入
@@ -117,19 +134,31 @@ def chat(
                 resp = get_client().chat.completions.create(**kwargs)
             except (APITimeoutError, APIConnectionError) as retry_err:
                 log.warning("llm_network_error", exc_info=True)
-                raise LLMError("LLM gateway network error", code="llm_network") from retry_err
+                raise LLMError(
+                    "LLM gateway network error",
+                    code="llm_network",
+                    details=_upstream_details(retry_err),
+                ) from retry_err
             except APIError as retry_err:
                 _classify_api_error(retry_err)
         else:
             _classify_api_error(e)
     except Exception as e:
         log.exception("llm_unexpected_error")
-        raise LLMError("LLM request failed") from e
+        raise LLMError(
+            "LLM request failed",
+            code="llm_error",
+            details=_upstream_details(e),
+        ) from e
 
     try:
         content = resp.choices[0].message.content or ""
     except (IndexError, AttributeError) as e:
-        raise LLMError(f"LLM response has no content: {e}") from e
+        raise LLMError(
+            f"LLM response has no content: {e}",
+            code="llm_error",
+            details=_upstream_details(e),
+        ) from e
 
     meta = {
         "model": getattr(resp, "model", model),
@@ -235,10 +264,22 @@ def chat_json(
                         continue
             else:
                 log.warning("llm_invalid_json", extra={"content_length": len(content)})
-                raise ParseError("LLM did not return valid JSON")
+                raise ParseError(
+                    "LLM did not return valid JSON",
+                    details={
+                        "content_length": len(content),
+                        "content_preview": stripped[:200],
+                    },
+                )
         else:
             log.warning("llm_invalid_json", extra={"content_length": len(content)})
-            raise ParseError("LLM did not return valid JSON") from None
+            raise ParseError(
+                "LLM did not return valid JSON",
+                details={
+                    "content_length": len(content),
+                    "content_preview": stripped[:200],
+                },
+            ) from None
     if not isinstance(data, dict):
         raise ParseError("LLM output must be a JSON object")
     return data, meta

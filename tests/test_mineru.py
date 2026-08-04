@@ -93,6 +93,45 @@ def test_original_image_is_uploaded_to_mineru(monkeypatch):
     assert captured["files"] == {"files": ("order.png", image_bytes, "image/png")}
 
 
+def test_image_requests_disable_formula_recognition(monkeypatch):
+    """图片单据无公式：请求参数关闭 formula_enable 以降低 CPU 耗时；PDF 保留。"""
+    captured: dict = {}
+
+    class FakeResponse:
+        headers = {"content-type": "application/json", "x-mineru-version": "2.5.4"}
+        content = b"{}"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"markdown": "| 提单号 | TEST000011 |"}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, _url, **kwargs):
+            captured[kwargs["files"]["files"][0]] = kwargs["data"]
+            return FakeResponse()
+
+    monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
+    monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
+    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+
+    parse_document(b"image-bytes", "order.jpg", mime_type="image/jpeg")
+    parse_document(b"%PDF-bytes", "order.pdf", mime_type="application/pdf")
+
+    assert captured["order.jpg"]["formula_enable"] == "false"
+    assert captured["order.pdf"]["formula_enable"] == "true"
+
+
 def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
     import pdfplumber
 

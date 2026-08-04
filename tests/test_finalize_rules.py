@@ -351,6 +351,7 @@ _p21_ FROM:江苏倍联 陈俐玲
 
 
 def test_zuoxiang_std_template_maps_factory_and_reads_transit_column():
+    """做箱工厂是门点，不是客户：c_title 必须清空，不取做箱工厂栏的值。"""
     source_text = """# 1-20 东华 派车托书.xlsx
 | _row/col_ | A | B | C | D | E | F | G | H | I | J | K | L |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -361,7 +362,7 @@ def test_zuoxiang_std_template_maps_factory_and_reads_transit_column():
     result = finalize_extraction(
         {
             "factory": {"name": "东华工贸"},
-            "shipper_company": None,
+            "shipper_company": "东华工贸",
             "transit_port": "港区",
             "containers": [
                 {"type": "40HQ", "qty": 1, "packages": None, "volume_cbm": None}
@@ -387,10 +388,15 @@ def test_zuoxiang_std_template_maps_factory_and_reads_transit_column():
         template_hint="zuoxiang_std_esff",
     )
 
-    assert result["shipper_company"] == "东华工贸"
-    assert result["order_mapping"]["c_title"] == "东华工贸"
+    assert result["shipper_company"] is None
+    assert result["order_mapping"]["c_title"] is None
     assert result["factory"]["name"] == "东华工贸"
+    assert result["order_mapping"]["factory_name"] == "东华工贸"
     assert result["transit_port"] == "见设"
+    assert any(
+        issue["code"] == "shipper_company_not_from_explicit_field"
+        for issue in result["review_issues"]
+    )
     assert not any(
         issue["code"] in {"missing_shipper_company", "conflicting_transit_port"}
         for issue in result["review_issues"]

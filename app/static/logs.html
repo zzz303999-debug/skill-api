@@ -107,6 +107,7 @@
     font-size: 12px; max-height: 320px; overflow: auto;
   }
   .body-truncated { color: var(--warn); font-size: 12px; padding: 0 14px 10px; }
+  .body-title { color: var(--text2); font-size: 12px; font-weight: 600; padding: 10px 14px 4px; border-top: 1px solid var(--border); }
   .error-box {
     margin: 10px 14px 0;
     border: 1px solid #f0c9c9;
@@ -241,8 +242,8 @@ function fmtBytes(n) {
   return (n / 1024 / 1024).toFixed(2) + " MB";
 }
 
-function fmtBody(raw, truncated) {
-  const note = truncated ? "\n\n… 请求体已截断（完整内容见 storage/logs/requests.jsonl）" : "";
+function fmtBody(raw, truncated, label) {
+  const note = truncated ? "\n\n… " + (label || "内容") + "已截断（完整内容见 storage/logs/requests.jsonl）" : "";
   try {
     return JSON.stringify(JSON.parse(raw), null, 2) + note;
   } catch {
@@ -290,7 +291,7 @@ function renderRow(item) {
     item.user_agent ? "UA: " + item.user_agent : "",
     item.x_forwarded_for ? "X-Forwarded-For: " + item.x_forwarded_for : "",
   ].filter(Boolean).join(" | ");
-  const expandable = !!item.body;
+  const expandable = !!(item.body || item.response);
   const shouldExpand = expandable && expandedIds.has(item.request_id);
   const tr = document.createElement("tr");
   tr.className = "row" + (expandable ? " expandable" : "");
@@ -350,13 +351,30 @@ function renderRow(item) {
       td.appendChild(box);
     }
     const pre = document.createElement("pre");
-    pre.textContent = fmtBody(item.body, item.body_truncated);
-    td.appendChild(pre);
+    if (item.body) {
+      pre.textContent = fmtBody(item.body, item.body_truncated, "请求体");
+      td.appendChild(pre);
+    }
     if (item.body_truncated) {
       const note = document.createElement("div");
       note.className = "body-truncated";
       note.textContent = "请求体已截断，完整内容见 storage/logs/requests.jsonl";
       td.appendChild(note);
+    }
+    if (item.response) {
+      const respTitle = document.createElement("div");
+      respTitle.className = "body-title";
+      respTitle.textContent = "响应输出 JSON";
+      td.appendChild(respTitle);
+      const respPre = document.createElement("pre");
+      respPre.textContent = fmtBody(item.response, item.response_truncated, "响应");
+      td.appendChild(respPre);
+      if (item.response_truncated) {
+        const respNote = document.createElement("div");
+        respNote.className = "body-truncated";
+        respNote.textContent = "响应已截断，完整内容见 storage/logs/requests.jsonl";
+        td.appendChild(respNote);
+      }
     }
     bodyTr.appendChild(td);
     tbody.appendChild(bodyTr);

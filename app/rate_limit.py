@@ -16,6 +16,8 @@ from collections import deque
 
 from fastapi.responses import JSONResponse
 
+from app.errors import ERROR_CODE_DESCRIPTIONS
+
 # key 数量上限：防止空闲 IP 的时间戳记录长期滞留导致内存缓慢膨胀；
 # 超限时清掉最旧的一半（简单 LRU 近似）
 _MAX_KEYS = 10_000
@@ -99,6 +101,7 @@ def build_rate_limited_response(retry_after: float) -> JSONResponse:
             "error": {
                 "code": "rate_limited",
                 "message": "too many requests, please retry later",
+                "description": ERROR_CODE_DESCRIPTIONS["rate_limited"],
                 "details": {"retry_after_seconds": seconds},
             }
         },

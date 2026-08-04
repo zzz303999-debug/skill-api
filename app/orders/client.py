@@ -41,7 +41,10 @@ def publish_create_order(order_data: dict[str, Any], *, room_id: str) -> dict[st
         )
     except (httpx.TimeoutException, httpx.RequestError) as exc:
         log.warning("order_api_network_error", extra={"error_type": exc.__class__.__name__})
-        raise OrderUpstreamError("order API network error") from exc
+        raise OrderUpstreamError(
+            "order API network error",
+            details={"error_type": exc.__class__.__name__},
+        ) from exc
 
     if not response.is_success:
         log.warning("order_api_http_error", extra={"status_code": response.status_code})

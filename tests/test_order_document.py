@@ -9,6 +9,7 @@ from app.main import app
 from app.orders import document as document_module
 from app.orders.document import (
     _extract_company_name,
+    _is_header_company,
     _revise_c_title_to_value,
     build_document_order_data,
     normalize_document_extraction,
@@ -44,7 +45,7 @@ COMPLETE_RAW = {
 
 
 def _fake_convert(file_bytes, filename):
-    markdown = "提单号：KMTCSHAP950393\nFM：海丰\n做箱地址：浙江省嘉兴市嘉善县姚庄镇利群路269号\n做箱日期：2026年7月20日\n件数：100 CTNS\n毛重：1234.5678 KGS\n体积：25.5 CBM\n箱型箱量：2*40HQ + 1*20GP"
+    markdown = "海丰装箱通知\n提单号：KMTCSHAP950393\nFM：海丰\n做箱地址：浙江省嘉兴市嘉善县姚庄镇利群路269号\n做箱日期：2026年7月20日\n件数：100 CTNS\n毛重：1234.5678 KGS\n体积：25.5 CBM\n箱型箱量：2*40HQ + 1*20GP"
     return markdown, "pdf", {"parser": "pdfplumber"}, (
         "markdown:" + markdown
     )
@@ -442,20 +443,123 @@ _NOTICE_TEXT = (
 )
 
 
-def test_revise_c_title_replaces_to_value_with_from_company():
-    """c_title 等于 TO 后值时，改用 FROM 行中的公司名（客户）。"""
-    assert _revise_c_title_to_value("俊泰", _NOTICE_TEXT) == "江苏倍联"
+def test_revise_c_title_ignores_fm_company_when_it_is_header_forwarder():
+    """FM 公司是文档抬头货代（通知发出方）时，不得强制作为客户来源，置空走人工确认。"""
+    assert _revise_c_title_to_value("俊泰", _NOTICE_TEXT) is None
+    assert _revise_c_title_to_value("海丰", _NOTICE_TEXT) is None
 
 
-def test_revise_c_title_keeps_non_to_value():
-    """c_title 与 TO 值无关时不改动。"""
-    assert _revise_c_title_to_value("海丰", _NOTICE_TEXT) == "海丰"
+def test_revise_c_title_keeps_real_customer_fm():
+    """FM 公司不是抬头货代时（真实客户），仍以 FM 后的公司名为准。"""
+    text = "常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\nFROM: 苏州哈亚精密机械有限公司 陈小姐\n"
+    assert _revise_c_title_to_value("俊泰", text) == "苏州哈亚精密机械有限公司"
+
+
+def test_revise_c_title_ignores_single_name_fm():
+    """普通文本（非展平段落流）FM 单段人名同样不当作客户来源。"""
+    text = "TO：俊泰\nFM：范颖晰\n提单号：ABC1234567\n"
+    assert _revise_c_title_to_value("俊泰", text) is None
+
+
+def test_revise_c_title_skips_header_forwarder_fm_for_real_customer_fm():
+    """FM 是抬头货代（通知发出方）时继续扫描后续 FROM 行，取真实客户公司名。"""
+    text = (
+        "常州赛格威做箱通知\n"
+        "FM: 上海威世国际货物运输代理有限公司\n"
+        "TO：俊泰\n"
+        "FROM: 苏州哈亚精密机械有限公司 陈小姐\n"
+    )
+    assert _revise_c_title_to_value("俊泰", text) == "苏州哈亚精密机械有限公司"
+
+
+def test_is_header_company_avoids_short_and_table_cell_misjudge():
+    """2 字简称与表格单元格不因子串匹配被误判为抬头货代。"""
+    assert _is_header_company("倍联", ["江苏倍联现代物流有限公司"]) is False
+    assert _is_header_company("东华工贸", ["3 | 做箱工厂 | 东华工贸"]) is False
+    # 顶部区域 "FM: xxx" 行值即 FM 值 → 判定为抬头通知方（保守，不误放行货代）
+    assert (
+        _is_header_company("上海威世国际货物运输代理有限公司", ["FM: 上海威世国际货物运输代理有限公司"])
+        is True
+    )
+
+
+def test_revise_c_title_ignores_fm_person_name():
+    """展平段落流的 FM 人名行不匹配（漏检安全），不会把人名当客户。"""
+    text = (
+        "_p1_ 运输委托书\n"
+        "_p2_ TO：上海捷阳国际货物运输代理有限公司\n"
+        "_p3_ FM：范颖晰\n"
+        "_p5_ 我司编号：WXHYC22010107\n"
+    )
+    assert _revise_c_title_to_value("范颖晰", text) is None
+    assert _revise_c_title_to_value("上海捷阳国际货物运输代理有限公司", text) is None
+
+
+def test_revise_c_title_reads_customer_label_after_flat_paragraph_prefix():
+    """展平段落流中 _pN_ 前缀后的客户栏（行形式）仍可识别。"""
+    text = "_p3_ 客户名称：特格威\n_p4_ 提单号：ABC1234567\n"
+    assert _revise_c_title_to_value("特格威", text) == "特格威"
+    # 值不匹配 LLM 提取值时不允许保留（防臆造）
+    assert _revise_c_title_to_value("海丰", text) is None
+
+
+def test_revise_c_title_ignores_fm_when_it_is_door_point_notice_forwarder():
+    """门点装箱通知：FM=抬头货代不得强制覆盖 TO/门点值；抬头公司名本身仍是合法来源。"""
+    text = (
+        "上海威世国际货物运输代理有限公司\n"
+        "门点装箱通知\n"
+        "TO: 北跃物流\n"
+        "FM: 上海威世国际货物运输代理有限公司\n"
+        "提单号：TEST000011\n"
+    )
+    assert _revise_c_title_to_value("北跃物流", text) is None
+    assert _revise_c_title_to_value("江阴市信腾新颖地面材料有限公司", text) is None
+    # 抬头公司名本身是合法客户来源（与 prompt 规则一致）
+    assert _revise_c_title_to_value("上海威世国际货物运输代理有限公司", text) == (
+        "上海威世国际货物运输代理有限公司"
+    )
 
 
 def test_revise_c_title_returns_none_without_fm_from():
     """原文无 FM/FROM 行时置空（走人工确认），不放行 TO 收件方。"""
     text = "TO：俊泰\n关单号：SECU13842\n"
     assert _revise_c_title_to_value("俊泰", text) is None
+
+
+def test_revise_c_title_rejects_fabricated_value():
+    """原文无 FM/FROM、无客户栏、无抬头公司时，臆造值（如从文件名推断）置空。"""
+    text = (
+        "提单号：EASEK2615SB7008\n"
+        "船名航次：EASLINE KWANGYANG V.2615E\n"
+        "做箱地址：浙江省嘉兴市嘉善县姚庄镇利群路269号\n"
+        "目的港：BUSAN\n"
+        "开船时间：2026-04-25\n"
+        "箱型：1*20GP\n"
+    )
+    assert _revise_c_title_to_value("集行供应链", text) is None
+
+
+def test_revise_c_title_keeps_customer_label_value():
+    """无 FM/FROM 行时，明确客户栏的值保留（行形式与表格形式）。"""
+    assert _revise_c_title_to_value("特格威", "客户名称：特格威\n提单号：ABC1234567") == "特格威"
+    assert (
+        _revise_c_title_to_value(
+            "海丰", "| 客户 | 海丰 |\n| 提单号 | ABC1234567 |"
+        )
+        == "海丰"
+    )
+
+
+def test_revise_c_title_keeps_notice_heading_company():
+    """无 FM/FROM 行时，'客户简称+装箱/做箱通知'标题前缀可作客户来源。"""
+    text = "海丰装箱通知\nTO：俊泰\n提单号：ABC1234567\n"
+    assert _revise_c_title_to_value("海丰", text) == "海丰"
+
+
+def test_revise_c_title_keeps_header_company_line():
+    """无 FM/FROM 行时，顶部区域整行公司名保留。"""
+    text = "江苏倍联现代物流有限公司\n常州赛格威做箱通知\nTO：俊泰\n"
+    assert _revise_c_title_to_value("江苏倍联现代物流有限公司", text) == "江苏倍联现代物流有限公司"
 
 
 def test_revise_c_title_handles_none():

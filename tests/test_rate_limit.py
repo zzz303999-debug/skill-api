@@ -89,6 +89,19 @@ def test_build_rate_limited_response():
     body = response.body
     # JSONResponse 紧凑序列化（无空格）
     assert b'"code":"rate_limited"' in body
+    # 与 SkillAPIError 错误 envelope 一致：必须带中文 description
+    assert b'"description":"' in body
+
+
+def test_build_rate_limited_response_description_from_registry():
+    import json
+
+    from app.errors import ERROR_CODE_DESCRIPTIONS
+
+    response = rate_limit.build_rate_limited_response(1.2)
+    error = json.loads(response.body)["error"]
+    assert error["description"] == ERROR_CODE_DESCRIPTIONS["rate_limited"]
+    assert error["details"] == {"retry_after_seconds": 2}
 
 
 # ---------- 中间件（HTTP 层） ----------
@@ -111,6 +124,7 @@ def test_rate_limit_blocks_heavy_after_threshold(monkeypatch):
     # 窗口 60s：最早一次请求刚被记录，需等待近整个窗口
     assert third.headers["Retry-After"] == "60"
     assert third.json()["error"]["code"] == "rate_limited"
+    assert third.json()["error"]["description"]
 
 
 def test_rate_limit_records_access_log(monkeypatch):

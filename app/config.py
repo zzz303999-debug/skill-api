@@ -73,6 +73,13 @@ class Settings(BaseSettings):
     access_log_record_body: bool = True
     # 请求体记录的最大字符数，超出截断并标记 body_truncated
     access_log_body_max_chars: int = Field(default=4096, ge=0, le=100_000)
+    # 是否记录 JSON 响应体（输出结果）；前端 logs 页面展示用。
+    # 注意：开启时 JSON 响应会被全量缓冲（内存峰值与响应体量相关，
+    # 截断只影响落盘内容，客户端仍收到完整响应）
+    access_log_record_response: bool = True
+    # 响应体记录的最大字符数，超出截断并标记 response_truncated
+    # （仅截断日志内容，客户端仍收到完整响应）
+    access_log_response_max_chars: int = Field(default=64 * 1024, ge=0, le=1_000_000)
     # 是否信任反向代理头（X-Forwarded-For / X-Real-IP）；
     # 云服务前面有 nginx/负载均衡时开启，才能拿到真实客户端 IP
     access_log_trust_proxy: bool = True

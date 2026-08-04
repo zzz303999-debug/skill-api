@@ -173,12 +173,12 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 | `日期`/`DATE`（含相邻碎片） | `doc_date` | null |
 | 无结构字段可承载的原文 | `remark` | null |
 
-`zuoxiang_std_esff` 模板中的`做箱工厂`同时作为 `factory.name` 和 `shipper_company`；
 `bingsheng_transport` 模板的标题下抬头公司同时作为 `shipper_agent` 和 `shipper_company`。
 `bolian_segway` 模板的“江苏倍联现代物流有限公司”抬头同时作为
 `shipper_agent` 和 `shipper_company`。
-其他模板不得把工厂、抬头货代当作托运人。结构化后的收件方、公司、联系人不得重复进
-`remark`/`c_note`。
+其他模板不得把工厂、抬头货代当作托运人（`zuoxiang_std_esff` 的做箱工厂
+只是门点工厂，只写入 `factory.name`，禁止写入 `shipper_company`）。
+结构化后的收件方、公司、联系人不得重复进`remark`/`c_note`。
 
 缺失复核提示（`review_issues`）仅限以下必提取字段缺失时生成：提单号 `mbl_no`、
 箱型 `containers[].type`、客户 `customer`、地址 `factory.address`、做箱日期
