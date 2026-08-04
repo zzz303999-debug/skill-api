@@ -77,6 +77,20 @@ class Settings(BaseSettings):
     # 云服务前面有 nginx/负载均衡时开启，才能拿到真实客户端 IP
     access_log_trust_proxy: bool = True
 
+    # 请求限流（内存滑动窗口，按客户端 IP 计；仅单进程部署下精确）
+    # 生产开启；本地开发默认关闭
+    rate_limit_enabled: bool = False
+    # heavy 档（/orders、/skills/* 等 LLM/转换密集型接口）窗口内最大请求数
+    rate_limit_heavy_max_requests: int = Field(default=10, ge=1, le=100_000)
+    # heavy 档窗口秒数
+    rate_limit_heavy_window_seconds: int = Field(default=60, ge=1, le=3600)
+    # light 档（/api/logs 日志查询）窗口内最大请求数
+    rate_limit_light_max_requests: int = Field(default=120, ge=1, le=1_000_000)
+    # light 档窗口秒数
+    rate_limit_light_window_seconds: int = Field(default=60, ge=1, le=3600)
+    # 免限流 IP 白名单，逗号分隔（如内网网关）；留空则不豁免
+    rate_limit_whitelist: str = ""
+
     # 日志
     log_level: str = "INFO"
 

@@ -1,0 +1,600 @@
+"""附件文档 → 下单接口字段转换（不实际下单）。
+
+流程：上传文件 → 复用 tuoshu 转换链得到 markdown/vision 内容 → LLM 按
+`OrderDocumentExtraction` schema 抽取 → 归一化并校验必填字段 → 组装成
+下单接口的 order_data 返回，调用方自行决定是否提交。
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
+
+from app.config import settings
+from app.errors import BadRequestError, ConvertError, ParseError
+from app.llm import chat_json, image_to_data_url
+from app.logging_conf import get_logger
+from app.skills.tuoshu.convert_service import (
+    SUPPORTED_EXTS,
+    convert_image_to_parse_result,
+    convert_to_markdown,
+    is_image,
+    render_pdf_pages,
+)
+from app.skills.tuoshu.normalizer import (
+    STANDARD_CONTAINER_LENGTHS,
+    STANDARD_CONTAINER_SUFFIXES,
+    normalize_date_value,
+)
+
+from .schema import DocumentBoxItem, OrderDocumentExtraction
+
+log = get_logger(__name__)
+
+# 箱型格式：箱长（20/25/40）+ 两位字母后缀，共 4 位
+_CONTAINER_TYPE_RE = re.compile(
+    rf"^({'|'.join(STANDARD_CONTAINER_LENGTHS)})([A-Za-z]{{2}})$"
+)
+_CONTAINER_SUFFIXES = frozenset(STANDARD_CONTAINER_SUFFIXES)
+
+# 提单号：纯数字或字母数字，至少 8 位
+_BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
+
+# 日期：YYYY-MM-DD
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _clean_json_schema(schema: dict) -> dict:
+    """去除 Pydantic 生成的 $defs / anyOf，转成模型友好的简化 schema。"""
+    schema = copy.deepcopy(schema)
+    defs = schema.pop("$defs", {})
+
+    def _resolve(node):
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if ref and ref.startswith("#/$defs/"):
+                return _resolve(defs.get(ref[len("#/$defs/"):], {}))
+            result: dict[str, Any] = {}
+            for key, value in node.items():
+                if key in ("title", "default", "$schema"):
+                    continue
+                if key == "anyOf":
+                    options = [_resolve(opt) for opt in value]
+                    non_null = [opt for opt in options if opt.get("type") != "null"]
+                    has_null = len(non_null) != len(options)
+                    if has_null and len(non_null) == 1:
+                        nullable_type = non_null[0].get("type")
+                        if isinstance(nullable_type, str):
+                            non_null[0]["type"] = [nullable_type, "null"]
+                        elif isinstance(nullable_type, list):
+                            non_null[0]["type"] = [*nullable_type, "null"]
+                        result.update(non_null[0])
+                    else:
+                        result["anyOf"] = options
+                elif key == "properties":
+                    result[key] = {pk: _resolve(pv) for pk, pv in value.items()}
+                elif key == "items":
+                    result[key] = _resolve(value)
+                else:
+                    result[key] = value
+            return result
+        return node
+
+    return _resolve(schema)
+
+
+_SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读取 Markdown/图片正文，只输出符合 JSON Schema 的英文 key 对象；不输出解释或另一份摘要。拿不准填 null。
+
+# 字段来源表（唯一目标）
+| 原文标签/版面角色 | 字段 | 缺失处理 |
+|---|---|---|
+| `提单号`/`主提单号`/`主单号`/`B/L NO`/`MBL NO` | `order_num1` | null |
+| `FM` 后的值；缺失时取明确客户栏、`客户简称+装箱/做箱通知`抬头或正文抬头公司 | `c_title` | null |
+| 做箱/装箱地址（详细街道地址，含省市区县、道路、门牌号） | `factory_bei` | null |
+| `做箱日期`/`装箱日期`/`做箱时间` | `b_date` | null |
+| `开船时间`/`开航时间`/`ETD` | `b_open_ship_time` | null |
+| 件数（数字 + `CTNS`，单位可省略） | `packages` | null |
+| 毛重（数字 + `KGS`，单位可省略，保留 2-3 位小数） | `gross_weight` | null |
+| 体积（数字 + `CBM`，单位可省略，保留 2-3 位小数） | `volume` | null |
+| 箱型箱量（如 `3*40HQ`、`40HQ*2`、`1x20GP+1x40HQ`） | `box` | null |
+| `船名`/`VESSEL`；`船名航次`合写时拆开 | `b_ship_name` | null |
+| `航次`/`船次`/`VOY`/`VOYAGE` | `b_ship_num` | null |
+| `船公司`/`CARRIER` | `b_ship_company` | null |
+| `目的港`/`卸货港`/`PORT OF DISCHARGE` | `b_end_port` | null |
+| 目的港下的码头/堆场名（如 FELIXSTOWE 后的具体码头） | `b_end_dock` | null |
+| `港区`/做箱港区 | `b_wharf` | null |
+| `启运港`/`装货港`/`PORT OF LOADING` | `b_start_dock` | null |
+| 门点简称/`工厂名称` | `factory_name` | null |
+| `装箱备注` | `b_factory_not` | null |
+| `联系人`/`现场联系人`/`装箱联系人` | `c_name` | null |
+| `电话`/`手机`/`TEL`（随联系人出现） | `c_phone` | null |
+| `内部编号`/`业务编号`/`我司业务编号` | `c_sn` | null |
+| `备注`/`注意事项`/`REMARK`/`NOTE` | `c_note` | null |
+
+# 抽取规则
+1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
+2. `order_num1` 必须为纯数字或字母数字组合且至少 8 位；不得保留空格、连字符或其他符号；不符合时填 null。
+3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出。
+4. `c_title` 优先逐字取 `FM` 后的值（公司名称、简称或其他原文称呼），缺失时依次取明确的客户栏、`客户简称+装箱/做箱通知`抬头和正文抬头公司；不要取收货人（TO/ATTN）。
+5. `factory_bei` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
+6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。
+7. `packages`/`gross_weight`/`volume` 只清洗单位和千分位：件数为整数；毛重、体积按原文精度保留 2-3 位小数，超过 3 位四舍五入到 3 位，不补无意义的尾零；单位（CTNS/KGS/CBM）可省略。任一值 ≤0 填 null。
+8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位。
+9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述。
+10. `b_open_ship_time` 与 `b_date` 是不同字段：前者是开船时间，后者是做箱/装箱日期，按标签严格区分，禁止混填；`b_open_ship_time` 同样输出 `YYYY-MM-DD`。
+"""
+
+
+def _build_system_prompt() -> str:
+    return _SYSTEM_PROMPT
+
+
+def _build_user_message_text(markdown: str, filename: str, doc_format: str) -> str:
+    return (
+        f"待抽取单据。\n"
+        f"file={filename}\n"
+        f"doc_format={doc_format}\n\n"
+        f"===== 文档内容开始 =====\n"
+        f"{markdown}\n"
+        f"===== 文档内容结束 =====\n\n"
+        f"请输出 JSON。"
+    )
+
+
+def _build_user_message_vision(
+    image_data_urls: str | list[str],
+    filename: str,
+    doc_format: str,
+    parsed_text: str | None = None,
+) -> list[dict]:
+    urls = [image_data_urls] if isinstance(image_data_urls, str) else image_data_urls
+    parsed_section = ""
+    if parsed_text:
+        parsed_section = (
+            "\n\n以下是 MinerU OCR 辅助文本，不是独立事实来源。所有自由文本字段必须在图片中"
+            "肉眼可见；OCR 中存在但图片上看不到的词句必须剔除并填 null。"
+            "图片与文本冲突时以图片为准：\n"
+            "===== 已解析文本开始 =====\n"
+            f"{parsed_text}\n"
+            "===== 已解析文本结束 ====="
+        )
+    return [
+        {
+            "type": "text",
+            "text": (
+                f"待抽取单据（图片/扫描件）。\n"
+                f"file={filename}\n"
+                f"doc_format={doc_format}\n\n"
+                f"请直接从图片正文中提取，忽略红色图章、水印、logo 和其他图片区域中的文字，"
+                f"输出 JSON。{parsed_section}"
+            ),
+        },
+        *[
+            {
+                "type": "image_url",
+                "image_url": {"url": url, "detail": "high"},
+            }
+            for url in urls
+        ],
+    ]
+
+
+def _convert_file(
+    file_bytes: bytes, filename: str
+) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
+    """把附件转成 LLM 可用的输入。
+
+    返回 (source_text, doc_format, conversion_meta, user_content)。
+    user_content 为字符串（纯文本）或 list[dict]（vision 消息）。
+    """
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTS:
+        raise BadRequestError(
+            f"unsupported extension: {ext}",
+            details={"supported": SUPPORTED_EXTS},
+        )
+
+    doc_format = ext.lstrip(".")
+    source_text: str | None = None
+    conversion_meta: dict[str, Any] = {}
+
+    if is_image(ext):
+        parse_result = convert_image_to_parse_result(file_bytes, filename)
+        doc_format = parse_result.input_format
+        conversion_meta = parse_result.meta()
+        source_text = parse_result.markdown or None
+        skip_vision = (
+            settings.image_vision_skip_when_confident
+            and parse_result.parser == "mineru"
+            and not parse_result.parser_fallback
+        )
+        if parse_result.vision_images and not skip_vision:
+            images = list(parse_result.vision_inputs)
+            total_image_bytes = sum(len(image) for image, _ in images)
+            if total_image_bytes > settings.vision_max_image_bytes:
+                conversion_meta["vision_skipped_reason"] = "image_too_large"
+                user_content = _build_user_message_text(
+                    source_text or "", filename, doc_format
+                )
+            else:
+                data_urls = [
+                    image_to_data_url(image, mime=mime)
+                    for image, mime in images
+                ]
+                user_content = _build_user_message_vision(
+                    data_urls,
+                    filename,
+                    doc_format,
+                    parsed_text=source_text,
+                )
+        else:
+            if skip_vision:
+                conversion_meta["vision_cross_check"] = "skipped_confident"
+            user_content = _build_user_message_text(
+                source_text or "", filename, doc_format
+            )
+        return source_text, doc_format, conversion_meta, user_content
+
+    markdown = convert_to_markdown(file_bytes, filename)
+    parse_result = getattr(markdown, "parse_result", None)
+    if parse_result is not None:
+        conversion_meta = parse_result.meta()
+    else:
+        parser = getattr(markdown, "parser", None)
+        if parser:
+            conversion_meta = {"parser": parser}
+
+    if markdown.startswith("SCAN_OR_IMAGE_HINT:"):
+        # 扫描件 PDF：整本转图片走 vision
+        if ext != ".pdf":
+            raise ConvertError(
+                "document has no extractable text; convert it to PDF/image",
+                details={"file": Path(filename).name},
+            )
+        page_images = render_pdf_pages(
+            file_bytes,
+            max_pages=settings.vision_max_pdf_pages,
+            scale=settings.vision_pdf_render_scale,
+        )
+        data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
+        conversion_meta = {
+            "parser": "vision",
+            "parser_fallback": True,
+            "input_format": "pdf",
+        }
+        return None, doc_format, conversion_meta, _build_user_message_vision(
+            data_urls, filename, doc_format
+        )
+
+    source_text = str(markdown)
+    if parse_result is not None and parse_result.vision_images:
+        images = list(parse_result.vision_inputs)
+        data_urls = [
+            image_to_data_url(image, mime=mime) for image, mime in images
+        ]
+        user_content = _build_user_message_vision(
+            data_urls,
+            filename,
+            doc_format,
+            parsed_text=source_text,
+        )
+    else:
+        user_content = _build_user_message_text(source_text, filename, doc_format)
+    return source_text, doc_format, conversion_meta, user_content
+
+
+# ---- 归一化 ----
+
+_MEASUREMENT_LEAD = re.compile(
+    r"^(?:约|大约|大概|約|approx(?:oximately)?\.?|about)\s*", re.IGNORECASE
+)
+
+
+def _extract_number(value: str) -> float | None:
+    """从字符串中提取第一个数字（剥离前缀修饰词），失败返回 None。"""
+    text = _MEASUREMENT_LEAD.sub("", value.replace(",", "").strip())
+    match = re.search(r"-?\d+(?:\.\d+)?", text)
+    if not match:
+        return None
+    return float(match.group(0))
+
+
+def _format_decimal(number: float, *, max_decimals: int = 3) -> str:
+    """保留 2-3 位小数：四舍五入到 3 位，去掉无意义尾零但保留至少 2 位。"""
+    if number <= 0:
+        raise ValueError("value must be positive")
+    rounded = round(number, max_decimals)
+    if rounded == int(rounded):
+        return str(int(rounded))
+    text = f"{rounded:.{max_decimals}f}".rstrip("0")
+    return text
+
+
+def _normalize_bill_no(value: Any) -> str | None:
+    """提单号：去空格/连字符后必须为 8+ 位纯数字或字母数字。"""
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"[\s\-/]", "", value.strip())
+    if not _BILL_NO_RE.fullmatch(cleaned):
+        return None
+    return cleaned
+
+
+def _normalize_container_type(value: Any) -> str | None:
+    """箱型：必须为 4 位（箱长 20/25/40 + 两位字母后缀）。"""
+    if not isinstance(value, str):
+        return None
+    cleaned = re.sub(r"['’\s\"`]", "", value.strip()).upper()
+    match = _CONTAINER_TYPE_RE.fullmatch(cleaned)
+    if not match:
+        return None
+    suffix = match.group(2)
+    if suffix not in _CONTAINER_SUFFIXES:
+        return None
+    return cleaned
+
+
+def _normalize_boxes(value: Any) -> list[DocumentBoxItem]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+
+    boxes: list[DocumentBoxItem] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        b_type = _normalize_container_type(item.get("b_type"))
+        box_num_raw = item.get("box_num")
+        try:
+            box_num = int(box_num_raw)
+        except (TypeError, ValueError):
+            box_num = 0
+        if not b_type or box_num < 1:
+            continue
+        boxes.append(DocumentBoxItem(b_type=b_type, box_num=box_num))
+    return boxes
+
+
+def _normalize_packages(value: Any) -> str | None:
+    """件数：整数数字字符串，单位 CTNS 可省略。"""
+    if not isinstance(value, str):
+        return None
+    number = _extract_number(value)
+    if number is None or number <= 0:
+        return None
+    if not number.is_integer():
+        return None
+    return str(int(number))
+
+
+def _normalize_weight(value: Any) -> str | None:
+    """毛重：数字字符串，保留 2-3 位小数，单位 KGS 可省略。"""
+    if not isinstance(value, str):
+        return None
+    number = _extract_number(value)
+    if number is None:
+        return None
+    try:
+        return _format_decimal(number)
+    except ValueError:
+        return None
+
+
+def _normalize_volume(value: Any) -> str | None:
+    """体积：数字字符串，保留 2-3 位小数，单位 CBM 可省略。"""
+    return _normalize_weight(value)
+
+
+def _normalize_date(value: Any) -> str | None:
+    """做箱日期：归一为 YYYY-MM-DD。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = normalize_date_value(value, allow_time=False)
+    if not isinstance(normalized, str) or not _DATE_RE.fullmatch(normalized):
+        return None
+    return normalized
+
+
+def _normalize_text(value: Any) -> str | None:
+    """通用文本字段：去首尾空白，空值返回 None。"""
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtraction:
+    """把 LLM raw dict 归一到 OrderDocumentExtraction 并做值校验。"""
+    try:
+        return OrderDocumentExtraction.model_validate(
+            {
+                "order_num1": _normalize_bill_no(data.get("order_num1")),
+                "c_title": _normalize_text(data.get("c_title")),
+                "c_name": _normalize_text(data.get("c_name")),
+                "c_phone": _normalize_text(data.get("c_phone")),
+                "b_ship_name": _normalize_text(data.get("b_ship_name")),
+                "b_ship_num": _normalize_text(data.get("b_ship_num")),
+                "b_ship_company": _normalize_text(data.get("b_ship_company")),
+                "factory_name": _normalize_text(data.get("factory_name")),
+                "factory_bei": _normalize_text(data.get("factory_bei")),
+                "b_factory_not": _normalize_text(data.get("b_factory_not")),
+                "b_start_dock": _normalize_text(data.get("b_start_dock")),
+                "b_end_port": _normalize_text(data.get("b_end_port")),
+                "b_end_dock": _normalize_text(data.get("b_end_dock")),
+                "b_wharf": _normalize_text(data.get("b_wharf")),
+                "b_open_ship_time": _normalize_date(data.get("b_open_ship_time")),
+                "b_date": _normalize_date(data.get("b_date")),
+                "c_sn": _normalize_text(data.get("c_sn")),
+                "c_note": _normalize_text(data.get("c_note")),
+                "packages": _normalize_packages(data.get("packages")),
+                "gross_weight": _normalize_weight(data.get("gross_weight")),
+                "volume": _normalize_volume(data.get("volume")),
+                "box": _normalize_boxes(data.get("box")),
+            }
+        )
+    except ValidationError as exc:
+        raise ParseError(
+            "document extraction failed schema validation",
+            details={"errors": exc.errors(include_input=False)},
+        ) from exc
+
+
+# ---- 必填校验 + 组装 ----
+
+# 缺失原因：原文中未抽取到 / 值格式不合法被归一化清洗
+_MISSING_REASON_NOT_FOUND = "原文未找到，请人工确认"
+_MISSING_REASON_INVALID = "格式不合法"
+
+
+def _missing_fields(extracted: OrderDocumentExtraction) -> list[str]:
+    missing: list[str] = []
+    if not extracted.order_num1:
+        missing.append("order_num1")
+    if not extracted.box:
+        missing.append("box")
+    if not extracted.c_title:
+        missing.append("c_title")
+    if not extracted.factory_bei:
+        missing.append("factory_bei")
+    if not extracted.b_date:
+        missing.append("b_date")
+    if not extracted.packages:
+        missing.append("packages")
+    if not extracted.gross_weight:
+        missing.append("gross_weight")
+    if not extracted.volume:
+        missing.append("volume")
+    return missing
+
+
+def _missing_field_reasons(
+    raw: dict[str, Any], extracted: OrderDocumentExtraction
+) -> dict[str, str]:
+    """对每个缺失字段标注原因：原文未抽取到，或 LLM 有值但格式非法被清洗。"""
+    reasons: dict[str, str] = {}
+    for field in _missing_fields(extracted):
+        value = raw.get(field)
+        if value is None:
+            reasons[field] = _MISSING_REASON_NOT_FOUND
+        elif isinstance(value, str) and not value.strip():
+            reasons[field] = _MISSING_REASON_NOT_FOUND
+        elif isinstance(value, (list, dict)) and not value:
+            reasons[field] = _MISSING_REASON_NOT_FOUND
+        else:
+            reasons[field] = _MISSING_REASON_INVALID
+    return reasons
+
+
+def build_document_order_data(
+    extracted: OrderDocumentExtraction,
+    *,
+    customer_id: str = "",
+) -> dict[str, Any]:
+    """组装下单接口 data 参数（不调用上游）。
+
+    字段结构对齐标准订单格式（与 /orders 自由文本下单的 order_data 一致）；
+    缺失的字段保持 null，做箱日期缺失时 driver 显示空对象 [{}]（对齐标准格式）。
+
+    注意：本函数不做必填校验，缺失字段保持空值；由调用方通过
+    `_missing_fields` 判断是否需要人工确认。
+    """
+    return {
+        "order_num1": extracted.order_num1,
+        "type": 1,
+        "c_id": customer_id,
+        "c_title": extracted.c_title,
+        "c_name": extracted.c_name,
+        "c_phone": extracted.c_phone,
+        "b_ship_name": extracted.b_ship_name,
+        "b_ship_num": extracted.b_ship_num,
+        "b_ship_company": extracted.b_ship_company,
+        "factory_name": extracted.factory_name,
+        "factory_bei": extracted.factory_bei,
+        "b_factory_not": extracted.b_factory_not,
+        "b_start_dock": extracted.b_start_dock,
+        "b_end_port": extracted.b_end_port,
+        "b_end_dock": extracted.b_end_dock,
+        "b_wharf": extracted.b_wharf,
+        "b_open_ship_time": extracted.b_open_ship_time,
+        "c_sn": extracted.c_sn,
+        "c_note": extracted.c_note,
+        "data": [
+            {
+                "b_order_num": extracted.order_num1,
+                "j": extracted.packages,
+                "m": extracted.gross_weight,
+                "t": extracted.volume,
+            }
+        ],
+        "box": [
+            {"b_type": item.b_type, "box_num": item.box_num}
+            for item in extracted.box
+        ],
+        "driver": (
+            [{}] if not extracted.b_date else [{"b_date": extracted.b_date}]
+        ),
+    }
+
+
+# ---- 主流程 ----
+
+def parse_document_to_order(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    customer_id: str = "",
+) -> dict[str, Any]:
+    """上传附件 → 转换 → LLM 抽取 → 校验 → 组装 order_data（不下单）。
+
+    order_data 始终组装并返回（缺字段时缺失项为 null，driver 为 [{}]），
+    是否人工确认由 missing_fields / needs_manual_confirmation 标记。
+    """
+    source_text, doc_format, conversion_meta, user_content = _convert_file(
+        file_bytes, filename
+    )
+    extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    system = _build_system_prompt()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+    output_schema = _clean_json_schema(OrderDocumentExtraction.model_json_schema())
+    raw, llm_meta = chat_json(messages, temperature=0.0, json_schema=output_schema)
+    if not isinstance(raw, dict):
+        raise ParseError("LLM output must be a JSON object")
+
+    extracted = normalize_document_extraction(raw)
+    missing = _missing_fields(extracted)
+    missing_reasons = _missing_field_reasons(raw, extracted)
+    order_data = build_document_order_data(extracted, customer_id=customer_id)
+
+    safe_meta = {key: llm_meta.get(key) for key in ("model", "usage") if key in llm_meta}
+    safe_meta.update(conversion_meta)
+    safe_meta.update(
+        {
+            "extracted_at": extracted_at,
+            "doc_format": doc_format,
+            "source_sha256": hashlib.sha256(file_bytes).hexdigest(),
+            "source_bytes": len(file_bytes),
+            "order_created": False,
+        }
+    )
+    return {
+        "file": filename,
+        "extracted": extracted.model_dump(),
+        "order_data": order_data,
+        "needs_manual_confirmation": bool(missing),
+        "missing_fields": missing,
+        "missing_reasons": missing_reasons,
+        "meta": safe_meta,
+    }

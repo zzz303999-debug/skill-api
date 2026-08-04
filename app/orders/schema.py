@@ -81,3 +81,58 @@ class CreateOrderFromTextResponse(BaseModel):
     order_data: dict[str, Any]
     upstream: OrderApiResponse
     meta: dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentBoxItem(BaseModel):
+    """附件文档抽取的箱型条目。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+    b_type: str | None = Field(
+        None,
+        description="箱型，4 位：箱长 20/25/40 加两位字母（如 40HQ、20GP）",
+    )
+    box_num: int | None = Field(None, description="箱量")
+
+
+class OrderDocumentExtraction(BaseModel):
+    """附件文档专用抽取结构，字段名与下单接口 data 对齐。
+
+    必填：提单号、箱型、客户、地址、做箱日期、件数、毛重、体积。
+    其余字段（船名、船次、船公司、目的港、码头、港区、开船时间、备注等）
+    为可选，结构对齐标准订单格式。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    order_num1: str | None = Field(None, description="提单号，纯数字或字母数字，至少 8 位")
+    c_title: str | None = Field(None, description="客户，取 FM 后的值或抬头公司")
+    c_name: str | None = Field(None, description="现场联系人")
+    c_phone: str | None = Field(None, description="联系电话")
+    b_ship_name: str | None = Field(None, description="船名")
+    b_ship_num: str | None = Field(None, description="船次/航次")
+    b_ship_company: str | None = Field(None, description="船公司")
+    factory_name: str | None = Field(None, description="门点简称/工厂名称")
+    factory_bei: str | None = Field(None, description="详细街道地址")
+    b_factory_not: str | None = Field(None, description="装箱备注")
+    b_start_dock: str | None = Field(None, description="启运港/装货港")
+    b_end_port: str | None = Field(None, description="目的港")
+    b_end_dock: str | None = Field(None, description="目的港码头")
+    b_wharf: str | None = Field(None, description="港区")
+    b_open_ship_time: str | None = Field(None, description="开船时间，YYYY-MM-DD")
+    b_date: str | None = Field(None, description="做箱日期，YYYY-MM-DD")
+    c_sn: str | None = Field(None, description="内部编号")
+    c_note: str | None = Field(None, description="备注/注意事项")
+    packages: str | None = Field(None, description="件数，数字 + CTNS（单位可省略）")
+    gross_weight: str | None = Field(None, description="毛重，数字 + KGS（单位可省略），保留 2-3 位小数")
+    volume: str | None = Field(None, description="体积，数字 + CBM（单位可省略），保留 2-3 位小数")
+    box: list[DocumentBoxItem] = Field(default_factory=list)
+
+
+class ParseDocumentResponse(BaseModel):
+    file: str
+    extracted: OrderDocumentExtraction
+    order_data: dict[str, Any] | None = None
+    needs_manual_confirmation: bool = False
+    missing_fields: list[str] = Field(default_factory=list)
+    missing_reasons: dict[str, str] = Field(default_factory=dict)

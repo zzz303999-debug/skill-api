@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -22,7 +23,7 @@ from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, create_model
 
-from app import access_log
+from app import access_log, rate_limit
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
@@ -31,8 +32,10 @@ from app.logging_conf import get_logger, setup_logging
 from app.orders import (
     CreateOrderFromTextRequest,
     CreateOrderFromTextResponse,
+    ParseDocumentResponse,
     build_order_data,
     extract_order_text,
+    parse_document_to_order,
     parse_source_fields,
     publish_create_order,
 )
@@ -57,6 +60,23 @@ _skill_executor = ThreadPoolExecutor(
 _SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
 
 
+# 请求限流（内存滑动窗口，按客户端 IP；单进程部署下精确）
+_heavy_limiter = rate_limit.SlidingWindowLimiter(
+    max_requests=settings.rate_limit_heavy_max_requests,
+    window_seconds=settings.rate_limit_heavy_window_seconds,
+)
+_light_limiter = rate_limit.SlidingWindowLimiter(
+    max_requests=settings.rate_limit_light_max_requests,
+    window_seconds=settings.rate_limit_light_window_seconds,
+)
+_rate_limit_whitelist = frozenset(
+    ip.strip()
+    for ip in settings.rate_limit_whitelist.split(",")
+    if ip.strip()
+)
+_LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
+
+
 def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
     """解析客户端 IP，返回 (客户端IP, 原始X-Forwarded-For头)。
 
@@ -73,6 +93,33 @@ def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
             return real_ip.strip(), forwarded
     host = request.client.host if request.client else None
     return host, forwarded
+
+
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
+    """请求限流：按客户端 IP 对 heavy/light 档接口滑动窗口计数。
+
+    注册在 access_log 中间件之前（执行时处于其内层），被 429 拒绝的请求
+    仍会经过外层 access_log，审计留痕完整；限流计数在事件循环线程执行。
+    """
+    if not settings.rate_limit_enabled:
+        return await call_next(request)
+    group = rate_limit.classify_path(request.url.path)
+    if group is None:
+        return await call_next(request)
+    client_ip, _ = _resolve_client_ip(request)
+    if not client_ip or client_ip in _rate_limit_whitelist:
+        return await call_next(request)
+    allowed, retry_after = _LIMITERS[group].allow(client_ip)
+    if not allowed:
+        request.state.error_code = "rate_limited"
+        request.state.error_detail = {
+            "code": "rate_limited",
+            "message": "too many requests",
+            "details": {"retry_after_seconds": math.ceil(retry_after)},
+        }
+        return rate_limit.build_rate_limited_response(retry_after)
+    return await call_next(request)
 
 
 async def _read_json_body(request: Request) -> tuple[str | None, bool]:
@@ -298,6 +345,42 @@ async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, 
         "upstream": upstream,
         "meta": meta,
     }
+
+
+async def _parse_document_to_order(file_bytes: bytes, filename: str):
+    return await _run_in_executor(
+        partial(
+            parse_document_to_order,
+            file_bytes,
+            filename,
+            customer_id=settings.order_api_jxt_open_id,
+        )
+    )
+
+
+@app.post(
+    "/orders/parse-document",
+    response_model=ParseDocumentResponse,
+    tags=["orders"],
+    summary="Parse an uploaded document into order fields without creating an order",
+)
+async def parse_order_document(
+    file: Annotated[UploadFile, File()],
+    request: Request,
+) -> dict[str, Any]:
+    """上传附件（托书/做箱通知等），转换为下单接口字段但不实际下单。
+
+    必填字段：提单号（≥8 位纯数字或字母数字）、箱型（4 位）、客户、
+    地址、做箱日期、件数、毛重、体积。字段缺失或格式不合法时不报错，
+    返回 200 + needs_manual_confirmation=true + missing_fields（缺失字段）
+    + missing_reasons（缺失原因：原文未找到，请人工确认 / 格式不合法）。
+    order_data 始终返回（缺失项为 null，做箱日期缺失时 driver 为 [{}]），
+    由调用方人工确认后补充并提交。
+    """
+    request.state.file_name = file.filename or "unnamed"
+    content = await _read_upload(file)
+    request.state.file_size = len(content)
+    return await _parse_document_to_order(content, file.filename or "unnamed")
 
 
 def _make_extract_route(skill: SkillBase):
