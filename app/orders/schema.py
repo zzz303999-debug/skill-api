@@ -133,12 +133,13 @@ class OrderDocumentExtraction(BaseModel):
     factory_bei: str | None = Field(None, description="详细街道地址")
     b_factory_not: str | None = Field(None, description="装箱备注")
     b_start_dock: str | None = Field(None, description="启运港/装货港")
-    b_end_port: str | None = Field(None, description="目的港（最终卸货港，不含中转港）")
-    transit_port: str | None = Field(
+    # 字段语义对齐订单创建接口文档与自由文本抽取（extractor.py）：
+    # b_end_port=中转港，b_end_dock=目的港
+    b_end_port: str | None = Field(
         None,
         description="中转港/转运港；待查描述如“见设备单”逐字保留，原文缺失时才是 null",
     )
-    b_end_dock: str | None = Field(None, description="目的港码头")
+    b_end_dock: str | None = Field(None, description="目的港（最终卸货港，不含中转港）")
     b_wharf: str | None = Field(None, description="港区")
     b_open_ship_time: str | None = Field(None, description="开船时间，YYYY-MM-DD")
     b_date: str | None = Field(None, description="做箱日期，YYYY-MM-DD")

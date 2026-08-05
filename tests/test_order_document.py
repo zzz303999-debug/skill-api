@@ -12,7 +12,7 @@ from app.orders.document import (
     _extract_header_company,
     _is_header_company,
     _revise_c_title_to_value,
-    _revise_end_port,
+    _revise_port_fields,
     build_document_order_data,
     normalize_document_extraction,
     parse_document_to_order,
@@ -30,8 +30,8 @@ COMPLETE_RAW = {
     "b_ship_company": "CMA CGM",
     "factory_name": "姚庄工厂",
     "factory_bei": "浙江省嘉兴市嘉善县姚庄镇利群路269号",
-    "b_end_port": "FELIXSTOWE",
-    "b_end_dock": "FELIXSTOWE DOCK",
+    "b_end_port": "SINGAPORE",
+    "b_end_dock": "FELIXSTOWE",
     "b_wharf": "上海港",
     "b_open_ship_time": "2020-08-31",
     "b_date": "2026-07-20",
@@ -353,8 +353,8 @@ def test_normalize_standard_fields():
     assert extracted.b_ship_num == "0GM4FW"
     assert extracted.b_ship_company == "CMA CGM"
     assert extracted.factory_name == "姚庄工厂"
-    assert extracted.b_end_port == "FELIXSTOWE"
-    assert extracted.b_end_dock == "FELIXSTOWE DOCK"
+    assert extracted.b_end_port == "SINGAPORE"
+    assert extracted.b_end_dock == "FELIXSTOWE"
     assert extracted.b_wharf == "上海港"
     assert extracted.b_open_ship_time == "2020-08-31"
     assert extracted.c_name == "华鑫老板娘"
@@ -406,8 +406,8 @@ def test_build_document_order_data_succeeds():
         "factory_bei": "浙江省嘉兴市嘉善县姚庄镇利群路269号",
         "b_factory_not": None,
         "b_start_dock": None,
-        "b_end_port": "FELIXSTOWE",
-        "b_end_dock": "FELIXSTOWE DOCK",
+        "b_end_port": "SINGAPORE",
+        "b_end_dock": "FELIXSTOWE",
         "b_wharf": "上海港",
         "b_open_ship_time": "2020-08-31",
         "c_sn": None,
@@ -519,7 +519,7 @@ def test_parse_document_to_order_extracts_without_publishing(monkeypatch):
     assert result["file"] == "order.pdf"
     assert result["order_data"]["order_num1"] == "KMTCSHAP950393"
     assert result["order_data"]["b_ship_name"] == "CMA CGM ZEPHYR"
-    assert result["order_data"]["b_end_port"] == "FELIXSTOWE"
+    assert result["order_data"]["b_end_port"] == "SINGAPORE"
     assert result["order_data"]["driver"] == [{"b_date": "2026-07-20"}]
     assert result["meta"]["order_created"] is False
     assert result["needs_manual_confirmation"] is False
@@ -558,49 +558,71 @@ def test_parse_document_to_order_marks_missing_fields(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "raw, source_text, expected",
+    "end_port, end_dock, source_text, expected_port, expected_dock",
     [
-        # 中转港被当成目的港：原文有目的港标签 → 改取真实目的港
+        # 目的港值被误填进 b_end_port → 挪到 b_end_dock，b_end_port 取中转港标签值
         (
-            "INCHON",
+            "BANDAR ABBAS",
+            None,
             "船名航次：PANCON GLORY V.2624E\n中转港：INCHON\n目的港：BANDAR ABBAS",
+            "INCHON",
             "BANDAR ABBAS",
         ),
-        # 中转港被当成目的港：原文无目的港标签 → 置空人工确认
+        # 中转港值被误填进 b_end_dock → 挪到 b_end_port
         (
+            None,
+            "INCHON",
+            "船名航次：PANCON GLORY V.2624E\n中转港：INCHON\n目的港：BANDAR ABBAS",
+            "INCHON",
+            "BANDAR ABBAS",
+        ),
+        # 只有中转港，无目的港 → b_end_dock 置空人工确认
+        (
+            None,
             "INCHON",
             "船名航次：PANCON GLORY V.2624E\n中转港：INCHON",
+            "INCHON",
             None,
         ),
         # 原文同时含“中转港代码”与“目的港”
         (
-            "ITTRS",
+            "TRIESTE",
+            None,
             "中转港代码：ITTRS\n目的港：TRIESTE\n1*40HC",
+            "ITTRS",
             "TRIESTE",
         ),
-        # 正常目的港（无中转关联）→ 原样保留
+        # 正常提取（b_end_port=中转港、b_end_dock=目的港）→ 原样保留
         (
+            None,
             "FELIXSTOWE",
             "起运港：SHANGHAI\n目的港：FELIXSTOWE\n件数：100 CTNS",
+            None,
             "FELIXSTOWE",
         ),
-        # 英文标签 TRANSSHIPMENT PORT
+        # 英文标签 TRANSSHIPMENT PORT / PORT OF DISCHARGE
         (
-            "SINGAPORE",
+            "JEDDAH",
+            None,
             "TRANSSHIPMENT PORT: SINGAPORE\nPORT OF DISCHARGE: JEDDAH",
+            "SINGAPORE",
             "JEDDAH",
         ),
-        # 无原文 / 无值 → 原样返回
-        (None, "中转港：INCHON", None),
-        ("INCHON", None, "INCHON"),
+        # 无原文 → 原样返回
+        ("INCHON", "FELIXSTOWE", None, "INCHON", "FELIXSTOWE"),
     ],
 )
-def test_revise_end_port_avoids_transit_port(raw, source_text, expected):
-    assert _revise_end_port(raw, source_text) == expected
+def test_revise_port_fields_avoids_confusion(
+    end_port, end_dock, source_text, expected_port, expected_dock
+):
+    assert _revise_port_fields(end_port, end_dock, source_text) == (
+        expected_port,
+        expected_dock,
+    )
 
 
-def test_parse_document_to_order_fixes_transit_port_as_destination(monkeypatch):
-    """LLM 把中转港当目的港时，后处理改取真实目的港并进入 order_data。"""
+def test_parse_document_to_order_fixes_port_confusion(monkeypatch):
+    """LLM 把目的港填进 b_end_port 时，后处理修正为 b_end_port=中转港、b_end_dock=目的港。"""
     def fake_convert(file_bytes, filename):
         markdown = ("运输委托书\n船名航次：PANCON GLORY V.2624E\n"
                     "中转港：INCHON\n目的港：BANDAR ABBAS\n件数：37\n毛重：20001\n体积：41.453")
@@ -608,7 +630,8 @@ def test_parse_document_to_order_fixes_transit_port_as_destination(monkeypatch):
 
     def fake_chat_json(messages, **_kwargs):
         raw = dict(COMPLETE_RAW)
-        raw["b_end_port"] = "INCHON"  # LLM 误把中转港当目的港
+        raw["b_end_port"] = "BANDAR ABBAS"  # LLM 误把目的港填进 b_end_port（中转港字段）
+        raw["b_end_dock"] = None
         return raw, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
@@ -616,27 +639,14 @@ def test_parse_document_to_order_fixes_transit_port_as_destination(monkeypatch):
 
     result = parse_document_to_order(b"fake-pdf", "order.pdf")
 
-    assert result["extracted"]["b_end_port"] == "BANDAR ABBAS"
-    assert result["order_data"]["b_end_port"] == "BANDAR ABBAS"
-
-
-@pytest.mark.parametrize(
-    "raw, expected",
-    [
-        ({"transit_port": "见设"}, "见设"),
-        ({"transit_port": "见设备单"}, "见设备单"),
-        ({"transit_port": "ITTRS"}, "ITTRS"),
-        ({"transit_port": ""}, None),
-        ({}, None),
-    ],
-)
-def test_normalize_transit_port(raw, expected):
-    extracted = normalize_document_extraction(raw)
-    assert extracted.transit_port == expected
+    assert result["extracted"]["b_end_port"] == "INCHON"
+    assert result["extracted"]["b_end_dock"] == "BANDAR ABBAS"
+    assert result["order_data"]["b_end_port"] == "INCHON"
+    assert result["order_data"]["b_end_dock"] == "BANDAR ABBAS"
 
 
 def test_parse_document_to_order_keeps_transit_port(monkeypatch):
-    """parse-document 与 tuoshu 一致：目的港与中转港分别提取，互不混淆。"""
+    """parse-document 按订单创建接口文档语义：b_end_port=中转港、b_end_dock=目的港。"""
     def fake_convert(file_bytes, filename):
         markdown = ("做箱通知书\n做箱时间：2021-03-31\n做箱工厂：宝时得园龙\n"
                     "地址：金泰路转诚泰路17号\n我司业务编号：ESFF21030770\n"
@@ -647,8 +657,8 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
 
     def fake_chat_json(messages, **_kwargs):
         raw = dict(COMPLETE_RAW)
-        raw["b_end_port"] = "SANTOS"
-        raw["transit_port"] = "见设"
+        raw["b_end_port"] = "见设"
+        raw["b_end_dock"] = "SANTOS"
         raw["b_wharf"] = "洋一"
         return raw, {"model": "fake", "usage": None}
 
@@ -657,8 +667,8 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
 
     result = parse_document_to_order(b"fake-pdf", "order.pdf")
 
-    assert result["extracted"]["b_end_port"] == "SANTOS"
-    assert result["extracted"]["transit_port"] == "见设"
+    assert result["extracted"]["b_end_port"] == "见设"
+    assert result["extracted"]["b_end_dock"] == "SANTOS"
 
 
 def test_parse_document_to_order_marks_vision_skipped(monkeypatch):

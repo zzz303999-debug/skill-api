@@ -163,14 +163,14 @@ def _is_header_company(value: str, header_lines: list[str]) -> bool:
     return False
 
 
-# 中转港标签（其值禁止作为目的港 b_end_port）；长标签在前避免“中转港代码”
-# 被“中转港”抢先匹配，捕获值不跨行（字符类不含换行）
+# 中转港标签（映射 b_end_port）；长标签在前避免“中转港代码”被“中转港”
+# 抢先匹配，捕获值不跨行（字符类不含换行）
 _TRANSIT_PORT_LABEL_RE = re.compile(
     r"(?:中转港代码|转运港代码|中转港|转运港|TRANSSHIPMENT\s*PORT)\s*[:：]?\s*"
     r"([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5 ()/'.-]{0,40})",
     re.IGNORECASE,
 )
-# 最终目的港标签
+# 目的港标签（映射 b_end_dock）
 _DEST_PORT_LABEL_RE = re.compile(
     r"(?:目的港|卸货港|PORT\s+OF\s+DISCHARGE)\s*[:：]?\s*"
     r"([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5 ()/'.-]{0,40})",
@@ -178,33 +178,50 @@ _DEST_PORT_LABEL_RE = re.compile(
 )
 
 
-def _revise_end_port(raw_value: str | None, source_text: str | None) -> str | None:
-    """兜底修复：b_end_port 误填中转港时改取真实目的港。
+def _revise_port_fields(
+    end_port: str | None, end_dock: str | None, source_text: str | None
+) -> tuple[str | None, str | None]:
+    """兜底修复：b_end_port（中转港）与 b_end_dock（目的港）互不混淆。
 
-    LLM 输出的目的港值若与原文"中转港/转运港/TRANSSHIPMENT PORT"标签直接
-    关联（如"中转港：INCHON"被当成目的港），则：
-    - 原文存在"目的港/卸货港"标签且有非中转值 → 用该值替换；
-    - 否则置 None（原文未给出最终卸货港，交给人工确认），
-      不让中转港冒充目的港进入下单数据。
+    字段语义对齐订单创建接口文档与自由文本抽取（extractor.py）：
+    b_end_port=中转港、b_end_dock=目的港。LLM 输出若把目的港值填进
+    b_end_port 或把中转港值填进 b_end_dock，则按原文标签修正；
+    空缺字段按原文标签补全（中转港待查描述如“见设”逐字保留）。
     """
-    if not raw_value or not source_text:
-        return raw_value
-    wanted = raw_value.strip().upper()
+    if not source_text:
+        return end_port, end_dock
 
     transit_values = [
-        m.group(1).strip().upper()
+        m.group(1).strip()
         for m in _TRANSIT_PORT_LABEL_RE.finditer(source_text)
     ]
-    if not transit_values or not any(
-        wanted in tv or tv in wanted for tv in transit_values
-    ):
-        return raw_value
-    # 命中"中转"标签：尝试取真实目的港标签值
-    for m in _DEST_PORT_LABEL_RE.finditer(source_text):
-        dest = m.group(1).strip()
-        if dest and dest.upper() not in transit_values:
-            return dest
-    return None
+    dest_values = [
+        m.group(1).strip() for m in _DEST_PORT_LABEL_RE.finditer(source_text)
+    ]
+
+    def hit(values: list[str], value: str | None) -> bool:
+        if not value:
+            return False
+        v = value.strip().upper()
+        return any(v in t.upper() or t.upper() in v for t in values if t)
+
+    end_port_v, end_dock_v = end_port, end_dock
+    # b_end_port 中是被“目的港”标签标注的值（LLM 混淆）→ 挪到 b_end_dock
+    if hit(dest_values, end_port_v) and not hit(transit_values, end_port_v):
+        if not end_dock_v:
+            end_dock_v = end_port_v
+        end_port_v = None
+    # b_end_dock 中是被“中转港”标签标注的值 → 挪到 b_end_port
+    if hit(transit_values, end_dock_v) and not hit(dest_values, end_dock_v):
+        if not end_port_v:
+            end_port_v = end_dock_v
+        end_dock_v = None
+    # 空缺字段按原文标签补全
+    if not end_dock_v and dest_values:
+        end_dock_v = dest_values[0]
+    if not end_port_v and transit_values:
+        end_port_v = transit_values[0]
+    return end_port_v, end_dock_v
 
 
 def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> str | None:
@@ -369,9 +386,8 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | `船名`/`VESSEL`；`船名航次`合写时拆开 | `b_ship_name` | null |
 | `航次`/`船次`/`VOY`/`VOYAGE` | `b_ship_num` | null |
 | `船公司`/`CARRIER` | `b_ship_company` | null |
-| `目的港`/`卸货港`/`PORT OF DISCHARGE`（**最终卸货港**，不含中转港） | `b_end_port` | null |
-| `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` | `transit_port` | null |
-| 目的港下的码头/堆场名（如 FELIXSTOWE 后的具体码头） | `b_end_dock` | null |
+| `目的港`/`卸货港`/`PORT OF DISCHARGE`（**最终卸货港**，不含中转港） | `b_end_dock` | null |
+| `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT`（待查描述如 `见设备单` 逐字保留） | `b_end_port` | null |
 | `港区`/做箱港区 | `b_wharf` | null |
 | `启运港`/`装货港`/`PORT OF LOADING` | `b_start_dock` | null |
 | 门点简称/`工厂名称` | `factory_name` | null |
@@ -394,8 +410,8 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述。
 10. `b_open_ship_time` 与 `b_date` 是不同字段：前者是开船时间，后者是做箱/装箱日期，按标签严格区分，禁止混填；`b_open_ship_time` 同样输出 `YYYY-MM-DD`。
 11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
-12. `b_end_port` 只取**最终卸货港**。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_port`（如"中转港：INCHON"时 INCHON 不是目的港），应填入 `transit_port`；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_port` 填 null（人工确认），禁止用中转港冒充目的港。
-13. `transit_port` 与 `b_end_port` 严格区分：`transit_port` 只取中转港标签后的值，待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，只有原文真正缺失时才是 null。
+12. `b_end_dock` 只取**最终卸货港**（`目的港`/`卸货港`/`PORT OF DISCHARGE` 标签后的值）。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_dock`（如"中转港：INCHON"时 INCHON 不是目的港，应填入 `b_end_port`）；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_dock` 填 null（人工确认），禁止用中转港冒充目的港。
+13. `b_end_port` 只取**中转港**（`中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 标签后的值），与 `b_end_dock`（目的港）严格区分；待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，只有原文真正缺失时才是 null。
 """
 
 
@@ -806,7 +822,6 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
                 "b_factory_not": _normalize_text(data.get("b_factory_not")),
                 "b_start_dock": _normalize_text(data.get("b_start_dock")),
                 "b_end_port": _normalize_text(data.get("b_end_port")),
-                "transit_port": _normalize_text(data.get("transit_port")),
                 "b_end_dock": _normalize_text(data.get("b_end_dock")),
                 "b_wharf": _normalize_text(data.get("b_wharf")),
                 "b_open_ship_time": _normalize_date(data.get("b_open_ship_time")),
@@ -963,9 +978,11 @@ def parse_document_to_order(
         raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
     elif source_text:
         raw["c_title"] = _extract_header_company(source_text)
-    # 兜底修复：目的港误填中转港（如"中转港：INCHON"被当作目的港）
-    if raw_value := raw.get("b_end_port"):
-        raw["b_end_port"] = _revise_end_port(raw_value, source_text)
+    # 兜底修复：b_end_port（中转港）与 b_end_dock（目的港）互不混淆，
+    # 字段语义对齐订单创建接口文档：b_end_port=中转港、b_end_dock=目的港
+    raw["b_end_port"], raw["b_end_dock"] = _revise_port_fields(
+        raw.get("b_end_port"), raw.get("b_end_dock"), source_text
+    )
 
     extracted = normalize_document_extraction(raw)
     missing = _missing_fields(extracted)
