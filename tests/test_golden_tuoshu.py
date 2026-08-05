@@ -254,9 +254,14 @@ def test_kflse220216031_acceptance_baseline():
     assert issue_codes == [
         "missing_container_measurements",
         "carrier_by_mbl",
+        "notice_remark_restored",
     ]
     assert len(issue_codes) == len(set(issue_codes))
-    assert all(issue["blocking"] is True for issue in issues)
+    # 除 notice_remark_restored（内容已恢复，仅提醒确认）外均阻断下单
+    blocking_issues = [issue for issue in issues if issue["code"] != "notice_remark_restored"]
+    assert all(issue["blocking"] is True for issue in blocking_issues)
+    restored = next(issue for issue in issues if issue["code"] == "notice_remark_restored")
+    assert restored["blocking"] is False
     assert "unstructured_review_issue" not in issue_codes
 
 

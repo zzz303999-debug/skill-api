@@ -59,8 +59,8 @@ def test_normalize_bill_no_accepts_8_plus_alphanumeric():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "KMTCSHAP950393"})
     assert extracted.order_num1 == "KMTCSHAP950393"
 
-    extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "12345678"})
-    assert extracted.order_num1 == "12345678"
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "OOLU2120860080"})
+    assert extracted.order_num1 == "OOLU2120860080"
 
 
 @pytest.mark.parametrize(
@@ -69,6 +69,8 @@ def test_normalize_bill_no_accepts_8_plus_alphanumeric():
         "1234567",  # 不足 8 位
         "提单号1234567",  # 混合文字
         "1234_5678",  # 下划线视为非法字符
+        "12345678",  # 纯数字（电话/日期/内部编号）
+        "ABCDEFGH",  # 纯字母（船名/人名）
     ],
 )
 def test_normalize_bill_no_rejects_invalid(value):
@@ -79,6 +81,23 @@ def test_normalize_bill_no_rejects_invalid(value):
 def test_normalize_bill_no_strips_separators():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "KMTC SHAP-950393"})
     assert extracted.order_num1 == "KMTCSHAP950393"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # 中文间的 OCR 断字空格删除
+        ("上海凯福国际物流有限公 司", "上海凯福国际物流有限公司"),
+        ("上海凯 福国际物流有限公司", "上海凯福国际物流有限公司"),
+        # 英文公司名内部空格保留（如双词名）
+        ("XILINMEN GRID", "XILINMEN GRID"),
+        # 首尾空白去除
+        (" 海丰国际 ", "海丰国际"),
+    ],
+)
+def test_normalize_c_title_cleans_ocr_break_spaces(raw, expected):
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "c_title": raw})
+    assert extracted.c_title == expected
 
 
 def test_normalize_boxes_valid_types():
@@ -535,6 +554,25 @@ def test_parse_document_to_order_marks_missing_fields(monkeypatch):
     assert result["order_data"] is not None
     assert result["order_data"]["driver"] == [{}]
     assert result["order_data"]["c_title"] is None
+
+
+def test_parse_document_to_order_marks_vision_skipped(monkeypatch):
+    """vision 交叉核验因图片超限被跳过时，即使字段完整也必须要求人工确认。"""
+    def fake_convert_vision_degraded(file_bytes, filename):
+        markdown, doc_format, _, user_content = _fake_convert(file_bytes, filename)
+        return markdown, doc_format, {"vision_skipped_reason": "image_too_large"}, user_content
+
+    def fake_chat_json(messages, **_kwargs):
+        return dict(COMPLETE_RAW), {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "_convert_file", fake_convert_vision_degraded)
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+
+    assert result["missing_fields"] == []
+    assert result["needs_manual_confirmation"] is True
+    assert result["meta"]["vision_skipped_reason"] == "image_too_large"
 
 
 def test_parse_document_to_order_marks_invalid_values(monkeypatch):

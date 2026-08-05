@@ -148,9 +148,24 @@ def test_ip_and_user_agent_recorded():
         },
     )
     entry = _items(client.get("/api/logs").json())[0]
-    assert entry["ip"] == "203.0.113.7"
+    # 取 X-Forwarded-For 最后一个地址（nginx $proxy_add_x_forwarded_for 追加
+    # 语义下是离服务最近的代理看到的真实客户端 IP），客户端伪造前缀被忽略
+    assert entry["ip"] == "10.0.0.1"
     assert entry["x_forwarded_for"] == "203.0.113.7, 10.0.0.1"
     assert entry["user_agent"] == "audit-agent/1.0"
+
+
+def test_xff_spoofed_prefix_ignored_for_rate_limit():
+    """客户端伪造的 XFF 前缀不影响限流 key：取最后一个地址。"""
+    from app.main import _resolve_client_ip
+
+    client = TestClient(app)
+    response = client.get(
+        "/healthz",
+        headers={"x-forwarded-for": "1.2.3.4, 198.51.100.7"},
+    )
+    # TestClient 中 request 可从 app 中间件链路验证：直接检查解析函数行为
+    assert _resolve_client_ip(response.request)[0] == "198.51.100.7"
 
 
 def test_ip_falls_back_to_peer_when_proxy_not_trusted(monkeypatch):

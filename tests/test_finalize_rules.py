@@ -11,6 +11,55 @@ from app.skills.tuoshu.prompt import format_to_chat_text
 from app.skills.tuoshu.schema import TuoshuOutput
 
 
+def test_numbered_notice_remark_restored_when_model_missing():
+    """模型未输出编号内容时，从“请注意”列表恢复并合并进 remark。"""
+    source_text = (
+        "PO号：D0483/0908\n请注意：\n1、进港箱单全部打好。\n2、请务必准时到达！\n谢谢配合！\n"
+    )
+    result = finalize_extraction(
+        {
+            "remark": "PO号：D0483/0908",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    # 已有 remark 保留，编号列表追加，无重复
+    assert "PO号：D0483/0908" in result["remark"]
+    assert "1、进港箱单全部打好。" in result["remark"]
+    assert "2、请务必准时到达！" in result["remark"]
+    assert result["remark"].count("进港箱单全部打好") == 1
+    assert any(
+        issue["code"] == "notice_remark_restored" and issue["blocking"] is False
+        for issue in result["review_issues"]
+    )
+
+
+def test_numbered_notice_remark_not_duplicated_when_model_already_output():
+    """模型已自行输出编号分句时跳过恢复，避免 remark 重复。"""
+    source_text = (
+        "请注意：\n1、进港箱单全部打好。\n2、请务必准时到达！\n谢谢配合！\n"
+    )
+    model_remark = "请注意：1、进港箱单全部打好。2、请务必准时到达！"
+    result = finalize_extraction(
+        {
+            "remark": model_remark,
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["remark"] == model_remark
+    # 编号只出现一次，无 notice_remark_restored（跳过恢复不产生提示）
+    assert result["remark"].count("进港箱单全部打好") == 1
+    assert not any(
+        issue["code"] == "notice_remark_restored"
+        for issue in result["review_issues"]
+    )
+
+
 def test_invalid_optional_date_becomes_blocking_review_issue():
     result = finalize_extraction(
         {
@@ -115,7 +164,7 @@ def test_child_bill_aliases_never_fall_back_to_master_bill():
     assert result["ready_for_order"] is False
 
 
-@pytest.mark.parametrize("bill_no", ["12345678", "ABC12345", "HLCUSHA2111JWDA1"])
+@pytest.mark.parametrize("bill_no", ["ABC12345", "HLCUSHA2111JWDA1", "OOLU2120860080"])
 def test_valid_bill_number_formats_are_preserved(bill_no):
     result = finalize_extraction(
         {
@@ -130,7 +179,9 @@ def test_valid_bill_number_formats_are_preserved(bill_no):
     assert not any(issue["code"] == "invalid_mbl_no" for issue in result["review_issues"])
 
 
-@pytest.mark.parametrize("bill_no", ["1234567", "ABC-12345", "提单12345678"])
+@pytest.mark.parametrize(
+    "bill_no", ["1234567", "ABC-12345", "提单12345678", "12345678", "ABCDEFGH"]
+)
 def test_invalid_bill_number_formats_are_cleared(bill_no):
     result = finalize_extraction(
         {

@@ -78,9 +78,9 @@ def test_mbl_label_across_gap_restores():
 
 
 def test_mbl_restored_from_prefixed_label_value_line():
-    result = _finalize("_p5_ 提单号 : 8890207520\n托运人：某托运人公司")
+    result = _finalize("_p5_ 提单号 : MSKU8890207\n托运人：某托运人公司")
 
-    assert result["mbl_no"] == "8890207520"
+    assert result["mbl_no"] == "MSKU8890207"
     assert "mbl_no_by_format" in _issue_codes(result)
 
 

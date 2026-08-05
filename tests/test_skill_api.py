@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.core import registry
-from app.errors import ParseError
+from app.errors import ConvertError, ParseError
 from app.main import app
 from app.skills.tuoshu.chinese_schema import to_chinese
 from app.skills.tuoshu.prompt import format_to_chat_text
@@ -26,8 +26,9 @@ def test_upload_limit(monkeypatch):
         files={"file": ("a.xlsx", b"four", "application/octet-stream")},
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "file_too_large"
+    # 传输层硬限制优先：Content-Length 超限直接 413，不进入 handler
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
 
 
 def test_empty_upload_is_rejected_before_conversion():
@@ -426,6 +427,148 @@ def test_oversized_image_degrades_to_text_and_flags_manual_review(monkeypatch):
     )
     assert issue["blocking"] is True
     assert result["result"]["ready_for_order"] is False
+
+
+def test_oversized_image_without_ocr_text_rejected(monkeypatch):
+    """图片超限且无 OCR 文本（MinerU 未启用/失败）时拒绝，禁止空内容喂 LLM。"""
+    import app.skills.tuoshu.skill as skill_module
+    from app.document_parsers.models import ParsedPage, ParseResult
+
+    parse_result = ParseResult(
+        input_format="png",
+        pages=[
+            ParsedPage(
+                page_number=1,
+                parser="vision",
+                confidence="low",
+                # markdown 为空：等价于 mineru_enabled=False 或 MinerU 失败降级
+                vision_image=b"\x00" * (settings.vision_max_image_bytes + 1),
+                vision_mime="image/png",
+            )
+        ],
+    )
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+
+    with pytest.raises(ConvertError) as exc_info:
+        TuoshuSkill().run(
+            file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+        )
+    assert exc_info.value.code == "vision_image_too_large"
+
+
+def test_scan_pdf_vision_bytes_budget(monkeypatch):
+    """扫描 PDF 渲染出的 PNG 总字节超过 vision 上限时报错，而不是超限直传。"""
+    import app.skills.tuoshu.skill as skill_module
+
+    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
+    monkeypatch.setattr(
+        skill_module,
+        "render_pdf_pages",
+        lambda _file_bytes, **kwargs: [b"\x00" * (settings.vision_max_image_bytes // 2 + 1)] * 2,
+    )
+
+    with pytest.raises(ConvertError) as exc_info:
+        TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+    assert exc_info.value.code == "vision_image_too_large"
+
+
+def test_auth_middleware_enforces_api_key(monkeypatch):
+    """配置 API_KEY 后：未授权 401、正确凭证放行、豁免路径不校验。"""
+    monkeypatch.setattr(settings, "api_key", "test-secret-key")
+    try:
+        # 未携带凭证 → 401
+        resp = client.get("/healthz")  # 豁免路径
+        assert resp.status_code == 200
+        resp = client.get("/logs")  # 页面本身豁免（无数据），数据接口才需鉴权
+        assert resp.status_code == 200
+        resp = client.get("/api/logs")
+        assert resp.status_code == 401
+        assert resp.json()["error"]["code"] == "unauthorized"
+        # 错误凭证 → 401
+        resp = client.get("/api/logs", headers={"Authorization": "Bearer wrong"})
+        assert resp.status_code == 401
+        # 正确凭证（Bearer）→ 放行
+        resp = client.get("/api/logs", headers={"Authorization": "Bearer test-secret-key"})
+        assert resp.status_code == 200
+        # 正确凭证（X-API-Key）→ 放行
+        resp = client.get("/api/logs", headers={"X-API-Key": "test-secret-key"})
+        assert resp.status_code == 200
+    finally:
+        monkeypatch.setattr(settings, "api_key", "")
+
+
+def test_payload_too_large_rejected_at_transport_layer(monkeypatch):
+    """JSON 请求体 Content-Length 超限直接在传输层拦截，返回 413 且留有审计记录。"""
+    import app.access_log as access_log
+
+    monkeypatch.setattr(settings, "api_max_upload_bytes", 16)
+    resp = client.post(
+        "/orders",
+        json={"content": "x" * 100, "roomId": "room-1"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "payload_too_large"
+    # 声明式 413 同样必须落审计（修复前该路径无审计记录）
+    entries = access_log.query(limit=1, path="/orders", status=413)
+    assert entries["total"] >= 1
+    assert entries["items"][0]["error_code"] == "payload_too_large"
+
+
+def test_multipart_within_batch_limit_reaches_handler(monkeypatch):
+    """multipart 整包超过单文件限制但不超过批量上限时，传输层放行，
+    由 handler 逐文件校验（400 file_too_large 而非 413）。"""
+    monkeypatch.setattr(settings, "api_max_upload_bytes", 200)
+    resp = client.post(
+        "/skills/tuoshu/extract",
+        files={"file": ("big.bin", b"x" * 500, "application/octet-stream")},
+    )
+    # multipart 整包（≈700B）< 200×10=2000，不应被传输层 413 误伤
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "file_too_large"
+
+
+def test_server_busy_returns_503(monkeypatch):
+    """在途任务满载且排队超时时返回 503 server_busy（而非 500）。"""
+    import asyncio
+
+    import app.main as main
+
+    async def _never_acquire():
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(main._inflight_semaphore, "acquire", _never_acquire)
+    monkeypatch.setattr(settings, "skill_queue_wait_seconds", 0.05)
+    resp = client.post(
+        "/skills/tuoshu/extract",
+        files={"file": ("a.txt", b"hi", "text/plain")},
+    )
+    assert resp.status_code == 503
+    assert resp.json()["error"]["code"] == "server_busy"
+
+
+def test_payload_too_large_chunked_rejected_at_transport_layer(monkeypatch):
+    """无 Content-Length（chunked 编码）的 JSON 请求体超限同样返回 413 并留有审计记录。"""
+    import app.access_log as access_log
+
+    monkeypatch.setattr(settings, "api_max_upload_bytes", 16)
+
+    def _chunked_body():
+        yield b'{"content": "'
+        yield b"x" * 100
+        yield b'", "roomId": "room-1"}'
+
+    resp = client.post(
+        "/orders",
+        content=_chunked_body(),
+        headers={"content-type": "application/json"},
+    )
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "payload_too_large"
+    # 审计记录必须存在且状态为 413（修复前该场景无审计记录且返回 500）
+    entries = access_log.query(limit=1, path="/orders", status=413)
+    assert entries["total"] >= 1
+    last = entries["items"][0]
+    assert last["error_code"] == "payload_too_large"
 
 
 def test_skill_uses_deterministic_route_when_llm_misclassifies_doc_type(monkeypatch):
