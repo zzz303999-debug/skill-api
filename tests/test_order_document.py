@@ -620,6 +620,47 @@ def test_parse_document_to_order_fixes_transit_port_as_destination(monkeypatch):
     assert result["order_data"]["b_end_port"] == "BANDAR ABBAS"
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ({"transit_port": "见设"}, "见设"),
+        ({"transit_port": "见设备单"}, "见设备单"),
+        ({"transit_port": "ITTRS"}, "ITTRS"),
+        ({"transit_port": ""}, None),
+        ({}, None),
+    ],
+)
+def test_normalize_transit_port(raw, expected):
+    extracted = normalize_document_extraction(raw)
+    assert extracted.transit_port == expected
+
+
+def test_parse_document_to_order_keeps_transit_port(monkeypatch):
+    """parse-document 与 tuoshu 一致：目的港与中转港分别提取，互不混淆。"""
+    def fake_convert(file_bytes, filename):
+        markdown = ("做箱通知书\n做箱时间：2021-03-31\n做箱工厂：宝时得园龙\n"
+                    "地址：金泰路转诚泰路17号\n我司业务编号：ESFF21030770\n"
+                    "客户编号：8650135180\n船名航次：EVER LAUREL 28046W\n"
+                    "提单号：OOLU2120860080\n目的港：SANTOS\n中转港：见设\n"
+                    "港区：洋一\n船期：2021-04-03\n件数：680\n毛重：8602\n体积：33.92\n箱型箱量：1*40HC")
+        return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
+
+    def fake_chat_json(messages, **_kwargs):
+        raw = dict(COMPLETE_RAW)
+        raw["b_end_port"] = "SANTOS"
+        raw["transit_port"] = "见设"
+        raw["b_wharf"] = "洋一"
+        return raw, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "_convert_file", fake_convert)
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+
+    assert result["extracted"]["b_end_port"] == "SANTOS"
+    assert result["extracted"]["transit_port"] == "见设"
+
+
 def test_parse_document_to_order_marks_vision_skipped(monkeypatch):
     """vision 交叉核验因图片超限被跳过时，即使字段完整也必须要求人工确认。"""
     def fake_convert_vision_degraded(file_bytes, filename):

@@ -370,7 +370,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | `航次`/`船次`/`VOY`/`VOYAGE` | `b_ship_num` | null |
 | `船公司`/`CARRIER` | `b_ship_company` | null |
 | `目的港`/`卸货港`/`PORT OF DISCHARGE`（**最终卸货港**，不含中转港） | `b_end_port` | null |
-| `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT`（**非目的港**） | 无对应字段，忽略 | - |
+| `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` | `transit_port` | null |
 | 目的港下的码头/堆场名（如 FELIXSTOWE 后的具体码头） | `b_end_dock` | null |
 | `港区`/做箱港区 | `b_wharf` | null |
 | `启运港`/`装货港`/`PORT OF LOADING` | `b_start_dock` | null |
@@ -394,7 +394,8 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述。
 10. `b_open_ship_time` 与 `b_date` 是不同字段：前者是开船时间，后者是做箱/装箱日期，按标签严格区分，禁止混填；`b_open_ship_time` 同样输出 `YYYY-MM-DD`。
 11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
-12. `b_end_port` 只取**最终卸货港**。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_port`（如"中转港：INCHON"时 INCHON 不是目的港）；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_port` 填 null（人工确认），禁止用中转港冒充目的港。
+12. `b_end_port` 只取**最终卸货港**。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_port`（如"中转港：INCHON"时 INCHON 不是目的港），应填入 `transit_port`；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_port` 填 null（人工确认），禁止用中转港冒充目的港。
+13. `transit_port` 与 `b_end_port` 严格区分：`transit_port` 只取中转港标签后的值，待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，只有原文真正缺失时才是 null。
 """
 
 
@@ -805,6 +806,7 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
                 "b_factory_not": _normalize_text(data.get("b_factory_not")),
                 "b_start_dock": _normalize_text(data.get("b_start_dock")),
                 "b_end_port": _normalize_text(data.get("b_end_port")),
+                "transit_port": _normalize_text(data.get("transit_port")),
                 "b_end_dock": _normalize_text(data.get("b_end_dock")),
                 "b_wharf": _normalize_text(data.get("b_wharf")),
                 "b_open_ship_time": _normalize_date(data.get("b_open_ship_time")),
