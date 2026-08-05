@@ -43,8 +43,9 @@ _CONTAINER_TYPE_RE = re.compile(
 )
 _CONTAINER_SUFFIXES = frozenset(STANDARD_CONTAINER_SUFFIXES)
 
-# 提单号：纯数字或字母数字，至少 8 位
-_BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
+# 提单号：字母数字混合且同时包含字母与数字，至少 8 位；
+# 排除纯数字（电话/日期/内部编号）与纯字母（船名/人名）
+_BILL_NO_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{8,}$")
 
 # 日期：YYYY-MM-DD
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -338,7 +339,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 
 # 抽取规则
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
-2. `order_num1` 必须为纯数字或字母数字组合且至少 8 位；不得保留空格、连字符或其他符号；不符合时填 null。
+2. `order_num1` 必须为字母数字混合（同时含字母与数字）且至少 8 位；不得保留空格、连字符或其他符号；纯数字（如电话号码）与纯字母串不算提单号，不符合时填 null。
 3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出。
 4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title；文件名不是原文，**禁止**从文件名前缀推断 c_title。
 5. `factory_bei` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
@@ -438,6 +439,19 @@ def _convert_file(
             images = list(parse_result.vision_inputs)
             total_image_bytes = sum(len(image) for image, _ in images)
             if total_image_bytes > settings.vision_max_image_bytes:
+                if not source_text:
+                    # 无 OCR 文本可降级时，绝不能把空文档喂给 LLM——模型会输出
+                    # 整份捏造数据。直接拒绝并提示压缩/拆分图片。
+                    raise ConvertError(
+                        "image exceeds the vision upload limit and no OCR text is "
+                        "available; compress or split the image and retry",
+                        code="vision_image_too_large",
+                        details={
+                            "file": Path(filename).name,
+                            "bytes": total_image_bytes,
+                            "max_bytes": settings.vision_max_image_bytes,
+                        },
+                    )
                 conversion_meta["vision_skipped_reason"] = "image_too_large"
                 user_content = _build_user_message_text(
                     source_text or "", filename, doc_format
@@ -485,6 +499,19 @@ def _convert_file(
             max_pages=settings.vision_max_pdf_pages,
             scale=settings.vision_pdf_render_scale,
         )
+        total_image_bytes = sum(len(image) for image in page_images)
+        if total_image_bytes > settings.vision_max_image_bytes:
+            # 渲染出的 PNG 总字节同样受 vision 直传上限约束，超限时报错提示拆分
+            raise ConvertError(
+                "rendered scan pages exceed the vision upload limit; "
+                "split the PDF into smaller parts and retry",
+                code="vision_image_too_large",
+                details={
+                    "file": Path(filename).name,
+                    "bytes": total_image_bytes,
+                    "max_bytes": settings.vision_max_image_bytes,
+                },
+            )
         data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
         conversion_meta = {
             "parser": "vision",
@@ -498,15 +525,20 @@ def _convert_file(
     source_text = str(markdown)
     if parse_result is not None and parse_result.vision_images:
         images = list(parse_result.vision_inputs)
-        data_urls = [
-            image_to_data_url(image, mime=mime) for image, mime in images
-        ]
-        user_content = _build_user_message_vision(
-            data_urls,
-            filename,
-            doc_format,
-            parsed_text=source_text,
-        )
+        total_image_bytes = sum(len(image) for image, _ in images)
+        if total_image_bytes > settings.vision_max_image_bytes:
+            conversion_meta["vision_skipped_reason"] = "image_too_large"
+            user_content = _build_user_message_text(source_text, filename, doc_format)
+        else:
+            data_urls = [
+                image_to_data_url(image, mime=mime) for image, mime in images
+            ]
+            user_content = _build_user_message_vision(
+                data_urls,
+                filename,
+                doc_format,
+                parsed_text=source_text,
+            )
     else:
         user_content = _build_user_message_text(source_text, filename, doc_format)
     return source_text, doc_format, conversion_meta, user_content
@@ -672,6 +704,19 @@ def _normalize_text(value: Any) -> str | None:
     return cleaned or None
 
 
+# 中文字符之间的 OCR 断字空格（如“上海凯福国际物流有限公 司”），
+# 仅删除“汉字+空格+汉字”形态；英文公司名（如 XILINMEN GRID）不受影响
+_CN_INTERNAL_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])")
+
+
+def _normalize_c_title(value: Any) -> str | None:
+    """客户名称：去首尾空白，并删除中文字符之间的 OCR 断字空格。"""
+    cleaned = _normalize_text(value)
+    if not cleaned:
+        return None
+    return _CN_INTERNAL_SPACE_RE.sub("", cleaned)
+
+
 def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtraction:
     """把 LLM raw dict 归一到 OrderDocumentExtraction 并做值校验。"""
     order_num1 = _normalize_bill_no(data.get("order_num1"))
@@ -703,7 +748,7 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
         return OrderDocumentExtraction.model_validate(
             {
                 "order_num1": order_num1,
-                "c_title": _normalize_text(data.get("c_title")),
+                "c_title": _normalize_c_title(data.get("c_title")),
                 "c_name": _normalize_text(data.get("c_name")),
                 "c_phone": _normalize_text(data.get("c_phone")),
                 "b_ship_name": _normalize_text(data.get("b_ship_name")),
@@ -887,11 +932,14 @@ def parse_document_to_order(
             "order_created": False,
         }
     )
+    # vision 交叉核验被跳过（图片超限降级）时同样要求人工确认，
+    # 与 skill 端 blocking issue 的口径保持一致
+    vision_degraded = "vision_skipped_reason" in conversion_meta
     return {
         "file": filename,
         "extracted": extracted.model_dump(),
         "order_data": order_data,
-        "needs_manual_confirmation": bool(missing),
+        "needs_manual_confirmation": bool(missing) or vision_degraded,
         "missing_fields": missing,
         "missing_reasons": missing_reasons,
         "meta": safe_meta,

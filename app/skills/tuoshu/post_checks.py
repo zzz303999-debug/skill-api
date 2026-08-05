@@ -52,7 +52,10 @@ _DATE_ONLY_RE = re.compile(DATE_PATTERN)
 _DATE_OR_DATETIME_RE = re.compile(DATE_OR_DATETIME_PATTERN)
 
 
-_BILL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
+# 提单号：字母数字混合且同时包含字母与数字，至少 8 位。
+# 排除纯数字（电话/日期/内部编号）与纯字母（船名/人名），
+# 与 _restore_mbl_no_from_source 及 prompt 的“排除纯数字”规则保持一致。
+_BILL_NO_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{8,}$")
 
 
 _PACKAGE_UNIT_ALIASES = {
@@ -184,6 +187,10 @@ def _validate_shipper_company(
     *,
     template_hint: str | None,
 ) -> None:
+    if not source_text:
+        # vision-only 输入：LLM 直接看图提取的值是合法来源，不做原文核对；
+        # 此类输入自带 vision_only_unverified blocking issue，人工必复核。
+        return
     labels = ("托运人公司", "托运人", "发货人公司", "发货公司", "发货人", "SHIPPER")
     explicit_values = _extract_explicit_values(source_text, labels) if source_text else []
     # 做箱工厂是门点工厂，不是客户/托运人；客户只认 FM/FROM、客户栏或抬头公司
@@ -264,6 +271,10 @@ def _ground_remark_value(
     source_text: str | None,
     issues: list[dict[str, Any]],
 ) -> None:
+    if not source_text:
+        # vision-only 输入：没有 OCR/转换文本可逐字核对，保留模型从图片
+        # 直接提取的值；该类输入自带 blocking issue 强制人工复核。
+        return
     value = target.get("remark")
     if not isinstance(value, str) or not value.strip():
         return

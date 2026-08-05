@@ -209,8 +209,21 @@ class TuoshuSkill(SkillBase):
                 images = list(parse_result.vision_inputs)
                 total_image_bytes = sum(len(image) for image, _ in images)
                 if total_image_bytes > settings.vision_max_image_bytes:
+                    if not source_text:
+                        # 无 OCR 文本可降级时，绝不能把空文档喂给 LLM——模型会输出
+                        # 整份捏造数据。直接拒绝并提示压缩/拆分图片。
+                        raise ConvertError(
+                            "image exceeds the vision upload limit and no OCR text is "
+                            "available; compress or split the image and retry",
+                            code="vision_image_too_large",
+                            details={
+                                "file": Path(filename).name,
+                                "bytes": total_image_bytes,
+                                "max_bytes": settings.vision_max_image_bytes,
+                            },
+                        )
                     # 原图 base64 直传会超网关请求体限制（base64 膨胀约 1/3）；
-                    # 降级为纯文本抽取并标记必须人工复核
+                    # 有 OCR 文本时降级为纯文本抽取并标记必须人工复核
                     parser_review_issues.append(
                         {
                             "code": "vision_image_too_large",
@@ -299,6 +312,20 @@ class TuoshuSkill(SkillBase):
                     max_pages=settings.vision_max_pdf_pages,
                     scale=settings.vision_pdf_render_scale,
                 )
+                total_image_bytes = sum(len(image) for image in page_images)
+                if total_image_bytes > settings.vision_max_image_bytes:
+                    # 渲染出的 PNG 总字节同样受 vision 直传上限约束，
+                    # 超限时报错提示拆分，避免网关拒绝与内存峰值。
+                    raise ConvertError(
+                        "rendered scan pages exceed the vision upload limit; "
+                        "split the PDF into smaller parts and retry",
+                        code="vision_image_too_large",
+                        details={
+                            "file": Path(filename).name,
+                            "bytes": total_image_bytes,
+                            "max_bytes": settings.vision_max_image_bytes,
+                        },
+                    )
                 data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
                 parser_review_issues.extend(
                     {
@@ -333,17 +360,51 @@ class TuoshuSkill(SkillBase):
             elif parse_result is not None and parse_result.vision_images:
                 source_text = str(markdown) or None
                 route_text = f"{filename}\n{source_text or ''}"
-                data_urls = [
-                    image_to_data_url(image, mime=mime)
-                    for image, mime in parse_result.vision_inputs
-                ]
-                user_content = build_user_message_vision(
-                    data_urls,
-                    filename=filename,
-                    doc_format=doc_format,
-                    extracted_at=extracted_at,
-                    parsed_text=source_text,
-                )
+                images = list(parse_result.vision_inputs)
+                total_image_bytes = sum(len(image) for image, _ in images)
+                if total_image_bytes > settings.vision_max_image_bytes:
+                    if not source_text:
+                        raise ConvertError(
+                            "parsed images exceed the vision upload limit and no OCR "
+                            "text is available; split the document and retry",
+                            code="vision_image_too_large",
+                            details={
+                                "file": Path(filename).name,
+                                "bytes": total_image_bytes,
+                                "max_bytes": settings.vision_max_image_bytes,
+                            },
+                        )
+                    parser_review_issues.append(
+                        {
+                            "code": "vision_image_too_large",
+                            "field": "source",
+                            "message": (
+                                f"解析出的图片总大小 {total_image_bytes} 字节超过 vision "
+                                f"直传上限 {settings.vision_max_image_bytes} 字节，"
+                                "已跳过 LLM vision 交叉核验，必须人工复核"
+                            ),
+                            "source_values": [],
+                            "blocking": True,
+                        }
+                    )
+                    user_content = build_user_message_text(
+                        source_text or "",
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                    )
+                else:
+                    data_urls = [
+                        image_to_data_url(image, mime=mime)
+                        for image, mime in images
+                    ]
+                    user_content = build_user_message_vision(
+                        data_urls,
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                        parsed_text=source_text,
+                    )
             else:
                 source_text = str(markdown)
                 route_text = f"{filename}\n{markdown}"

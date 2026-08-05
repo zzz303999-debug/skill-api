@@ -130,6 +130,7 @@ _KNOWN_REVIEW_ISSUE_CODES = _ALWAYS_BLOCKING_CODES | {
     "formula_value_unavailable",
     "embedded_image_unprocessed",
     "embedded_image_requires_review",
+    "notice_remark_restored",
     "legacy_xls_formula_unverified",
     "document_value_unclear",
 }
@@ -372,7 +373,18 @@ def _apply_template_field_overrides(
         return
 
 
-def _restore_numbered_notice_remark(data: dict[str, Any], source_text: str) -> None:
+def _restore_numbered_notice_remark(
+    data: dict[str, Any], source_text: str, issues: list[dict[str, Any]]
+) -> None:
+    """把“请注意”编号列表合并进 remark（保留已有内容），并提示人工确认。
+
+    旧实现直接覆盖 data["remark"]，会把 LLM 已提取的 PO 号、装柜要求等
+    备注内容整体丢弃；编号格式不匹配时还会把 remark 清空，且不产生任何
+    review issue，属于静默数据丢失。改为合并去重并追加非阻断提示。
+
+    若模型已自行输出编号分句（新模型常直接复述“请注意”列表），跳过
+    恢复，避免编号内容重复出现。
+    """
     lines = [
         _MARKDOWN_PARAGRAPH_PREFIX_RE.sub("", raw_line.strip()).strip()
         for raw_line in source_text.splitlines()
@@ -395,10 +407,46 @@ def _restore_numbered_notice_remark(data: dict[str, Any], source_text: str) -> N
 
     if not numbered:
         return
+
+    existing_clauses: list[str] = []
+    existing = data.get("remark")
+    if isinstance(existing, str) and existing.strip():
+        existing_clauses = [
+            part.strip() for part in re.split(r"[；;\n]+", existing) if part.strip()
+        ]
+    # 模型已输出“请注意”编号列表（如“请注意：1、进港箱单全部打好。”）时
+    # 跳过恢复，避免编号内容重复出现
+    if any(
+        "请注意" in clause and re.search(r"\d+[、.]", clause)
+        for clause in existing_clauses
+    ):
+        return
+
     pickup = re.search(r"提箱码\s*[：:]?\s*([^\n|]+)", source_text)
-    parts = [f"提箱码：{pickup.group(1).strip()}"] if pickup else []
-    parts.extend(numbered)
-    data["remark"] = "；".join(parts)
+    restored_clauses: list[str] = []
+    if pickup:
+        restored_clauses.append(f"提箱码：{pickup.group(1).strip()}")
+    restored_clauses.extend(numbered)
+
+    merged = list(existing_clauses)
+    for clause in restored_clauses:
+        if clause not in merged:
+            merged.append(clause)
+    data["remark"] = "；".join(merged) or None
+
+    message = (
+        "已从“请注意”编号列表恢复备注并保留原备注内容，请确认"
+        if existing_clauses
+        else "已从“请注意”编号列表恢复备注，请确认"
+    )
+    _append_issue(
+        issues,
+        code="notice_remark_restored",
+        field="remark",
+        message=message,
+        source_values=restored_clauses,
+        blocking=False,
+    )
 
 
 def finalize_extraction(
@@ -423,7 +471,7 @@ def finalize_extraction(
         data["raw_text_snippet"] = source_text[:200]
         _restore_explicit_header_fields(data, source_text, issues, reference_year, explicit_carriers)
         _apply_template_field_overrides(data, source_text, template_hint)
-        _restore_numbered_notice_remark(data, source_text)
+        _restore_numbered_notice_remark(data, source_text, issues)
         _validate_sender_contact(data, source_text, issues)
         for field in _PERSON_FIELDS:
             value = _field_value(data, field)

@@ -652,14 +652,20 @@ def parse_date_or_none(value: str, *, allow_time: bool = False) -> str | None:
 
 
 def extract_number(value: str | None, *, integer: bool = False) -> int | float | None:
-    """Extract the first number embedded in a value (e.g. ``约 1200 KG``)."""
+    """Extract the first number embedded in a value (e.g. ``约 1200 KG``).
+
+    ``integer=True`` 时只接受整数：非整数值（如 1200.5）返回 None，
+    避免 float 落入 int 字段导致整份结果 schema 校验失败（502）。
+    """
     if not value:
         return None
     match = re.search(r"-?\d+(?:\.\d+)?", value.replace(",", ""))
     if not match:
         return None
     number = float(match.group(0))
-    return int(number) if integer and number.is_integer() else number
+    if integer:
+        return int(number) if number.is_integer() else None
+    return number
 
 
 # LLM 口语化数字常见的前缀词与尾部修饰词
