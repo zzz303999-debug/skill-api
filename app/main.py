@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import math
 import time
 import uuid
@@ -27,7 +28,12 @@ from app import access_log, rate_limit
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
-from app.errors import ERROR_CODE_DESCRIPTIONS, BadRequestError, SkillAPIError
+from app.errors import (
+    ERROR_CODE_DESCRIPTIONS,
+    BadRequestError,
+    ServiceBusyError,
+    SkillAPIError,
+)
 from app.logging_conf import get_logger, setup_logging
 from app.orders import (
     CreateOrderFromTextRequest,
@@ -55,9 +61,17 @@ _skill_executor = ThreadPoolExecutor(
     max_workers=settings.skill_max_concurrency,
     thread_name_prefix="skill-runner",
 )
+# 在途任务信号量：与线程池 worker 数一致，防止无界排队导致内存膨胀
+_inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 # 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
 _SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
+
+# 鉴权豁免路径：健康检查、OpenAPI 文档与日志页面本身（页面无数据）；
+# /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
+_AUTH_FREE_PATHS = frozenset(
+    {"/healthz", "/skills", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/logs"}
+)
 
 
 # 请求限流（内存滑动窗口，按客户端 IP；单进程部署下精确）
@@ -80,14 +94,18 @@ _LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
 def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
     """解析客户端 IP，返回 (客户端IP, 原始X-Forwarded-For头)。
 
-    云服务前面通常有 nginx/负载均衡，access_log_trust_proxy 开启时优先取
-    X-Forwarded-For 的第一个地址（真实客户端），其次 X-Real-IP；
-    均不存在或未开启信任时回退到直连地址。
+    云服务前面通常有 nginx/负载均衡，access_log_trust_proxy 开启时：
+    - X-Forwarded-For 存在时取**最后一个**地址（nginx `$proxy_add_x_forwarded_for`
+      是追加语义，最后一个即离本服务最近的代理看到的真实客户端 IP）；
+      客户端自行伪造的前缀地址被忽略，限流与审计 IP 不可被污染；
+    - 其次 X-Real-IP；均不存在或未开启信任时回退到直连地址。
     """
     forwarded = request.headers.get("x-forwarded-for")
     if settings.access_log_trust_proxy:
         if forwarded:
-            return forwarded.split(",")[0].strip(), forwarded
+            parts = [part.strip() for part in forwarded.split(",") if part.strip()]
+            if parts:
+                return parts[-1], forwarded
         real_ip = request.headers.get("x-real-ip")
         if real_ip:
             return real_ip.strip(), forwarded
@@ -123,23 +141,97 @@ async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
     return await call_next(request)
 
 
+class _RequestBodyTooLarge(Exception):
+    """请求体超过传输层上限（含 chunked 无 Content-Length 场景）。"""
+
+
+async def _read_stream_limited(request: Request, max_bytes: int) -> bytes | None:
+    """流式读取请求体，超过 max_bytes 时返回 None（不继续消费）。
+
+    返回 None 表示超限（外层转 413）；读取过程中的真实异常（客户端中断、
+    协议错误等）直接上抛，避免把故障误报为 payload_too_large。
+    """
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > max_bytes:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@app.middleware("http")
+async def _auth_middleware(request: Request, call_next: Callable) -> Any:
+    """接口鉴权：配置了 api_key 时校验 Bearer / X-API-Key。
+
+    注册在 access_log 与 rate_limit 之间：未授权请求同样留下审计记录，
+    且不消耗限流配额。未配置 api_key 时直接放行（仅限可信内网部署）。
+    """
+    if not settings.api_key:
+        return await call_next(request)
+    if request.url.path in _AUTH_FREE_PATHS:
+        return await call_next(request)
+    # 常量时间比较，避免时序侧信道泄露 api_key 信息
+    auth = request.headers.get("authorization", "")
+    auth_ok = False
+    if auth.startswith("Bearer "):
+        auth_ok = hmac.compare_digest(auth[7:].encode(), settings.api_key.encode())
+    header_key = request.headers.get("x-api-key")
+    if not auth_ok and header_key:
+        auth_ok = hmac.compare_digest(header_key.encode(), settings.api_key.encode())
+    if auth_ok:
+        return await call_next(request)
+    request.state.error_code = "unauthorized"
+    request.state.error_detail = {
+        "code": "unauthorized",
+        "message": "invalid or missing API key",
+        "description": ERROR_CODE_DESCRIPTIONS["unauthorized"],
+        "details": None,
+    }
+    return JSONResponse(
+        status_code=401,
+        content={
+            "error": {
+                "code": "unauthorized",
+                "message": "invalid or missing API key",
+                "description": ERROR_CODE_DESCRIPTIONS["unauthorized"],
+                "details": None,
+            }
+        },
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 async def _read_json_body(request: Request) -> tuple[str | None, bool]:
     """读取 JSON 请求体用于审计，返回 (body文本, 是否被截断)。
 
     只处理 application/json（如 POST /orders）；文件上传等 multipart 请求
     不读 body，避免破坏文件流。读取后缓存回 request，FastAPI 后续解析
-    body 参数时直接命中缓存，行为与不读时一致。超限请求不读取不记录。
+    body 参数时直接命中缓存，行为与不读时一致。
+    Content-Length 超限/非法或 chunked 读取超限时抛 _RequestBodyTooLarge，
+    由外层中间件统一返回 413。
     """
     content_type = request.headers.get("content-type", "").lower()
     if not content_type.startswith("application/json"):
         return None, False
-    try:
-        length = int(request.headers.get("content-length", "0") or "0")
-    except ValueError:
+    length_header = request.headers.get("content-length", "")
+    if length_header:
+        try:
+            length = int(length_header)
+        except ValueError:
+            length = -1
+        if length < 0 or length > settings.api_max_upload_bytes:
+            raise _RequestBodyTooLarge()
+    else:
         length = 0
-    if length <= 0 or length > settings.api_max_upload_bytes:
-        return None, False
-    raw = await request.body()
+    if length <= 0:
+        # chunked 请求：流式限读，超限抛错
+        raw = await _read_stream_limited(request, settings.api_max_upload_bytes)
+        if raw is None:
+            raise _RequestBodyTooLarge()
+    else:
+        raw = await request.body()
     request._body = raw  # 缓存，供 handler 复用
     text = raw.decode("utf-8", errors="replace")
     max_chars = settings.access_log_body_max_chars
@@ -186,12 +278,29 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
     client_ip, forwarded_for = _resolve_client_ip(request)
     body_text, body_truncated = None, False
-    if settings.access_log_record_body:
-        body_text, body_truncated = await _read_json_body(request)
     start = time.perf_counter()
     status_code = 500
     response_text, response_truncated = None, False
     try:
+        # 传输层硬限制：Content-Length 超限/非法直接 413，避免 Starlette 把
+        # 超大 body 全量读入内存导致 OOM。multipart 按批量上限放宽（单文件
+        # 大小仍由 handler 逐文件校验），避免 10×2MB 批量上传被整包拒绝。
+        content_length_header = request.headers.get("content-length")
+        if content_length_header is not None:
+            try:
+                declared = int(content_length_header)
+            except ValueError:
+                declared = -1
+            transport_limit = settings.api_max_upload_bytes
+            if request.headers.get("content-type", "").lower().startswith("multipart/"):
+                transport_limit = settings.api_max_upload_bytes * settings.api_batch_max_files
+            if declared < 0 or declared > transport_limit:
+                request.state.payload_max_bytes = transport_limit
+                raise _RequestBodyTooLarge()
+        # 请求体读取也可能抛 _RequestBodyTooLarge（chunked 超限），
+        # 必须在 try 内，统一返回 413 且 finally 仍会记录审计
+        if settings.access_log_record_body:
+            body_text, body_truncated = await _read_json_body(request)
         response = await call_next(request)
         status_code = response.status_code
         if settings.access_log_record_response:
@@ -204,6 +313,31 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
                 # content-length 不匹配；直接抛出使请求走 500，避免静默损坏响应
                 log.exception("access_log_response_capture_failed")
                 raise
+    except _RequestBodyTooLarge:
+        # 请求体超限（声明式 Content-Length 或 chunked 流式读取）：统一返回 413，
+        # 与 try 内其他路径一致，finally 仍会记录审计
+        status_code = 413
+        max_bytes = getattr(
+            request.state, "payload_max_bytes", settings.api_max_upload_bytes
+        )
+        request.state.error_code = "payload_too_large"
+        request.state.error_detail = {
+            "code": "payload_too_large",
+            "message": "request body too large",
+            "description": ERROR_CODE_DESCRIPTIONS["payload_too_large"],
+            "details": {"max_bytes": max_bytes},
+        }
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": {
+                    "code": "payload_too_large",
+                    "message": "request body too large",
+                    "description": ERROR_CODE_DESCRIPTIONS["payload_too_large"],
+                    "details": {"max_bytes": max_bytes},
+                }
+            },
+        )
     except Exception:
         raise
     finally:
@@ -347,9 +481,28 @@ async def _read_upload(file: UploadFile) -> bytes:
 
 
 async def _run_in_executor(call: Callable[[], Any]) -> Any:
-    """在有界线程池中执行同步调用，避免阻塞事件循环。"""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_skill_executor, call)
+    """在有界线程池中执行同步调用，避免阻塞事件循环。
+
+    在途任务数受 skill_max_concurrency 限制：超限的新请求最多排队
+    skill_queue_wait_seconds 秒，仍无空位则返回 503 server_busy，
+    防止 LLM/转换任务（持有大文件字节）无界堆积耗尽内存。
+    """
+    try:
+        await asyncio.wait_for(
+            _inflight_semaphore.acquire(),
+            timeout=settings.skill_queue_wait_seconds,
+        )
+    except TimeoutError:
+        raise ServiceBusyError("server is busy, too many concurrent tasks") from None
+    except ValueError:
+        # wait_for 超时取消与 release() 的竞争：等待者 future 已被弹出，
+        # acquire 未成功，按繁忙处理（避免裸 500）
+        raise ServiceBusyError("server is busy, too many concurrent tasks") from None
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_skill_executor, call)
+    finally:
+        _inflight_semaphore.release()
 
 
 async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
@@ -426,7 +579,7 @@ async def parse_order_document(
 ) -> dict[str, Any]:
     """上传附件（托书/做箱通知等），转换为下单接口字段但不实际下单。
 
-    必填字段：提单号（≥8 位纯数字或字母数字）、箱型（4 位）、客户、
+    必填字段：提单号（≥8 位字母数字混合，须同时含字母与数字）、箱型（4 位）、客户、
     地址、做箱日期、件数、毛重、体积。字段缺失或格式不合法时不报错，
     返回 200 + needs_manual_confirmation=true + missing_fields（缺失字段）
     + missing_reasons（缺失原因：原文未找到，请人工确认 / 格式不合法）。

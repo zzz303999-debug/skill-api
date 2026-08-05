@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 使用基于 __file__ 的绝对路径，避免工作目录不同导致 .env 无法加载
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
@@ -19,6 +20,10 @@ class Settings(BaseSettings):
     api_max_upload_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
     api_batch_max_files: int = Field(default=10, ge=1, le=100)
     skill_max_concurrency: int = Field(default=4, ge=1, le=64)
+    # 在途任务满时新请求排队等待的最长秒数，超时返回 503 server_busy
+    skill_queue_wait_seconds: float = Field(default=10.0, ge=0, le=300)
+    # 接口访问凭证（Bearer / X-API-Key）。生产必须设置；为空时不启用鉴权（仅限可信内网）
+    api_key: str = ""
 
     # 订单创建接口
     order_api_url: str = "https://pre-s3.jxt56.com/Car/publishCreateOrder"
@@ -67,6 +72,13 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("./storage")
     # 审计场景建议调大（如 720 = 30 天），保证留痕可追溯
     storage_keep_hours: int = 24
+
+    @field_validator("storage_dir")
+    @classmethod
+    def _resolve_storage_dir(cls, value: Path) -> Path:
+        """相对路径统一基于项目根目录解析，避免依赖进程 CWD（容器内 CWD 可能变化）。"""
+        path = Path(value)
+        return path if path.is_absolute() else _PROJECT_ROOT / path
 
     # 请求访问日志（审计）
     # 是否记录 JSON 请求体内容；云服务审计建议保持开启

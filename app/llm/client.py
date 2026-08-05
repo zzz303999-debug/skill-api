@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 from typing import Any
 
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
@@ -22,6 +23,8 @@ _client: OpenAI | None = None
 _json_schema_supported: bool | None = None
 # 网关/模型是否接受 thinking 参数；None=未知，False=已确认不支持（降级重试后缓存）
 _thinking_disabled_supported: bool | None = None
+# 上述全局状态的互斥锁（skill 在多个线程池线程中并发调用）
+_state_lock = threading.Lock()
 
 # 上游错误文本截断长度，避免超大响应体刷日志/响应
 _UPSTREAM_ERROR_MAX_CHARS = 500
@@ -39,12 +42,14 @@ def _upstream_details(e: Exception, *, status: int | None = None) -> dict[str, A
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(
-            base_url=settings.llm_base_url,
-            api_key=settings.llm_api_key,
-            timeout=settings.llm_timeout_seconds,
-            max_retries=settings.llm_max_retries,
-        )
+        with _state_lock:
+            if _client is None:
+                _client = OpenAI(
+                    base_url=settings.llm_base_url,
+                    api_key=settings.llm_api_key,
+                    timeout=settings.llm_timeout_seconds,
+                    max_retries=settings.llm_max_retries,
+                )
     return _client
 
 

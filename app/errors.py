@@ -23,6 +23,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "bad_request": "请求参数或上传内容不合法，请检查后重试",
     # ---- 上传/文件校验 ----
     "file_too_large": "上传文件超过大小限制，请压缩或拆分后重试",
+    "payload_too_large": "请求体超过大小限制，请压缩或拆分后重试",
     "empty_file": "上传文件为空，请重新上传有效文件",
     "text_too_large": "文本内容超过大小限制，请精简后重试",
     "empty_batch": "批量接口未收到任何文件，请至少上传一个文件",
@@ -41,6 +42,11 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "order_upstream_error": "订单系统拒绝了请求或不可达，请稍后重试",
     # ---- 限流 ----
     "rate_limited": "请求过于频繁，已被限流，请稍后重试",
+    "server_busy": "服务繁忙（并发处理任务已满），请稍后重试",
+    # ---- 鉴权 ----
+    "unauthorized": "未授权访问，请提供有效的访问凭证（API Key）",
+    # ---- Vision ----
+    "vision_image_too_large": "图片超过 vision 直传上限且无 OCR 文本可用，请压缩或拆分图片后重试",
     # ---- 内容解析 ----
     "parse_error": "内容解析失败（LLM 未返回有效 JSON 或结构不匹配），请检查文件内容",
     "llm_error": "LLM 调用失败（模型未返回有效内容）；常见原因：文件类型不受支持、内容无法解析、模型异常，请检查上传文件",
@@ -99,6 +105,13 @@ class LLMError(SkillAPIError):
 
     http_status = 502
     code = "llm_error"
+
+
+class ServiceBusyError(SkillAPIError):
+    """503：服务繁忙（在途任务已满，排队超时）。"""
+
+    http_status = 503
+    code = "server_busy"
 
 
 class ParseError(SkillAPIError):

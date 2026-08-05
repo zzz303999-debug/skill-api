@@ -181,7 +181,28 @@ const expandedIds = new Set();
 
 const $ = (id) => document.getElementById(id);
 
-/* ---------- 工具 ---------- */
+/* ---------- 鉴权 ---------- */
+
+function getApiToken() {
+  return localStorage.getItem("skill-api-token") || "";
+}
+
+async function apiFetch(url) {
+  /* 携带本地保存的 API Key（Authorization: Bearer）；401 时提示输入后重试 */
+  let resp = await fetch(url, { headers: authHeaders() });
+  if (resp.status === 401) {
+    const token = prompt("该接口需要 API Key，请输入：", getApiToken());
+    if (!token) throw new Error("HTTP 401");
+    localStorage.setItem("skill-api-token", token);
+    resp = await fetch(url, { headers: { "Authorization": "Bearer " + token } });
+  }
+  return resp;
+}
+
+function authHeaders() {
+  const token = getApiToken();
+  return token ? { "Authorization": "Bearer " + token } : {};
+}
 
 function getLimit() {
   return parseInt($("f-limit").value, 10) || DEFAULT_LIMIT;
@@ -401,7 +422,7 @@ async function load(reset) {
   if (busy) return;
   busy = true;
   try {
-    const resp = await fetch("/api/logs?" + buildParams(reset).toString());
+    const resp = await apiFetch("/api/logs?" + buildParams(reset).toString());
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
     total = data.total;
@@ -469,7 +490,7 @@ async function exportAll() {
     while (true) {
       params.set("limit", page);
       params.set("offset", off);
-      const resp = await fetch("/api/logs?" + params.toString());
+      const resp = await apiFetch("/api/logs?" + params.toString());
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const data = await resp.json();
       items.push(...data.items);
