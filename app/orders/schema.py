@@ -96,7 +96,7 @@ class DocumentBoxItem(BaseModel):
 
 
 class DocumentCargoItem(BaseModel):
-    """附件文档抽取的货物明细行（不含货名/唛头）。"""
+    """附件文档抽取的货物明细行。"""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -106,6 +106,8 @@ class DocumentCargoItem(BaseModel):
     j: str | None = Field(None, description="件数，纯数字字符串")
     m: str | None = Field(None, description="毛重，纯数字字符串")
     t: str | None = Field(None, description="体积，纯数字字符串")
+    hh: str | None = Field(None, description="货名")
+    mt: str | None = Field(None, description="唛头")
 
 
 class OrderDocumentExtraction(BaseModel):
@@ -143,6 +145,9 @@ class OrderDocumentExtraction(BaseModel):
     b_wharf: str | None = Field(None, description="港区")
     b_open_ship_time: str | None = Field(None, description="开船时间，YYYY-MM-DD")
     b_date: str | None = Field(None, description="做箱日期，YYYY-MM-DD")
+    b_date_time_start: str | None = Field(
+        None, description="装箱时间描述（如 早上8点/9:00），日期归 b_date"
+    )
     c_sn: str | None = Field(None, description="内部编号")
     c_note: str | None = Field(None, description="备注/注意事项")
     packages: str | None = Field(None, description="件数，数字 + CTNS（单位可省略）")

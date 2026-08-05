@@ -12,6 +12,7 @@ from app.orders.document import (
     _extract_header_company,
     _is_header_company,
     _revise_c_title_to_value,
+    _revise_loading_time,
     _revise_port_fields,
     build_document_order_data,
     normalize_document_extraction,
@@ -106,6 +107,36 @@ def test_normalize_boxes_valid_types():
         {**COMPLETE_RAW, "box": [{"b_type": "40HQ", "box_num": "2"}, {"b_type": "20GP", "box_num": 1}]}
     )
     assert [(b.b_type, b.box_num) for b in extracted.box] == [("40HQ", 2), ("20GP", 1)]
+
+
+def test_normalize_boxes_merges_same_type():
+    """多数据行同箱型时 box_num 累加（3×1*40HC → 一条 40HC/3）。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "box": [
+                {"b_type": "40HC", "box_num": 1},
+                {"b_type": "40HC", "box_num": 1},
+                {"b_type": "40HC", "box_num": 1},
+            ],
+        }
+    )
+    assert [(b.b_type, b.box_num) for b in extracted.box] == [("40HC", 3)]
+
+
+def test_normalize_boxes_merges_mixed_types_preserving_order():
+    """不同箱型分别累加，保持首次出现顺序。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "box": [
+                {"b_type": "20GP", "box_num": 2},
+                {"b_type": "40HC", "box_num": 1},
+                {"b_type": "20GP", "box_num": 1},
+            ],
+        }
+    )
+    assert [(b.b_type, b.box_num) for b in extracted.box] == [("20GP", 3), ("40HC", 1)]
 
 
 @pytest.mark.parametrize(
@@ -418,6 +449,8 @@ def test_build_document_order_data_succeeds():
                 "j": "100",
                 "m": "1234.568",
                 "t": "25.5",
+                "hh": None,
+                "mt": None,
             }
         ],
         "box": [{"b_type": "40HQ", "box_num": 2}, {"b_type": "20GP", "box_num": 1}],
@@ -438,9 +471,9 @@ def test_build_document_order_data_keeps_all_data_rows():
     )
     order_data = build_document_order_data(extracted)
     assert order_data["data"] == [
-        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
-        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18"},
-        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66"},
+        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92", "hh": None, "mt": None},
+        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18", "hh": None, "mt": None},
+        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66", "hh": None, "mt": None},
     ]
 
 
@@ -669,6 +702,161 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
 
     assert result["extracted"]["b_end_port"] == "见设"
     assert result["extracted"]["b_end_dock"] == "SANTOS"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 时间描述正常透传
+        ({"b_date_time_start": "早上8点"}, "早上8点"),
+        ({"b_date_time_start": "9:00"}, "9:00"),
+        ({"b_date_time_start": "下午2点"}, "下午2点"),
+        # 日期形态拒绝（日期应入 b_date）
+        ({"b_date_time_start": "2026-07-20"}, None),
+        ({"b_date_time_start": "2026/7/20"}, None),
+        ({"b_date_time_start": "2026年7月20日"}, None),
+        ({"b_date_time_start": "20260720"}, None),
+        # 空值
+        ({"b_date_time_start": ""}, None),
+        ({}, None),
+    ],
+)
+def test_normalize_b_date_time_start(raw, expected):
+    extracted = normalize_document_extraction(raw)
+    assert extracted.b_date_time_start == expected
+
+
+def test_build_driver_merges_date_and_time():
+    extracted = normalize_document_extraction(
+        {"b_date": "2026-07-20", "b_date_time_start": "早上8点"}
+    )
+    order_data = build_document_order_data(extracted)
+    assert order_data["driver"] == [{"b_date": "2026-07-20", "b_date_time_start": "早上8点"}]
+
+
+def test_build_driver_time_only_without_date():
+    extracted = normalize_document_extraction({"b_date_time_start": "9:00"})
+    order_data = build_document_order_data(extracted)
+    assert order_data["driver"] == [{"b_date_time_start": "9:00"}]
+
+
+def test_normalize_data_items_keeps_hh_mt_non_empty():
+    extracted = normalize_document_extraction(
+        {
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92", "hh": "电子产品", "mt": "N/M"}
+            ]
+        }
+    )
+    assert extracted.data[0].hh == "电子产品"
+    assert extracted.data[0].mt == "N/M"
+    # 非字符串输入安全降级
+    extracted2 = normalize_document_extraction(
+        {
+            "data": [
+                {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92", "hh": ["x"], "mt": 123}
+            ]
+        }
+    )
+    assert extracted2.data[0].hh is None
+    assert extracted2.data[0].mt is None
+
+
+@pytest.mark.parametrize(
+    "end_port, end_dock, source_text, expected_port, expected_dock",
+    [
+        # 待查描述不允许作为目的港补全（占位值不进 b_end_dock）
+        (
+            None,
+            None,
+            "中转港：见设\n目的港：见设",
+            "见设",
+            None,
+        ),
+        # 单行混排：捕获值在下一标签起点截断，不被“港区/中转港”污染
+        (
+            None,
+            None,
+            "目的港：SANTOS 中转港：见设 港区：洋一",
+            "见设",
+            "SANTOS",
+        ),
+        # 英文变体 PORT OF TRANSSHIPMENT / FINAL PORT OF DISCHARGE
+        (
+            None,
+            "JEDDAH",
+            "PORT OF TRANSSHIPMENT: SINGAPORE\nFINAL PORT OF DISCHARGE: JEDDAH",
+            "SINGAPORE",
+            "JEDDAH",
+        ),
+        # 目的港补全遇占位描述 → None（人工确认）
+        (
+            None,
+            None,
+            "中转港：INCHON\n目的港：待定",
+            "INCHON",
+            None,
+        ),
+    ],
+)
+def test_revise_port_fields_boundary(
+    end_port, end_dock, source_text, expected_port, expected_dock
+):
+    assert _revise_port_fields(end_port, end_dock, source_text) == (
+        expected_port,
+        expected_dock,
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["代码", "中转港代码", "中转港", "转运港", "目的港", "港区", " 代码 "],
+)
+def test_normalize_port_rejects_label_token(value):
+    """端口字段拒绝标签词残留（如“中转港代码：”空值被输出为“代码”）。"""
+    extracted = normalize_document_extraction(
+        {**COMPLETE_RAW, "b_end_port": value, "b_end_dock": value}
+    )
+    assert extracted.b_end_port is None
+    assert extracted.b_end_dock is None
+
+
+def test_normalize_port_keeps_real_value():
+    extracted = normalize_document_extraction(
+        {**COMPLETE_RAW, "b_end_port": "见设", "b_end_dock": "SANTOS"}
+    )
+    assert extracted.b_end_port == "见设"
+    assert extracted.b_end_dock == "SANTOS"
+
+
+@pytest.mark.parametrize(
+    "value, source_text, expected",
+    [
+        # 截单时间被当成装箱时间 → 置 None
+        (
+            "早上9点",
+            "做箱时间：1月7日（1X40HC）\n截单时间：1-7早上9点",
+            None,
+        ),
+        # 做箱/装箱时间标签后的时间描述 → 保留
+        (
+            "早上8点",
+            "装箱时间：早上8点\n截单时间：1-7下午2点",
+            "早上8点",
+        ),
+        # 截关时间同样拒绝
+        (
+            "9:00",
+            "截关时间：9:00\n预计开船：1-10",
+            None,
+        ),
+        # 无原文 → 原样返回
+        ("早上9点", None, "早上9点"),
+        (None, "截单时间：1-7早上9点", None),
+    ],
+)
+def test_revise_loading_time_rejects_cutoff_time(value, source_text, expected):
+    assert _revise_loading_time(value, source_text) == expected
 
 
 def test_parse_document_to_order_marks_vision_skipped(monkeypatch):
@@ -1104,9 +1292,9 @@ def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
     result = parse_document_to_order(b"fake-pdf", "order.pdf")
 
     assert result["extracted"]["data"] == [
-        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92"},
-        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18"},
-        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66"},
+        {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92", "hh": None, "mt": None},
+        {"b_order_num": "OOLU2120860081", "j": "450", "m": "5036", "t": "22.18", "hh": None, "mt": None},
+        {"b_order_num": "OOLU2120860082", "j": "10", "m": "106", "t": "0.66", "hh": None, "mt": None},
     ]
     assert result["order_data"]["data"] == result["extracted"]["data"]
     assert result["missing_fields"] == []

@@ -208,3 +208,63 @@ def test_publish_reports_non_json_response_details(monkeypatch):
         "content_type": "text/html",
         "body_preview": "upstream maintenance",
     }
+
+
+def test_publish_passes_through_full_upstream_error(monkeypatch):
+    """下游拒绝时完整透传错误（code/msg/原始响应体），message 含下游提示。"""
+    import app.orders.client as client_module
+    from app.orders.client import OrderUpstreamError
+
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        is_success = True
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = '{"code": "204", "msg": "no: userId", "data": [{"sn": "EX26040001"}]}'
+
+        @staticmethod
+        def json():
+            return {"code": "204", "msg": "no: userId", "data": [{"sn": "EX26040001"}]}
+
+    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(OrderUpstreamError) as caught:
+        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+
+    assert caught.value.http_status == 502
+    assert caught.value.code == "order_upstream_error"
+    assert "no: userId" in caught.value.message
+    assert caught.value.details == {
+        "upstream_code": "204",
+        "upstream_message": "no: userId",
+        "upstream_response": '{"code": "204", "msg": "no: userId", "data": [{"sn": "EX26040001"}]}',
+    }
+
+
+def test_publish_reports_http_error_with_body(monkeypatch):
+    """下游 HTTP 非 2xx 时带响应体预览。"""
+    import app.orders.client as client_module
+    from app.orders.client import OrderUpstreamError
+
+    _configure(monkeypatch)
+
+    class FakeResponse:
+        is_success = False
+        status_code = 500
+        headers = {}
+        text = "internal server error"
+
+        @staticmethod
+        def json():
+            raise ValueError("not JSON")
+
+    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+
+    with pytest.raises(OrderUpstreamError) as caught:
+        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+
+    assert caught.value.details == {
+        "status_code": 500,
+        "upstream_response": "internal server error",
+    }

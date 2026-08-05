@@ -163,19 +163,49 @@ def _is_header_company(value: str, header_lines: list[str]) -> bool:
     return False
 
 
+# 标签起点：单行混排时捕获值在此截断（避免把后续标签/港区名吞进值里）
+_PORT_LABEL_START_RE = re.compile(
+    r"\s*(?:中转港代码|转运港代码|中转港|转运港|目的港|卸货港|港区|启运港|起运港|装货港|"
+    r"船期|开航|开港|船名|船次|航次|提单号|做箱|装箱|件数|毛重|体积|箱型|箱量|备注|"
+    r"PORT\s+OF|TRANSSHIPMENT|DISCHARGE|FINAL)",
+    re.IGNORECASE,
+)
+# 待查/占位描述：b_end_dock（目的港）不允许此类值，命中则置 None 走人工确认
+_PLACEHOLDER_PORT_VALUE_RE = re.compile(
+    r"^(?:见设|见设备单|见设备交接单|待定|待查|同中转港|同左|同上|无|未知|详见.*|以.*为准|看.*)$"
+)
+
+
+def _clean_port_value(value: str) -> str:
+    """截断到下一个标签起点并去空白，避免单行混排污染捕获值。"""
+    cleaned = value.strip()
+    m = _PORT_LABEL_START_RE.search(cleaned)
+    return cleaned[: m.start()].strip() if m else cleaned
+
+
 # 中转港标签（映射 b_end_port）；长标签在前避免“中转港代码”被“中转港”
-# 抢先匹配，捕获值不跨行（字符类不含换行）
+# 抢先匹配，捕获值不跨行（字符类不含换行），跨标签由 _clean_port_value 截断
 _TRANSIT_PORT_LABEL_RE = re.compile(
-    r"(?:中转港代码|转运港代码|中转港|转运港|TRANSSHIPMENT\s*PORT)\s*[:：]?\s*"
+    r"(?:PORT\s+OF\s+TRANSSHIPMENT|TRANSSHIPMENT\s*PORT|中转港代码|转运港代码|中转港|转运港)\s*[:：]?\s*"
     r"([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5 ()/'.-]{0,40})",
     re.IGNORECASE,
 )
 # 目的港标签（映射 b_end_dock）
 _DEST_PORT_LABEL_RE = re.compile(
-    r"(?:目的港|卸货港|PORT\s+OF\s+DISCHARGE)\s*[:：]?\s*"
+    r"(?:FINAL\s+PORT\s+OF\s+DISCHARGE|PORT\s+OF\s+DISCHARGE|DISCHARGING\s+PORT|目的港|卸货港)\s*[:：]?\s*"
     r"([A-Za-z\u4e00-\u9fa5][A-Za-z0-9\u4e00-\u9fa5 ()/'.-]{0,40})",
     re.IGNORECASE,
 )
+
+
+def _extract_port_values(pattern: re.Pattern[str], source_text: str) -> list[str]:
+    """提取标签值并清洗：截断跨标签污染、去空白；空值剔除。"""
+    values: list[str] = []
+    for m in pattern.finditer(source_text):
+        value = _clean_port_value(m.group(1))
+        if value:
+            values.append(value)
+    return values
 
 
 def _revise_port_fields(
@@ -186,18 +216,15 @@ def _revise_port_fields(
     字段语义对齐订单创建接口文档与自由文本抽取（extractor.py）：
     b_end_port=中转港、b_end_dock=目的港。LLM 输出若把目的港值填进
     b_end_port 或把中转港值填进 b_end_dock，则按原文标签修正；
-    空缺字段按原文标签补全（中转港待查描述如“见设”逐字保留）。
+    空缺字段按原文标签补全——b_end_port 允许待查描述（如“见设”）
+    逐字保留，b_end_dock 遇待查/占位描述（见设/待定/同中转港等）
+    置 None 走人工确认，不放行占位值冒充目的港。
     """
     if not source_text:
         return end_port, end_dock
 
-    transit_values = [
-        m.group(1).strip()
-        for m in _TRANSIT_PORT_LABEL_RE.finditer(source_text)
-    ]
-    dest_values = [
-        m.group(1).strip() for m in _DEST_PORT_LABEL_RE.finditer(source_text)
-    ]
+    transit_values = _extract_port_values(_TRANSIT_PORT_LABEL_RE, source_text)
+    dest_values = _extract_port_values(_DEST_PORT_LABEL_RE, source_text)
 
     def hit(values: list[str], value: str | None) -> bool:
         if not value:
@@ -216,12 +243,45 @@ def _revise_port_fields(
         if not end_port_v:
             end_port_v = end_dock_v
         end_dock_v = None
-    # 空缺字段按原文标签补全
+    # 空缺字段按原文标签补全；目的港补全时过滤待查/占位描述
     if not end_dock_v and dest_values:
-        end_dock_v = dest_values[0]
+        dest_candidate = dest_values[0]
+        end_dock_v = (
+            None if _PLACEHOLDER_PORT_VALUE_RE.match(dest_candidate) else dest_candidate
+        )
     if not end_port_v and transit_values:
         end_port_v = transit_values[0]
     return end_port_v, end_dock_v
+
+
+# 做箱/装箱时间标签（b_date_time_start 唯一合法来源）
+_LOADING_TIME_LABEL_RE = re.compile(
+    r"(?:做箱|装箱|进箱)\s*时间[:：]?\s*([^。\n]{0,30})"
+)
+# 截单/截关等时间标签（禁止作为装箱时间）
+_CUTOFF_TIME_LABEL_RE = re.compile(
+    r"(?:截单|截关|截信息|截SI|截VGM)\s*时间?[:：]?\s*([^。\n]{0,30})",
+    re.IGNORECASE,
+)
+
+
+def _revise_loading_time(value: str | None, source_text: str | None) -> str | None:
+    """兜底修复：b_date_time_start 只认“做箱/装箱时间”标签后的值。
+
+    LLM 把“截单时间”等标签的时间描述当作装箱时间时（如
+    “截单时间：1-7早上9点”被输出为“早上9点”），置 None——
+    截单时间就是截单时间，不是装箱时间。
+    """
+    if not value or not source_text:
+        return value
+    wanted = value.strip()
+    for m in _LOADING_TIME_LABEL_RE.finditer(source_text):
+        if wanted in m.group(1):
+            return value
+    for m in _CUTOFF_TIME_LABEL_RE.finditer(source_text):
+        if wanted in m.group(1):
+            return None
+    return value
 
 
 def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> str | None:
@@ -376,8 +436,9 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 |---|---|---|
 | `提单号`/`主提单号`/`主单号`/`B/L NO`/`MBL NO` | `order_num1` | null |
 | 文档抬头公司（顶部公司名称）或 `FM`/`FROM` 后的公司名称（发件人/托运人，仅取公司名部分，剔除同行联系人姓名与电话） | `c_title` | null |
-| 做箱/装箱地址（详细街道地址，含省市区县、道路、门牌号） | `factory_bei` | null |
-| `做箱日期`/`装箱日期`/`做箱时间` | `b_date` | null |
+| 做箱/装箱地址（详细街道地址，含省市区县、道路、门牌号，**并附原文现场联系人/电话**） | `factory_bei` | null |
+| `做箱日期`/`装箱日期`（日期格式） | `b_date` | null |
+| `做箱时间`/`装箱时间`（时间描述，如 `早上8点`/`9:00`） | `b_date_time_start` | null |
 | `开船时间`/`开航时间`/`ETD` | `b_open_ship_time` | null |
 | 件数（数字 + `CTNS`，单位可省略） | `packages` | null |
 | 毛重（数字 + `KGS`，单位可省略，保留 2-3 位小数） | `gross_weight` | null |
@@ -397,21 +458,23 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | `内部编号`/`业务编号`/`我司业务编号` | `c_sn` | null |
 | `备注`/`注意事项`/`REMARK`/`NOTE` | `c_note` | null |
 | 货物明细行（表格中每个数据行：提单号+件数+毛重+体积，一票多客户/多提单号时每行一条） | `data[]` | null |
+| 货物明细行中的 `货名`/`货物名称` | `data[].hh` | null |
+| 货物明细行中的 `唛头`/`MARKS`/`N/M` | `data[].mt` | null |
 
 # 抽取规则
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
 2. `order_num1` 必须为字母数字混合（同时含字母与数字）且至少 8 位；不得保留空格、连字符或其他符号；纯数字（如电话号码）与纯字母串不算提单号，不符合时填 null。
-3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出。
+3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出；**多数据行同为相同箱型时 box_num 必须累加**（如 3 个数据行各 `1*40HC` → `[{"b_type": "40HC", "box_num": 3}]`），禁止只取第一行的箱量。
 4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title；文件名不是原文，**禁止**从文件名前缀推断 c_title。
-5. `factory_bei` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
-6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。
+5. `factory_bei` 取门点详细街道地址（保留省市区县、道路、门牌号和园区/楼栋信息），并**附上原文的现场联系人姓名与电话**——地址同行或独立的联系人/电话行都要并入（格式如 `金泰路转诚泰路17号 朱劲松 13776121224`，对齐订单创建接口文档：门点地址含现场联系人、电话）；不要把公司名并入地址（公司名在 `factory_name`）。
+6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。`b_date_time_start` 只取 `做箱时间`/`装箱时间` 标签后的时间描述（如 `早上8点`/`9:00`/`下午2点`），值为日期格式时归 `b_date` 而非 `b_date_time_start`；**`截单时间`/`截关时间` 等不是装箱时间，禁止填入 `b_date_time_start`**。
 7. `packages`/`gross_weight`/`volume` 只清洗单位和千分位：件数为整数；毛重、体积按原文精度保留 2-3 位小数，超过 3 位四舍五入到 3 位，不补无意义的尾零；单位（CTNS/KGS/CBM）可省略。任一值 ≤0 填 null。
 8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位。
-9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述。
-10. `b_open_ship_time` 与 `b_date` 是不同字段：前者是开船时间，后者是做箱/装箱日期，按标签严格区分，禁止混填；`b_open_ship_time` 同样输出 `YYYY-MM-DD`。
-11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
+9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`b_date_time_start`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述（`b_end_port` 中转港标签后明确写出的待查描述除外，见规则 13）。
+10. `b_open_ship_time`/`b_date`/`b_date_time_start` 是三个不同字段：前者是开船时间，`b_date` 是做箱/装箱**日期**（`YYYY-MM-DD`），`b_date_time_start` 是做箱/装箱**时间描述**（如 `早上8点`/`9:00`），按标签与值格式严格区分，禁止混填。
+11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`data[].hh`（货名）与 `data[].mt`（唛头）可选，原文有则逐字保留，无则 null。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
 12. `b_end_dock` 只取**最终卸货港**（`目的港`/`卸货港`/`PORT OF DISCHARGE` 标签后的值）。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_dock`（如"中转港：INCHON"时 INCHON 不是目的港，应填入 `b_end_port`）；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_dock` 填 null（人工确认），禁止用中转港冒充目的港。
-13. `b_end_port` 只取**中转港**（`中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 标签后的值），与 `b_end_dock`（目的港）严格区分；待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，只有原文真正缺失时才是 null。
+13. `b_end_port` 只取**中转港**（`中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 标签后的值），与 `b_end_dock`（目的港）严格区分；**中转港标签后明确写出**的待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，其他位置出现的占位词仍按规则 9 填 null，只有原文真正缺失时才是 null。
 """
 
 
@@ -690,12 +753,16 @@ def _normalize_data_items(value: Any) -> list[DocumentCargoItem]:
                 j=packages,
                 m=gross_weight,
                 t=volume,
+                hh=_normalize_text(item.get("hh")),
+                mt=_normalize_text(item.get("mt")),
             )
         )
     return items
 
 
 def _normalize_boxes(value: Any) -> list[DocumentBoxItem]:
+    """箱型箱量归一：同箱型合并累加（多数据行各 1*40HC → 一条 box_num=3），
+    保持首次出现顺序；非法箱型/箱量 <1 的行跳过。"""
     if value is None:
         return []
     if isinstance(value, dict):
@@ -703,7 +770,7 @@ def _normalize_boxes(value: Any) -> list[DocumentBoxItem]:
     if not isinstance(value, list):
         return []
 
-    boxes: list[DocumentBoxItem] = []
+    merged: dict[str, int] = {}
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -715,8 +782,11 @@ def _normalize_boxes(value: Any) -> list[DocumentBoxItem]:
             box_num = 0
         if not b_type or box_num < 1:
             continue
-        boxes.append(DocumentBoxItem(b_type=b_type, box_num=box_num))
-    return boxes
+        merged[b_type] = merged.get(b_type, 0) + box_num
+    return [
+        DocumentBoxItem(b_type=b_type, box_num=box_num)
+        for b_type, box_num in merged.items()
+    ]
 
 
 def _normalize_packages(value: Any) -> str | None:
@@ -767,6 +837,19 @@ def _normalize_text(value: Any) -> str | None:
     return cleaned or None
 
 
+# 标签词残留：LLM 把标签当值输出（如“中转港代码：”空值被输出为“代码”）
+_PORT_LABEL_TOKEN_RE = re.compile(
+    r"^(?:代码|中转港代码|转运港代码|中转港|转运港|目的港|卸货港|港区|停靠港区)$"
+)
+
+
+def _strip_port_label_token(value: str | None) -> str | None:
+    """清洗端口字段的标签词残留：命中标签词本身（如“代码”）时置 None。"""
+    if value and _PORT_LABEL_TOKEN_RE.match(value.strip()):
+        return None
+    return value
+
+
 # 中文字符之间的 OCR 断字空格（如“上海凯福国际物流有限公 司”），
 # 仅删除“汉字+空格+汉字”形态；英文公司名（如 XILINMEN GRID）不受影响
 _CN_INTERNAL_SPACE_RE = re.compile(r"(?<=[\u4e00-\u9fa5])\s+(?=[\u4e00-\u9fa5])")
@@ -778,6 +861,26 @@ def _normalize_c_title(value: Any) -> str | None:
     if not cleaned:
         return None
     return _CN_INTERNAL_SPACE_RE.sub("", cleaned)
+
+
+# 日期形态：b_date_time_start 拒绝此类文本（日期应入 b_date）
+_DATE_LIKE_RE = re.compile(
+    r"^\d{4}[-/年]\d{1,2}(?:[-/月]\d{1,2}[日号]?)?$|^\d{8}$"
+)
+
+
+def _normalize_b_date_time_start(value: Any) -> str | None:
+    """装箱时间：只接受时间描述（如 早上8点/9:00/下午2点）。
+
+    日期形态（YYYY-MM-DD、YYYY年M月D日 等）拒绝归 null——日期属于 b_date，
+    避免日期文本冒充时间进入 driver。
+    """
+    cleaned = _normalize_text(value)
+    if not cleaned:
+        return None
+    if _DATE_LIKE_RE.match(cleaned):
+        return None
+    return cleaned
 
 
 def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtraction:
@@ -821,11 +924,18 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
                 "factory_bei": _normalize_text(data.get("factory_bei")),
                 "b_factory_not": _normalize_text(data.get("b_factory_not")),
                 "b_start_dock": _normalize_text(data.get("b_start_dock")),
-                "b_end_port": _normalize_text(data.get("b_end_port")),
-                "b_end_dock": _normalize_text(data.get("b_end_dock")),
+                "b_end_port": _strip_port_label_token(
+                    _normalize_text(data.get("b_end_port"))
+                ),
+                "b_end_dock": _strip_port_label_token(
+                    _normalize_text(data.get("b_end_dock"))
+                ),
                 "b_wharf": _normalize_text(data.get("b_wharf")),
                 "b_open_ship_time": _normalize_date(data.get("b_open_ship_time")),
                 "b_date": _normalize_date(data.get("b_date")),
+                "b_date_time_start": _normalize_b_date_time_start(
+                    data.get("b_date_time_start")
+                ),
                 "c_sn": _normalize_text(data.get("c_sn")),
                 "c_note": _normalize_text(data.get("c_note")),
                 "packages": packages,
@@ -931,6 +1041,8 @@ def build_document_order_data(
                 "j": item.j,
                 "m": item.m,
                 "t": item.t,
+                "hh": item.hh,
+                "mt": item.mt,
             }
             for item in extracted.data
         ],
@@ -939,9 +1051,20 @@ def build_document_order_data(
             for item in extracted.box
         ],
         "driver": (
-            [{}] if not extracted.b_date else [{"b_date": extracted.b_date}]
+            _build_driver_entries(extracted)
         ),
     }
+
+
+def _build_driver_entries(extracted: OrderDocumentExtraction) -> list[dict[str, str]]:
+    """组装 driver 行：装箱日期 b_date 与装箱时间 b_date_time_start 都有则
+    合并为一条；都无则返回 [{}]（对齐标准订单格式）。"""
+    entry: dict[str, str] = {}
+    if extracted.b_date:
+        entry["b_date"] = extracted.b_date
+    if extracted.b_date_time_start:
+        entry["b_date_time_start"] = extracted.b_date_time_start
+    return [entry] if entry else [{}]
 
 
 # ---- 主流程 ----
@@ -983,6 +1106,11 @@ def parse_document_to_order(
     raw["b_end_port"], raw["b_end_dock"] = _revise_port_fields(
         raw.get("b_end_port"), raw.get("b_end_dock"), source_text
     )
+    # 兜底修复：截单时间不得作为装箱时间（b_date_time_start 只认做箱/装箱时间）
+    if raw.get("b_date_time_start"):
+        raw["b_date_time_start"] = _revise_loading_time(
+            raw.get("b_date_time_start"), source_text
+        )
 
     extracted = normalize_document_extraction(raw)
     missing = _missing_fields(extracted)

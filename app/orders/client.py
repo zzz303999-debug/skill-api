@@ -50,7 +50,10 @@ def publish_create_order(order_data: dict[str, Any], *, room_id: str) -> dict[st
         log.warning("order_api_http_error", extra={"status_code": response.status_code})
         raise OrderUpstreamError(
             "order API returned an HTTP error",
-            details={"status_code": response.status_code},
+            details={
+                "status_code": response.status_code,
+                "upstream_response": response.text[:2000],
+            },
         )
     try:
         raw = response.json()
@@ -86,9 +89,19 @@ def publish_create_order(order_data: dict[str, Any], *, room_id: str) -> dict[st
         ) from exc
 
     if str(parsed.code) != "200":
+        # 完整透传下游错误（含原始响应体），便于排查：
+        # 如 "no: userId"（缺凭据）、“no: xxxx”（业务校验失败）等
         raise OrderUpstreamError(
-            "order API rejected the order",
-            details={"upstream_code": parsed.code, "upstream_message": parsed.msg},
+            f"order API rejected the order: {parsed.msg}",
+            details={
+                "upstream_code": parsed.code,
+                "upstream_message": parsed.msg,
+                "upstream_response": (
+                    json.dumps(raw, ensure_ascii=False)[:2000]
+                    if not isinstance(raw, str)
+                    else raw[:2000]
+                ),
+            },
         )
     log.info("order_created", extra={"upstream_code": parsed.code})
     return parsed.model_dump()
