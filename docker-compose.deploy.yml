@@ -4,7 +4,9 @@ services:
     container_name: skill-api
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      # 只绑定回环地址：9000 仅允许本机反向代理（nginx）访问，
+      # 不直接暴露到宿主机网卡，避免无鉴权端口暴露到公网/内网
+      - "127.0.0.1:9000:9000"
     env_file:
       - .env
     environment:

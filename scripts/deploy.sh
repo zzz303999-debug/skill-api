@@ -41,6 +41,15 @@ validate_common() {
     [[ -f .env ]] || die ".env not found. Create it from .env.example and fill production secrets."
     docker info >/dev/null 2>&1 || die "Docker daemon is unavailable or current user has no permission"
     compose config --quiet
+    # 生产安全基线（fail-closed）：deploy 版 compose 必须携带鉴权配置，
+    # 否则拒绝部署，避免无鉴权端口暴露。限流暂不强制（RATE_LIMIT_ENABLED 仍可自行开启）。
+    case "${COMPOSE_FILE}" in
+        *deploy*)
+            if ! grep -qE '^[[:space:]]*API_KEY=[^[:space:]]' .env; then
+                die "API_KEY is not set in .env; refusing to deploy an unauthenticated service"
+            fi
+            ;;
+    esac
 }
 
 wait_for_health() {

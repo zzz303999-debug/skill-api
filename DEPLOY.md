@@ -62,10 +62,17 @@ cp .env.example .env
 #   LLM_BASE_URL       LLM API 地址，如 https://<llm-host>/v1
 #   LLM_API_KEY        Bearer Token（敏感）
 #   LLM_MODEL_DEFAULT  服务端支持的模型名
+#   API_KEY            接口访问凭证（生产必须设置，见下方说明）
 chmod 600 .env
 ```
 
-- `.env` 含敏感信息（`LLM_API_KEY`、`MINERU_API_KEY`、订单凭据），**禁止提交仓库**，权限收紧至 600，仅部署用户可读
+- `.env` 含敏感信息（`LLM_API_KEY`、`MINERU_API_KEY`、`API_KEY`、订单凭据），**禁止提交仓库**，权限收紧至 600，仅部署用户可读
+- **生产安全基线（fail-closed）**：`API_KEY` 必须设置；`deploy.sh` 部署 `docker-compose.deploy.yml`
+  时会强制检查，未设置直接拒绝上线。限流不强制，但建议保持开启
+  （`RATE_LIMIT_ENABLED=true`），可通过 `RATE_LIMIT_HEAVY_MAX_REQUESTS` 等阈值调宽避免误伤
+- 启用 `API_KEY` 后，除 `/healthz`、`/docs` 等豁免路径外，所有接口（含 `/orders`、`/skills/*`、`/api/logs`）
+  必须携带 `Authorization: Bearer <API_KEY>` 或 `X-API-Key: <API_KEY>`；
+  日志页面 `/logs` 首次访问会提示输入 API Key 并保存在浏览器本地
 - 完整变量清单见第 5 节；不用的功能（订单接口/MinerU）可保留默认值
 
 ### 4.2 方式 A：镜像部署
@@ -168,6 +175,7 @@ sudo journalctl -u skill-api -n 200 --no-pager
 | 变量 | 说明 |
 |------|------|
 | `LLM_API_KEY` | LLM 服务的 Bearer Token |
+| `API_KEY` | 服务接口访问凭证（生产必须设置；未设置则接口无鉴权，仅限可信内网） |
 | `MINERU_API_KEY` | MinerU 服务鉴权 Key（启用且需要时） |
 | `ORDER_API_EXT_APP_ID`、`ORDER_API_EXT_USER_ID`、`ORDER_API_JXT_OPEN_ID`、`ORDER_API_USER_ID` | 订单接口凭据（仅使用 `/orders` 时必填） |
 
@@ -269,32 +277,32 @@ docker compose -f docker-compose.deploy.yml up -d
 
 ## 9. HTTPS 反向代理（推荐）
 
-云服务器对外建议由 Nginx/Caddy 提供 HTTPS，`9000` 只对反向代理开放。Compose 端口映射改为 `127.0.0.1:9000:9000`，避免绕过 HTTPS 直接访问 Uvicorn。Nginx 至少应包含：
+云服务器对外建议由 Nginx 提供 HTTPS，`9000` 只对反向代理开放。
+`docker-compose.deploy.yml` 已默认将端口映射改为 `127.0.0.1:9000:9000`（仅本机可访问），
+仓库提供可直接使用的模板：`deploy/nginx/skill-api.conf`。**证书使用 certbot 自动签发，自动续期**：
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name skill-api.example.com;
-    ssl_certificate /etc/letsencrypt/live/skill-api.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/skill-api.example.com/privkey.pem;
+```bash
+# 1. 安装 certbot（CentOS 8+ / RHEL 系）
+dnf install -y certbot python3-certbot-nginx
 
-    # 应与 API_MAX_UPLOAD_BYTES 保持一致。
-    client_max_body_size 20m;
+# 2. 替换模板中 server_name 为真实域名，复制到 conf.d 并重载
+export DOMAIN=your-domain.example.com
+sed -i "s/skill-api.example.com/${DOMAIN}/g" deploy/nginx/skill-api.conf
+cp deploy/nginx/skill-api.conf /etc/nginx/conf.d/skill-api.conf
+nginx -t && systemctl reload nginx
 
-    location / {
-        proxy_pass http://127.0.0.1:9000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 210s;   # 必须 >= LLM_TIMEOUT_SECONDS + 余量
-        proxy_send_timeout 210s;
-    }
-}
+# 3. certbot 自动签发并写入证书配置（80 端口须已开放，HTTP-01 验证）
+certbot --nginx -d ${DOMAIN} --redirect
+
+# 4. 续期由 certbot.timer 自动完成；可手动验证：
+certbot renew --dry-run
 ```
 
-证书路径由部署环境的 ACME/证书管理工具生成并按实际域名替换。**安全组对公网只开放 `80/443`，不开放 `9000`。**
+签发后 certbot 会自动写入证书路径（`/etc/letsencrypt/live/<域名>/`）、启用 443 并把 80 改为 301 跳转；
+模板内已放行 `/.well-known/acme-challenge/` 验证路径，代理参数（X-Forwarded-For 追加语义、
+`client_max_body_size 20m` 与 `API_MAX_UPLOAD_BYTES` 配套、`proxy_read_timeout 210s` 等）在注释中给出参考。
+
+**安全组对公网只开放 `80/443`，不开放 `9000`。**
 
 如 LLM/MinerU 运行在宿主机而非 Compose 网络，需给 `skill-api` 增加 `extra_hosts: ["host.docker.internal:host-gateway"]`，并使用 `http://host.docker.internal:<port>`（容器内 `127.0.0.1` 只代表容器自身）。
 
@@ -314,24 +322,87 @@ HTTP 200 且 `status=ok` 表示进程可响应。**注意：`/healthz` 不请求
 - 建议从另一台机器或云拨测每分钟请求 `/healthz`，连续失败发告警（企业微信等）
 - 请求日志：写入 `storage/logs/requests.jsonl`（服务重启仍可查），浏览器访问 `http://<host>:9000/logs` 查看，接口为 `GET /api/logs`
 
-## 11. 持久化与数据
+## 11. 接口调用示例（含鉴权）
+
+启用 `API_KEY`（生产必须）后，除豁免路径外**所有接口**必须携带凭证，两种方式任选其一：
+
+| 方式 | Header | 值 |
+|------|--------|-----|
+| 方式一 | `Authorization` | `Bearer <API_KEY>` |
+| 方式二 | `X-API-Key` | `<API_KEY>` |
+
+鉴权失败返回 `401`，错误码 `unauthorized`，响应结构与业务错误一致：
+
+```json
+{"error": {"code": "unauthorized", "message": "invalid or missing API key", "description": "未授权访问，请提供有效的访问凭证（API Key）", "details": null}}
+```
+
+### curl 示例
+
+```bash
+# 健康检查（豁免路径，无需凭证）
+curl -fsS http://127.0.0.1:9000/healthz
+
+# 单文件抽取
+curl -X POST http://127.0.0.1:9000/skills/tuoshu/extract \
+  -H "Authorization: Bearer <API_KEY>" \
+  -F "file=@托书.pdf"
+
+# 批量抽取
+curl -X POST http://127.0.0.1:9000/skills/tuoshu/batch-extract \
+  -H "X-API-Key: <API_KEY>" \
+  -F "file=@a.pdf" -F "file=@b.pdf"
+
+# 附件转下单字段（只解析不下单）
+curl -X POST http://127.0.0.1:9000/orders/parse-document \
+  -H "Authorization: Bearer <API_KEY>" \
+  -F "file=@做箱通知.docx"
+
+# 文本转订单（JSON body；会真实创建订单，测试勿用生产数据）
+curl -X POST http://127.0.0.1:9000/orders \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "提单号：... 船名：...", "roomId": "room-1"}'
+
+# 查询请求日志
+curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
+  -H "Authorization: Bearer <API_KEY>"
+```
+
+### 豁免路径（无需凭证）
+
+`/healthz`、`/skills`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico` 及 `/logs` 页面本身。
+`/api/logs`（日志数据接口，含 PII）**不在豁免内**，必须带凭证。
+
+### Postman / Apifox 配置
+
+1. 在接口的 **Headers** 标签添加一行：Key=`Authorization`，Value=`Bearer <API_KEY>`（`Bearer` 后有空格）
+2. 也可将 `<API_KEY>` 存入工具的环境变量（如 `{{apiKey}}`），所有接口统一引用
+
+### 日志页面（浏览器）
+
+生产启用 `API_KEY` 后，浏览器访问 `/logs` 页面首次查询 `/api/logs` 会弹窗要求输入 API Key，
+输入后保存在浏览器 localStorage，之后自动携带。
+
+## 12. 持久化与数据
 
 - 当前版本**无强持久化需求**：存储目录 `/app/storage`（compose 已挂载 `./storage`），用于临时文件与请求日志
 - `STORAGE_KEEP_HOURS=24` 自动清理过期临时文件
 - 建议定期备份：`./storage` 目录 + `.env` 文件
 
-## 12. 上线验收
+## 13. 上线验收
 
-1. 存活检查必须返回 `status=ok` 且包含 `tuoshu`：
+1. 存活检查必须返回 `status=ok` 且包含 `tuoshu`（豁免路径，无需凭证）：
 
    ```bash
    curl -fsS http://127.0.0.1:9000/healthz
    ```
 
-2. 用非生产样例文档做端到端抽取：
+2. 用非生产样例文档做端到端抽取（生产启用 API_KEY 后需带凭证）：
 
    ```bash
    curl -fsS -X POST http://127.0.0.1:9000/skills/tuoshu/extract \
+     -H "Authorization: Bearer <API_KEY>" \
      -F "file=@./sample.pdf"
    ```
 
@@ -339,7 +410,7 @@ HTTP 200 且 `status=ok` 表示进程可响应。**注意：`/healthz` 不请求
 4. 如启用 MinerU，确认 `meta.parser` 或 `meta.page_routes[].parser` 中存在 `mineru`；如出现 `mineru_failed`/`mineru_low_confidence`，查看网络、版本和 MinerU 日志。
 5. 如使用 `/orders`，用测试账号单独验证一次；该接口会真实创建订单，**不得用生产数据反复重试**。
 
-## 13. 常见排查
+## 14. 常见排查
 
 ### 服务起不来
 - 检查环境变量是否齐全（尤其 `LLM_API_KEY`）
@@ -348,6 +419,11 @@ HTTP 200 且 `status=ok` 表示进程可响应。**注意：`/healthz` 不请求
 ### 调用返回 502
 - LLM 服务不通：检查 `LLM_BASE_URL` 网络可达
 - LLM 服务鉴权失败：检查 `LLM_API_KEY` 是否有效
+
+### 调用返回 401
+- 服务已启用 `API_KEY` 鉴权：确认请求头携带 `Authorization: Bearer <API_KEY>` 或 `X-API-Key: <API_KEY>`（`Bearer` 后有空格）
+- 确认 `.env` 中 `API_KEY` 与调用方使用的值一致，修改后需重启容器生效
+- `/healthz` 等豁免路径不受影响（见第 11 节）
 
 ### 调用超时
 - LLM 抽取本身耗时 10-60s 属正常
