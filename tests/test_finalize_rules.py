@@ -11,6 +11,36 @@ from app.skills.tuoshu.prompt import format_to_chat_text
 from app.skills.tuoshu.schema import TuoshuOutput
 
 
+def test_transit_port_header_row_falls_back_to_value_row():
+    """表头行+值行布局：中转港代码取列下方值，不被表头“交货地：”污染。"""
+    source_text = (
+        "# 集行-KMTCSHAP950389(24)(1)(9)(5)(2)(2)(3)(1).xls\n"
+        "| _row/col_ | A | B | C | D |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| 8 | 箱型/箱量： | 港区： | 中转港代码： | 交货地： |\n"
+        "| 9 | 1*20RF |  | KRPUS | BUSAN |\n"
+    )
+    # LLM 误把表头“交货地：”当值输出
+    result = finalize_extraction(
+        {"transit_port": "交货地：", "pod": "BUSAN"},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] == "KRPUS"
+    assert result["pod"] == "BUSAN"
+
+
+def test_transit_port_same_row_label_value_pair():
+    """同行标签+值相邻布局不受影响。"""
+    source_text = "| 中转港： | 见设备交接单 | 港区： | 洋一 |\n"
+    result = finalize_extraction(
+        {"transit_port": None},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] == "见设备交接单"
+
+
 def test_numbered_notice_remark_restored_when_model_missing():
     """模型未输出编号内容时，从“请注意”列表恢复并合并进 remark。"""
     source_text = (

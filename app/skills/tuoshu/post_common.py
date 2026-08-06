@@ -92,7 +92,16 @@ _ADJACENT_FIELD_LABELS = frozenset(
         "中转港代码",
         "中转港（卸港）",
         "中转港(卸港)",
+        "转运港",
+        "转运港代码",
         "卸港",
+        "目的港",
+        "卸货港",
+        "目的地",
+        "交货地",
+        "起运港",
+        "启运港",
+        "装货港",
         "港区",
         "码头",
         "要求进港时间",
@@ -234,6 +243,15 @@ def _is_adjacent_field_label(value: str) -> bool:
     return normalize_label(value) in _ADJACENT_FIELD_LABELS
 
 
+def _is_field_label_cell(value: str) -> bool:
+    """判断单元格是否为字段标签：已知相邻字段标签，或以冒号结尾的标签样式。
+
+    表头行（如 `| 中转港代码： | 交货地： |`）中标签后的下一个单元格
+    仍是标签而不是值，此时应从下一行同列取值，避免把表头标签当值。
+    """
+    return _is_adjacent_field_label(value) or bool(re.search(r"[：:]\s*$", value.strip()))
+
+
 def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[str]:
     """Extract values only when a body label and value are directly adjacent."""
     label_pattern = "|".join(_label_pattern(label) for label in labels)
@@ -243,16 +261,19 @@ def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[
     )
     values: list[str] = []
     expected_labels = {normalize_label(label) for label in labels}
-    for html_cells in parse_html_table_rows(source_text):
+    html_rows = parse_html_table_rows(source_text)
+    for row_index, html_cells in enumerate(html_rows):
         for index, cell in enumerate(html_cells[:-1]):
             if normalize_label(cell) not in expected_labels:
                 continue
             next_cell = html_cells[index + 1]
-            value = (
-                None
-                if _is_adjacent_field_label(next_cell)
-                else _clean_labeled_value(next_cell)
-            )
+            value = None if _is_field_label_cell(next_cell) else _clean_labeled_value(next_cell)
+            if not value:
+                # 同行下一列是标签（表头行）或空单元格：值在下一行同列
+                for next_row in html_rows[row_index + 1 :]:
+                    if index < len(next_row):
+                        value = _clean_labeled_value(next_row[index])
+                    break
             if value and value not in values:
                 values.append(value)
     for raw_line in source_text.splitlines():
@@ -263,7 +284,7 @@ def _extract_explicit_values(source_text: str, labels: tuple[str, ...]) -> list[
             match = pattern.search(candidate)
             value = _clean_labeled_value(match.group(1)) if match else None
             if value is None and normalize_label(candidate) in expected_labels:
-                if index + 1 < len(cells) and not _is_adjacent_field_label(cells[index + 1]):
+                if index + 1 < len(cells) and not _is_field_label_cell(cells[index + 1]):
                     value = _clean_labeled_value(cells[index + 1])
             if value and value not in values:
                 values.append(value)
@@ -324,13 +345,14 @@ def _extract_table_column_values(source_text: str, labels: tuple[str, ...]) -> l
             for column_index, cell in enumerate(row):
                 if normalize_label(cell) not in expected:
                     continue
-                if column_index + 1 < len(row) and not _is_adjacent_field_label(
+                if column_index + 1 < len(row) and not _is_field_label_cell(
                     row[column_index + 1]
                 ):
                     value = _clean_labeled_value(row[column_index + 1])
                     if value and value not in values:
                         values.append(value)
-                    continue
+                        continue
+                # 同行下一列是标签（表头行）或空单元格：值在下一行同列
                 for next_row in rows[row_index + 1 :]:
                     if is_separator_row(next_row):
                         continue
