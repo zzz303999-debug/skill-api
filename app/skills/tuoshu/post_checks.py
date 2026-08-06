@@ -482,6 +482,15 @@ _QUANTITY_LIKE_RE = re.compile(r"^\d+[A-Za-z]{2,}$")
 _MASTER_BILL_LABELS = ("提单号", "主提单号", "主单号")
 
 
+# 关单号即提单号（与 orders/parse-document 对齐）；提取函数要求标签前为
+# 行首/空白，“报关单号”不会因前缀“报”字被误匹配
+_CUSTOMS_NO_LABELS = ("关单号",)
+
+
+# 报关单号/报关号不是提单号：格式特征恢复时显式排除其标签值
+_CUSTOMS_DECLARATION_LABELS = ("报关单号", "报关号")
+
+
 _CHILD_BILL_LABELS = ("子提单号", "子单号", "分提单号", "分单号", "HBL NO", "HB/L")
 
 
@@ -531,24 +540,55 @@ def _restore_mbl_no_from_source(
     if not source_text:
         return
 
-    anchored: list[str] = []
+    bill_anchored: list[str] = []
     for value in _extract_explicit_values(source_text, _MASTER_BILL_LABELS):
         if _BILL_NO_RE.fullmatch(value) and not _looks_like_quantity(value):
-            anchored.append(value)
+            bill_anchored.append(value)
     for value in _extract_separated_label_values(source_text, _MASTER_BILL_LABELS):
         if (
             _BILL_NO_RE.fullmatch(value)
             and not _looks_like_quantity(value)
-            and value not in anchored
+            and value not in bill_anchored
         ):
-            anchored.append(value)
-    if len(anchored) == 1:
-        restored = anchored[0]
+            bill_anchored.append(value)
+    # 关单号即提单号：仅当原文无“提单号”标签时才作为 mbl_no 来源（提单号优先）；
+    # 运编号/业务编号只进 internal_ref，不作为提单号来源；标签前有“报”字的
+    # 报关单号不会被提取函数锚定（前边界为行首/空白）
+    customs_anchored: list[str] = []
+    for value in _extract_explicit_values(source_text, _CUSTOMS_NO_LABELS):
+        if (
+            _BILL_NO_RE.fullmatch(value)
+            and not _looks_like_quantity(value)
+            and value not in bill_anchored
+            and value not in customs_anchored
+        ):
+            customs_anchored.append(value)
+    for value in _extract_separated_label_values(source_text, _CUSTOMS_NO_LABELS):
+        if (
+            _BILL_NO_RE.fullmatch(value)
+            and not _looks_like_quantity(value)
+            and value not in bill_anchored
+            and value not in customs_anchored
+        ):
+            customs_anchored.append(value)
+    if len(bill_anchored) == 1:
+        # 提单号标签优先：原文明确标注“提单号/主提单号/主单号”时以其为准
+        restored = bill_anchored[0]
+    elif len(set(customs_anchored)) == 1 and not bill_anchored:
+        # 原文无提单号标签、仅有关单号标签（如“运编号+关单号”文档）：
+        # 按“关单号即提单号”规则取关单号
+        restored = customs_anchored[0]
     else:
         child_values = set(
             _extract_explicit_values(source_text, _CHILD_BILL_LABELS)
         ) | set(
             _extract_separated_label_values(source_text, _CHILD_BILL_LABELS)
+        )
+        # 报关单号/报关号不是提单号：即使未被 LLM 识别也不得按格式特征恢复为 mbl_no
+        declaration_values = set(
+            _extract_explicit_values(source_text, _CUSTOMS_DECLARATION_LABELS)
+        ) | set(
+            _extract_separated_label_values(source_text, _CUSTOMS_DECLARATION_LABELS)
         )
         known_values = _collect_known_strings(data)
         plausible = {
@@ -560,6 +600,7 @@ def _restore_mbl_no_from_source(
             and re.search(r"\d", token)
             and token not in known_values
             and token not in child_values
+            and token not in declaration_values
         }
         if len(plausible) != 1:
             return

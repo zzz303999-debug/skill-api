@@ -11,6 +11,7 @@ from app.orders.document import (
     _extract_company_name,
     _extract_header_company,
     _is_header_company,
+    _revise_bill_no,
     _revise_c_title_to_value,
     _revise_loading_time,
     _revise_port_fields,
@@ -83,6 +84,54 @@ def test_normalize_bill_no_rejects_invalid(value):
 def test_normalize_bill_no_strips_separators():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "KMTC SHAP-950393"})
     assert extracted.order_num1 == "KMTCSHAP950393"
+
+
+# ---------- 关单号即提单号（兜底修复） ----------
+
+
+def test_revise_bill_no_customs_no_overrides_llm_value():
+    """原文含关单号时覆盖 LLM 输出的运编号（关单号即提单号）。"""
+    source = (
+        "上海麦可斯国际物流有限公司\n装箱通知\n"
+        "运编号：MAX202011824A/B/C\n关单号：CNWW036474\n"
+        "船名航次：COSCO SHIPPING RHINE / 019W"
+    )
+    # LLM 误取运编号 → 覆盖为关单号
+    assert _revise_bill_no("MAX202011824A", source) == "CNWW036474"
+    # LLM 缺失 → 补全为关单号
+    assert _revise_bill_no(None, source) == "CNWW036474"
+    # LLM 已输出关单号 → 保持
+    assert _revise_bill_no("CNWW036474", source) == "CNWW036474"
+
+
+def test_revise_bill_no_no_customs_no_keeps_value():
+    """原文有提单号标签时以提单号标签值为准（提单号优先）。"""
+    source = "运编号：MAX202011824A/B/C\n提单号：KMTCSHAP950393"
+    assert _revise_bill_no("KMTCSHAP950393", source) == "KMTCSHAP950393"
+    # LLM 误取运编号时，也会被提单号标签纠正
+    assert _revise_bill_no("MAX202011824A", source) == "KMTCSHAP950393"
+    assert _revise_bill_no(None, None) is None
+
+
+def test_revise_bill_no_bill_label_takes_priority_over_customs_no():
+    """提单号标签优先：提单号与关单号并存且值不同时，取提单号标签值。"""
+    source = "提单号：KMTCSHAP950393\n关单号：CNWW036474\n船名航次：COSCO SHIPPING RHINE / 019W"
+    assert _revise_bill_no(None, source) == "KMTCSHAP950393"
+    # LLM 输出关单号时，仍以提单号标签为准
+    assert _revise_bill_no("CNWW036474", source) == "KMTCSHAP950393"
+
+
+def test_revise_bill_no_ignores_invalid_customs_no():
+    """关单号不合提单号格式（如纯数字）时不覆盖，保持 LLM 值。"""
+    source = "运编号：MAX202011824A\n关单号：12345678\n船名航次：COSCO SHIPPING RHINE / 019W"
+    assert _revise_bill_no("MAX202011824A", source) == "MAX202011824A"
+
+
+def test_revise_bill_no_ignores_customs_declaration_no():
+    """报关单号不是提单号：原文只有报关单号时不覆盖、不补全。"""
+    source = "报关单号：CUS12345678\n船名航次：COSCO SHIPPING RHINE / 019W"
+    assert _revise_bill_no("MAX202011824A", source) == "MAX202011824A"
+    assert _revise_bill_no(None, source) is None
 
 
 @pytest.mark.parametrize(
@@ -558,6 +607,29 @@ def test_parse_document_to_order_extracts_without_publishing(monkeypatch):
     assert result["needs_manual_confirmation"] is False
     assert result["missing_fields"] == []
     assert "upstream" not in result
+
+
+def test_parse_document_customs_no_overrides_llm_bill_no(monkeypatch):
+    """文档同时含运编号与关单号：order_num1 取关单号（关单号即提单号）。"""
+
+    def fake_convert(file_bytes, filename):
+        markdown = (
+            "上海麦可斯国际物流有限公司\n装箱通知\n"
+            "运编号：MAX202011824A/B/C\n关单号：CNWW036474\n"
+            "船名航次：COSCO SHIPPING RHINE / 019W\n"
+            "目的港：PORT SAID WEST"
+        )
+        return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
+
+    def fake_chat_json(messages, **_kwargs):
+        return {"order_num1": "MAX202011824A"}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "_convert_file", fake_convert)
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    assert result["extracted"]["order_num1"] == "CNWW036474"
+    assert result["order_data"]["order_num1"] == "CNWW036474"
 
 
 def test_parse_document_to_order_marks_missing_fields(monkeypatch):

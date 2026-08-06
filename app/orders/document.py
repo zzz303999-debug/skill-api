@@ -434,7 +434,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 # 字段来源表（唯一目标）
 | 原文标签/版面角色 | 字段 | 缺失处理 |
 |---|---|---|
-| `提单号`/`主提单号`/`主单号`/`B/L NO`/`MBL NO` | `order_num1` | null |
+| `关单号`/`提单号`/`主提单号`/`主单号`/`B/L NO`/`MBL NO`（关单号即提单号；与`运编号`并存时取关单号） | `order_num1` | null |
 | 文档抬头公司（顶部公司名称）或 `FM`/`FROM` 后的公司名称（发件人/托运人，仅取公司名部分，剔除同行联系人姓名与电话） | `c_title` | null |
 | 做箱/装箱地址（详细街道地址，含省市区县、道路、门牌号，**并附原文现场联系人/电话**） | `factory_bei` | null |
 | `做箱日期`/`装箱日期`（日期格式） | `b_date` | null |
@@ -455,7 +455,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 | `装箱备注` | `b_factory_not` | null |
 | `联系人`/`现场联系人`/`装箱联系人` | `c_name` | null |
 | `电话`/`手机`/`TEL`（随联系人出现） | `c_phone` | null |
-| `内部编号`/`业务编号`/`我司业务编号` | `c_sn` | null |
+| `内部编号`/`运编号`/`业务编号`/`我司业务编号`（内部编号，**禁止**填入 order_num1） | `c_sn` | null |
 | `备注`/`注意事项`/`REMARK`/`NOTE` | `c_note` | null |
 | 货物明细行（表格中每个数据行：提单号+件数+毛重+体积，一票多客户/多提单号时每行一条） | `data[]` | null |
 | 货物明细行中的 `货名`/`货物名称` | `data[].hh` | null |
@@ -463,7 +463,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 
 # 抽取规则
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
-2. `order_num1` 必须为字母数字混合（同时含字母与数字）且至少 8 位；不得保留空格、连字符或其他符号；纯数字（如电话号码）与纯字母串不算提单号，不符合时填 null。
+2. `order_num1` 必须为字母数字混合（同时含字母与数字）且至少 8 位；不得保留空格、连字符或其他符号；纯数字（如电话号码）与纯字母串不算提单号，不符合时填 null。**关单号即提单号**；`报关单号`/`报关号` 不是提单号，禁止作为 `order_num1`；`运编号`/`业务编号`/`我司业务编号` 是内部编号（归 `c_sn`），禁止作为 `order_num1`；关单号与运编号并存时取关单号。
 3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出；**多数据行同为相同箱型时 box_num 必须累加**（如 3 个数据行各 `1*40HC` → `[{"b_type": "40HC", "box_num": 3}]`），禁止只取第一行的箱量。
 4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title；文件名不是原文，**禁止**从文件名前缀推断 c_title。
 5. `factory_bei` 取门点详细街道地址（保留省市区县、道路、门牌号和园区/楼栋信息），并**附上原文的现场联系人姓名与电话**——地址同行或独立的联系人/电话行都要并入（格式如 `金泰路转诚泰路17号 朱劲松 13776121224`，对齐订单创建接口文档：门点地址含现场联系人、电话）；不要把公司名并入地址（公司名在 `factory_name`）。
@@ -705,6 +705,64 @@ def _normalize_bill_no(value: Any) -> str | None:
     if not _BILL_NO_RE.fullmatch(cleaned):
         return None
     return cleaned
+
+
+# 关单号标签（order_num1 提单号来源：关单号即提单号；报关单号不是提单号）。
+# 值模式收紧为纯字母数字（6-20 位），避免吞并同行相邻标签文本（如
+# “关单号：CNWW036474 B/L：...”）；前边界要求行首/空白/标点，
+# 配合 _extract_customs_no 中的报关前缀屏蔽，排除“报关单号”误匹配
+_CUSTOMS_NO_LABEL_RE = re.compile(
+    r"(?:^|(?<=[\s，。；;：:、]))关单号\s*[:：]?\s*([A-Za-z0-9]{6,20})",
+    re.IGNORECASE,
+)
+
+# 报关单号/报关号（含 OCR 空格变体）：提取前整体屏蔽，防止子串误匹配
+_CUSTOMS_DECLARATION_SHIELD_RE = re.compile(
+    r"报\s*关\s*单\s*号|报\s*关\s*号",
+    re.IGNORECASE,
+)
+
+# 提单号/主提单号/主单号标签：提单号优先（原文明确标注时以其为准，关单号次之）
+_MASTER_BILL_LABEL_RE = re.compile(
+    r"(?:^|(?<=[\s，。；;：:、]))(?:提单号|主提单号|主单号)\s*[:：]?\s*"
+    r"([A-Za-z0-9]{6,40})",
+    re.IGNORECASE,
+)
+
+
+def _extract_customs_no(source_text: str) -> str | None:
+    """从原文提取关单号，清洗分隔符后按提单号格式校验。
+
+    “报关单号/报关号”（含 OCR 空格变体）先整体替换为含“报”字的形式，
+    使“关单号”标签匹配时其前边界不再成立，从而排除误提取。
+    """
+    shielded = _CUSTOMS_DECLARATION_SHIELD_RE.sub("报关单号", source_text)
+    m = _CUSTOMS_NO_LABEL_RE.search(shielded)
+    if not m:
+        return None
+    return _normalize_bill_no(m.group(1))
+
+
+def _revise_bill_no(order_num1: str | None, source_text: str | None) -> str | None:
+    """兜底修复：提单号优先，关单号即提单号（LLM 可能把运编号误作 order_num1）。
+
+    - 原文明确标注 `提单号/主提单号/主单号` 标签时，以其值为准（提单号优先）；
+    - 否则原文存在合法关单号时以关单号覆盖/补全——如文档同时含
+      “运编号：MAX...”、“关单号：CNWW...”时取关单号。
+    """
+    if not source_text:
+        return order_num1
+    bill_match = _MASTER_BILL_LABEL_RE.search(source_text)
+    if bill_match:
+        bill_value = _normalize_bill_no(bill_match.group(1))
+        if bill_value:
+            return bill_value
+    customs_no = _extract_customs_no(source_text)
+    if not customs_no:
+        return order_num1
+    if order_num1 is None or order_num1 != customs_no:
+        return customs_no
+    return order_num1
 
 
 def _normalize_container_type(value: Any) -> str | None:
@@ -1106,6 +1164,9 @@ def parse_document_to_order(
     raw["b_end_port"], raw["b_end_dock"] = _revise_port_fields(
         raw.get("b_end_port"), raw.get("b_end_dock"), source_text
     )
+    # 兜底修复：关单号即提单号——文档同时存在运编号与关单号时，
+    # LLM 可能误取运编号作 order_num1，原文有关单号则一律以关单号为准
+    raw["order_num1"] = _revise_bill_no(raw.get("order_num1"), source_text)
     # 兜底修复：截单时间不得作为装箱时间（b_date_time_start 只认做箱/装箱时间）
     if raw.get("b_date_time_start"):
         raw["b_date_time_start"] = _revise_loading_time(

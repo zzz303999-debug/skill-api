@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
 from app.main import app
 from app.orders.client import publish_create_order
-from app.orders.extractor import extract_order_text
+from app.orders.extractor import _split_loading_value, extract_order_text
 from app.orders.mapper import OrderNotReadyError, build_order_data
 from app.orders.schema import OrderTextExtraction
 
@@ -44,11 +46,40 @@ def test_sample_text_is_parsed_verbatim():
     assert order_data["b_ship_name"] == "ZHONG GU YING KOU"
     assert order_data["b_ship_num"] == "2605N"
     assert order_data["box"] == [{"b_type": "20RF", "box_num": 1}]
-    assert order_data["driver"] == [{"b_date": "7月20日"}]
+    # 做箱时间缺年份：按当前年份推断归一为 YYYY-MM-DD
+    assert order_data["driver"] == [{"b_date": "2026-07-20"}]
     assert order_data["b_end_dock"] == "BUSAN"
     assert order_data["b_end_port"] == "KRPUS"
     assert order_data["b_open_ship_time"] == "2026-07-26"
     assert order_data["data"] == [{"b_order_num": "KMTCSHAP950393"}]
+
+
+@pytest.mark.parametrize(
+    "value,expected_b_date,expected_time_start",
+    [
+        # 完整年月日（含中文写法）→ 归一为 YYYY-MM-DD
+        ("2026-07-20", "2026-07-20", None),
+        ("2026年7月20日", "2026-07-20", None),
+        # 缺年份中文日期 → 按当前年份补全（动态年份，避免跨年测试失败）
+        ("7月20日", f"{date.today().year}-07-20", None),
+        ("12月5日", f"{date.today().year}-12-05", None),
+        # 时间描述 → b_date_time_start 原文
+        ("早上8点", None, "早上8点"),
+        ("9:00", None, "9:00"),
+        ("下午2点", None, "下午2点"),
+        # 无法识别 / 空
+        ("周五", None, None),
+        ("", None, None),
+        ("  ", None, None),
+    ],
+)
+def test_split_loading_value(value, expected_b_date, expected_time_start):
+    assert _split_loading_value(value) == (expected_b_date, expected_time_start)
+
+
+def test_split_loading_value_invalid_date_returns_none():
+    """非法日历日期（如 13月40日）不产出脏数据。"""
+    assert _split_loading_value("13月40日") == (None, None)
 
 
 def test_source_fields_preserve_unsupported_label_and_value():

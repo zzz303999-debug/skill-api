@@ -89,9 +89,9 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "bookingNo": "internal_ref",
     "booking_number": "internal_ref",
     "booking_no": "internal_ref",
-    # customs_declaration_no
-    "关单号": "customs_declaration_no",
+    # customs_declaration_no（报关单号不是提单号；关单号即提单号归 mbl_no）
     "报关单号": "customs_declaration_no",
+    "报关号": "customs_declaration_no",
     "海关报关单号": "customs_declaration_no",
     "customsDeclarationNo": "customs_declaration_no",
     # customer_ref
@@ -100,10 +100,11 @@ _TOP_LEVEL_ALIASES: dict[str, str] = {
     "客户订单号": "customer_ref",
     "customerRef": "customer_ref",
     "customer_reference": "customer_ref",
-    # mbl_no
+    # mbl_no（关单号即提单号）
     "主提单号": "mbl_no",
     "主单号": "mbl_no",
     "提单号": "mbl_no",
+    "关单号": "mbl_no",
     "mblNo": "mbl_no",
     "master_bl": "mbl_no",
     "master_bl_no": "mbl_no",

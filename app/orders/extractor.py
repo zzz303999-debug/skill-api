@@ -1,13 +1,15 @@
-"""自由文本订单纯解析器：只读显式标签，不补全、不推断、不归一化值。"""
+"""自由文本订单纯解析器：只读显式标签；做箱时间会归一为 YYYY-MM-DD。"""
 
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.errors import BadRequestError
+from app.skills.tuoshu.normalizer import normalize_date_value
 
 from .schema import BoxItem, DriverItem, OrderTextExtraction
 
@@ -45,6 +47,51 @@ _BOX_PATTERNS = (
     re.compile(r"(?P<qty>\d+)\s*[*xX×]\s*(?P<type>\d{2}[A-Za-z]+)"),
     re.compile(r"(?P<type>\d{2}[A-Za-z]+)\s*[*xX×]\s*(?P<qty>\d+)"),
 )
+
+# 日期：YYYY-MM-DD（与 document.py 的校验口径一致）
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# 日期+时间：YYYY-MM-DDTHH:MM:SS
+_DATETIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+
+def _split_loading_value(value: str) -> tuple[str | None, str | None]:
+    """拆分做箱时间值：
+
+    - 完整年月日（可带时间，如 `2026-07-20 08:00`）→ (b_date YYYY-MM-DD, 时间部分)
+    - 缺年份中文日期（如 `7月20日`，可带时间尾巴如 `8点`）→ (b_date 按当前年补全, 时间部分)
+    - 纯时间描述（如 `早上8点`/`9:00`/`下午2点`）→ (None, b_date_time_start 原文)
+    - 无法识别 → (None, None)
+
+    对齐订单创建接口文档：driver[N][b_date] 为 YYYY-MM-DD，
+    driver[N][b_date_time_start] 为装箱时间描述。
+    """
+    text = value.strip()
+    if not text:
+        return None, None
+    # 完整年月日（可带时间）：时间部分归 b_date_time_start
+    normalized = normalize_date_value(text, allow_time=True)
+    if isinstance(normalized, str) and _DATETIME_RE.fullmatch(normalized):
+        date_part, time_part = normalized.split("T")
+        return date_part, time_part
+    normalized = normalize_date_value(text, allow_time=False)
+    if isinstance(normalized, str) and _DATE_RE.fullmatch(normalized):
+        return normalized, None
+    # 缺年份的中文日期（如 7月20日，可带时间尾巴如 8点/上午8:00）：
+    # 日期段按当前年份补全，剩余时间描述归 b_date_time_start
+    match = re.match(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日?", text)
+    if match:
+        try:
+            b_date = (
+                date(date.today().year, int(match.group(1)), int(match.group(2))).isoformat()
+            )
+        except ValueError:
+            return None, None
+        rest = text[match.end():].strip()
+        return b_date, rest or None
+    # 时间描述（含数字且非日期）：早上8点 / 9:00 / 下午2点
+    if re.search(r"\d", text):
+        return None, text
+    return None, None
 
 
 def _fields(text: str) -> dict[str, str]:
@@ -119,6 +166,9 @@ def extract_order_text(text: str) -> tuple[OrderTextExtraction, dict[str, Any]]:
         "mt": fields.get("marks"),
     }
     loading_time = fields.get("loading_time")
+    b_date, b_date_time_start = (
+        _split_loading_value(loading_time) if loading_time else (None, None)
+    )
     try:
         extracted = OrderTextExtraction.model_validate(
             {
@@ -141,7 +191,11 @@ def extract_order_text(text: str) -> tuple[OrderTextExtraction, dict[str, Any]]:
                 "c_note": fields.get("c_note"),
                 "data": [cargo_values] if any(cargo_values.values()) else [],
                 "box": _parse_boxes(fields.get("box_text")),
-                "driver": [DriverItem(b_date=loading_time)] if loading_time else [],
+                "driver": (
+                    [DriverItem(b_date=b_date, b_date_time_start=b_date_time_start)]
+                    if (b_date or b_date_time_start)
+                    else []
+                ),
             }
         )
     except ValidationError as exc:

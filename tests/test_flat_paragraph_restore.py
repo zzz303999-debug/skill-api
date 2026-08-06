@@ -125,3 +125,32 @@ def test_mbl_restore_keeps_existing_valid_value():
     assert result["mbl_no"] == "MBL240001"
     assert "mbl_no_by_format" not in _issue_codes(result)
     assert "invalid_mbl_no" not in _issue_codes(result)
+
+
+def test_mbl_restored_from_customs_no_label():
+    """关单号即提单号：原文有关单号标签时 mbl_no 取关单号（运编号不作为提单号）。"""
+    result = _finalize(
+        "运编号：MAX202011824A/B/C\n关单号：CNWW036474\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] == "CNWW036474"
+    assert "mbl_no_by_format" in _issue_codes(result)
+
+
+def test_mbl_bill_label_takes_priority_over_customs_no():
+    """提单号标签优先：提单号与关单号并存且值不同时，取提单号标签值。"""
+    result = _finalize(
+        "提单号：KMTCSHAP950393\n关单号：CNWW036474\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] == "KMTCSHAP950393"
+    assert "mbl_no_by_format" in _issue_codes(result)
+
+
+def test_mbl_not_restored_from_customs_declaration_no():
+    """报关单号不是提单号：原文只有报关单号时不恢复 mbl_no。"""
+    result = _finalize("报关单号：CUS12345678\n托运人：某托运人公司")
+
+    assert result["mbl_no"] is None
+    assert "missing_mbl_no" in _issue_codes(result)
+    assert "mbl_no_by_format" not in _issue_codes(result)
