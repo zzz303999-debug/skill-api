@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     mineru_fallback_enabled: bool = True
     mineru_ocr_concurrency: int = Field(default=4, ge=1, le=16)
 
+    health_probe_enabled: bool = True
+    health_probe_timeout_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
+
     # 存储
     storage_dir: Path = Path("./storage")
     # 审计场景建议调大（如 720 = 30 天），保证留痕可追溯

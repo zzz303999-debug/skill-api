@@ -313,10 +313,24 @@ GET /healthz
 ```
 
 ```json
-{"status": "ok", "skills": ["tuoshu"]}
+{
+  "status": "ok",
+  "skills": ["tuoshu"],
+  "dependencies": {
+    "llm": "ok | not_configured | unreachable | skipped",
+    "mineru": "ok | disabled | unreachable | skipped",
+    "order_api": "ok | not_configured | skipped"
+  }
+}
 ```
 
-HTTP 200 且 `status=ok` 表示进程可响应。**注意：`/healthz` 不请求 LLM、MinerU 或订单接口**，`200` 只表示 FastAPI 进程存活，不表示端到端可用。
+HTTP 200 且 `status=ok` 表示进程可响应。`dependencies` 反映核心依赖状态（`HEALTH_PROBE_ENABLED` 关闭时全部为 `skipped`）：
+
+- `llm`：`GET {LLM_BASE_URL}/models` 可达性探测（只验可达，**不调 chat，不计费**）；缺 `LLM_API_KEY` 时显示 `not_configured` 且不发起请求
+- `mineru`：未启用（`MINERU_ENABLED=false`）为 `disabled`；启用后探测根路径可达性，它是可降级依赖，`unreachable` 不影响整体健康判定
+- `order_api`：**仅配置级检查**（`ORDER_API_EXT_APP_ID`/`ORDER_API_EXT_USER_ID`/`ORDER_API_JXT_OPEN_ID` 是否齐全）。上游是 POST 下单端点，请求即下单，**绝不实际探测**
+
+注意：探测失败不改变 HTTP 200（依赖挂了只影响 `dependencies` 展示，避免网络抖动误判容器不健康）；单依赖探测超时 `HEALTH_PROBE_TIMEOUT_SECONDS`（默认 2s），总耗时低于 Docker healthcheck 的 `timeout: 5s` 预算。
 
 - Docker 镜像自带 HEALTHCHECK，K8s liveness/readiness probe 也用它
 - 建议从另一台机器或云拨测每分钟请求 `/healthz`，连续失败发告警（企业微信等）

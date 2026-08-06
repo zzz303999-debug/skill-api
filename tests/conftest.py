@@ -20,3 +20,5 @@ def _isolate_request_log(tmp_path, monkeypatch):
     monkeypatch.setattr(access_log, "_loaded", False)
     # 测试环境不受本地 .env 的 API_KEY 影响（鉴权默认关闭）
     monkeypatch.setattr(settings, "api_key", "")
+    # 健康检查探测默认关闭，避免测试向真实 LLM/MinerU 网关发起网络请求
+    monkeypatch.setattr(settings, "health_probe_enabled", False)
