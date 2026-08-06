@@ -22,15 +22,16 @@ class OrderUpstreamError(SkillAPIError):
     code = "order_upstream_error"
 
 
-def publish_create_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
+def publish_create_order(
+    order_data: dict[str, Any],
+    *,
+    room_id: str,
+    user_id: str,
+) -> dict[str, Any]:
+    # 下游仅需业务数据、userId（由上游经 /orders 透传）与 roomId，不再携带 apiKeyInfo
     payload = {
-        "apiKeyInfo": {
-            "ext_app_id": settings.order_api_ext_app_id,
-            "ext_user_id": settings.order_api_ext_user_id,
-            "jxt_open_id": settings.order_api_jxt_open_id,
-        },
         "data": order_data,
-        "userId": settings.order_api_user_id,
+        "userId": user_id,
         "roomId": room_id,
     }
     try:

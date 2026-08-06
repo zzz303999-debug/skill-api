@@ -62,9 +62,6 @@ def test_healthz_with_probe_enabled(monkeypatch, probe_server):
     monkeypatch.setattr(settings, "llm_base_url", probe_server)
     monkeypatch.setattr(settings, "mineru_enabled", True)
     monkeypatch.setattr(settings, "mineru_base_url", probe_server)
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
 
     resp = TestClient(app).get("/healthz")
     assert resp.status_code == 200
@@ -106,16 +103,12 @@ def test_mineru_reachable(monkeypatch, probe_server):
 
 
 def test_order_config_ok(monkeypatch):
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
+    monkeypatch.setattr(settings, "order_api_url", "https://orders.example/create")
     assert _probe_order_config() == "ok"
 
 
-def test_order_config_missing_credentials(monkeypatch):
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
+def test_order_config_missing_url(monkeypatch):
+    monkeypatch.setattr(settings, "order_api_url", "")
     assert _probe_order_config() == "not_configured"
 
 

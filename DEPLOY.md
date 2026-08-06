@@ -177,7 +177,6 @@ sudo journalctl -u skill-api -n 200 --no-pager
 | `LLM_API_KEY` | LLM 服务的 Bearer Token |
 | `API_KEY` | 服务接口访问凭证（生产必须设置；未设置则接口无鉴权，仅限可信内网） |
 | `MINERU_API_KEY` | MinerU 服务鉴权 Key（启用且需要时） |
-| `ORDER_API_EXT_APP_ID`、`ORDER_API_EXT_USER_ID`、`ORDER_API_JXT_OPEN_ID`、`ORDER_API_USER_ID` | 订单接口凭据（仅使用 `/orders` 时必填） |
 
 ### 必填（普通环境变量）
 
@@ -328,7 +327,7 @@ HTTP 200 且 `status=ok` 表示进程可响应。`dependencies` 反映核心依�
 
 - `llm`：`GET {LLM_BASE_URL}/models` 可达性探测（只验可达，**不调 chat，不计费**）；缺 `LLM_API_KEY` 时显示 `not_configured` 且不发起请求
 - `mineru`：未启用（`MINERU_ENABLED=false`）为 `disabled`；启用后探测根路径可达性，它是可降级依赖，`unreachable` 不影响整体健康判定
-- `order_api`：**仅配置级检查**（`ORDER_API_EXT_APP_ID`/`ORDER_API_EXT_USER_ID`/`ORDER_API_JXT_OPEN_ID` 是否齐全）。上游是 POST 下单端点，请求即下单，**绝不实际探测**
+- `order_api`：**仅配置级检查**（`ORDER_API_URL` 是否已配置）。上游是 POST 下单端点，请求即下单，**绝不实际探测**；请求仅携带业务数据、`userId`（由上游经 `/orders` 透传）与 `roomId`，无身份凭据
 
 注意：探测失败不改变 HTTP 200（依赖挂了只影响 `dependencies` 展示，避免网络抖动误判容器不健康）；单依赖探测超时 `HEALTH_PROBE_TIMEOUT_SECONDS`（默认 2s），总耗时低于 Docker healthcheck 的 `timeout: 5s` 预算。
 

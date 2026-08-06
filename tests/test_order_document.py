@@ -470,12 +470,11 @@ def test_build_document_order_data_driver_empty_object():
 
 def test_build_document_order_data_succeeds():
     extracted = normalize_document_extraction(COMPLETE_RAW)
-    order_data = build_document_order_data(extracted, customer_id="open-id")
+    order_data = build_document_order_data(extracted)
 
     assert order_data == {
         "order_num1": "KMTCSHAP950393",
         "type": 1,
-        "c_id": "open-id",
         "c_title": "海丰",
         "c_name": "华鑫老板娘",
         "c_phone": "15267966360",

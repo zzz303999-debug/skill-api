@@ -47,7 +47,9 @@ def build_order_data(
 
     data = extracted.model_dump()
     data["type"] = 1
-    data["c_id"] = customer_id
+    # 客户 ID 已无配置来源，仅在显式传入时注入（缺省不发送）
+    if customer_id:
+        data["c_id"] = customer_id
     if not data["data"]:
         data["data"] = [{"b_order_num": extracted.order_num1}]
     else:

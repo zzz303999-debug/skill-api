@@ -413,15 +413,8 @@ _LLM_PROBE_PATH = "/models"
 
 
 def _probe_order_config() -> str:
-    """订单上游仅做配置级检查：三个身份凭据齐全视为可下单。"""
-    configured = all(
-        (
-            settings.order_api_ext_app_id,
-            settings.order_api_ext_user_id,
-            settings.order_api_jxt_open_id,
-        )
-    )
-    return "ok" if configured else "not_configured"
+    """订单上游仅做配置级检查：接口地址已配置即视为可下单。"""
+    return "ok" if settings.order_api_url else "not_configured"
 
 
 async def _http_probe(base_url: str, path: str) -> str:
@@ -586,8 +579,15 @@ async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
     )
 
 
-async def _publish_order(order_data: dict[str, Any], *, room_id: str) -> dict[str, Any]:
-    return await _run_in_executor(partial(publish_create_order, order_data, room_id=room_id))
+async def _publish_order(
+    order_data: dict[str, Any],
+    *,
+    room_id: str,
+    user_id: str,
+) -> dict[str, Any]:
+    return await _run_in_executor(
+        partial(publish_create_order, order_data, room_id=room_id, user_id=user_id)
+    )
 
 
 async def _extract_order_text(text: str):
@@ -611,11 +611,12 @@ async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, 
         )
 
     extracted, meta = await _extract_order_text(text)
-    order_data = build_order_data(
-        extracted,
-        customer_id=settings.order_api_jxt_open_id,
+    order_data = build_order_data(extracted)
+    upstream = await _publish_order(
+        order_data,
+        room_id=body.roomId,
+        user_id=body.userId,
     )
-    upstream = await _publish_order(order_data, room_id=body.roomId)
     return {
         "roomId": body.roomId,
         "source_fields": parse_source_fields(text),
@@ -632,7 +633,6 @@ async def _parse_document_to_order(file_bytes: bytes, filename: str):
             parse_document_to_order,
             file_bytes,
             filename,
-            customer_id=settings.order_api_jxt_open_id,
         )
     )
 

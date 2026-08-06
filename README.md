@@ -184,12 +184,13 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 ```json
 {
   "content": "提单号：ASHHKP29193205；托运人：……",
-  "roomId": "upstream-room-id"
+  "roomId": "upstream-room-id",
+  "userId": "10"
 }
 ```
 
 响应中的 `roomId` 原样回传，`source_fields` 原样保留输入标签和值；`order_data` 是按
-下单接口字段名映射后的实际请求数据。`roomId` 会原样传到下游请求顶层。
+下单接口字段名映射后的实际请求数据。`roomId` 与 `userId` 会原样传到下游请求顶层。
 
 缺少提单号或托运人/公司名称时返回 `422`，不会调用下单接口；订单接口网络错误或
 业务拒绝返回 `502`。创建调用不会自动重试，调用方
@@ -225,11 +226,7 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `API_MAX_UPLOAD_BYTES` | 单文件最大字节数，默认 20 MiB |
 | `API_BATCH_MAX_FILES` | 单批最大文件数，默认 10 |
 | `SKILL_MAX_CONCURRENCY` | 单进程 Skill/LLM 最大并发数，默认 4 |
-| `ORDER_API_URL` | 订单创建接口地址 |
-| `ORDER_API_EXT_APP_ID` | 下单账号 `ext_app_id` |
-| `ORDER_API_EXT_USER_ID` | 下单账号 `ext_user_id` |
-| `ORDER_API_JXT_OPEN_ID` | 下单账号 `jxt_open_id`，同时映射到订单 `c_id` |
-| `ORDER_API_USER_ID` | 发送人 `userId` |
+| `ORDER_API_URL` | 订单创建接口地址（下游仅需业务数据、`userId` 与 `roomId`；`userId` 由上游经 `/orders` 透传，无服务端身份凭据） |
 | `ORDER_API_TIMEOUT_SECONDS` | 下单接口超时秒数，默认 30；创建请求不自动重试 |
 | `VISION_MAX_PDF_PAGES` | 扫描 PDF 可完整处理的最大页数，默认 10；超过时返回错误，不截断 |
 | `VISION_PDF_RENDER_SCALE` | 扫描 PDF 渲染倍率，默认 2.0 |

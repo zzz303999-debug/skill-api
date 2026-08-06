@@ -1072,10 +1072,9 @@ def build_document_order_data(
     注意：本函数不做必填校验，缺失字段保持空值；由调用方通过
     `_missing_fields` 判断是否需要人工确认。
     """
-    return {
+    data = {
         "order_num1": extracted.order_num1,
         "type": 1,
-        "c_id": customer_id,
         "c_title": extracted.c_title,
         "c_name": extracted.c_name,
         "c_phone": extracted.c_phone,
@@ -1112,6 +1111,10 @@ def build_document_order_data(
             _build_driver_entries(extracted)
         ),
     }
+    # 客户 ID 已无配置来源，仅在显式传入时注入（缺省不发送）
+    if customer_id:
+        data["c_id"] = customer_id
+    return data
 
 
 def _build_driver_entries(extracted: OrderDocumentExtraction) -> list[dict[str, str]]:

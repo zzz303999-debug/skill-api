@@ -28,15 +28,12 @@ SAMPLE_TEXT = (
 
 
 def _configure(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
-    monkeypatch.setattr(settings, "order_api_user_id", "dony")
+    monkeypatch.setattr(settings, "order_api_url", "https://orders.example/create")
 
 
 def test_sample_text_is_parsed_verbatim():
     extracted, meta = extract_order_text(SAMPLE_TEXT)
-    order_data = build_order_data(extracted, customer_id="open-id")
+    order_data = build_order_data(extracted)
 
     assert meta == {"extractor": "explicit_labels", "value_mode": "verbatim"}
     assert order_data["order_num1"] == "KMTCSHAP950393"
@@ -106,9 +103,10 @@ def test_create_from_text_extracts_then_publishes(monkeypatch):
     _configure(monkeypatch)
     captured = {}
 
-    async def fake_publish(order_data, *, room_id):
+    async def fake_publish(order_data, *, room_id, user_id):
         captured["order_data"] = order_data
         captured["room_id"] = room_id
+        captured["user_id"] = user_id
         return {
             "code": "200",
             "msg": "添加成功",
@@ -119,7 +117,7 @@ def test_create_from_text_extracts_then_publishes(monkeypatch):
 
     response = client.post(
         "/orders",
-        json={"content": SAMPLE_TEXT, "roomId": "ewewdsdw121"},
+        json={"content": SAMPLE_TEXT, "roomId": "ewewdsdw121", "userId": "10"},
     )
 
     assert response.status_code == 200
@@ -128,6 +126,7 @@ def test_create_from_text_extracts_then_publishes(monkeypatch):
     assert response.json()["source_fields"]["船名航次"] == "ZHONG GU YING KOU V.2605N"
     assert captured["order_data"]["order_num1"] == "KMTCSHAP950393"
     assert captured["room_id"] == "ewewdsdw121"
+    assert captured["user_id"] == "10"
     assert response.json()["meta"]["extractor"] == "explicit_labels"
     assert response.json()["upstream"]["data"][0]["sn"] == "EX26040001"
 
@@ -144,6 +143,7 @@ def test_create_from_text_requires_content_and_room_id(monkeypatch):
     locations = {tuple(item["loc"]) for item in response.json()["detail"]}
     assert ("body", "content") in locations
     assert ("body", "roomId") in locations
+    assert ("body", "userId") in locations
     assert ("body", "text") in locations
 
 
@@ -172,20 +172,15 @@ def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
 
     monkeypatch.setattr(client_module.httpx, "post", fake_post)
     extracted, _meta = extract_order_text(SAMPLE_TEXT)
-    order_data = build_order_data(extracted, customer_id=settings.order_api_jxt_open_id)
+    order_data = build_order_data(extracted)
 
-    result = publish_create_order(order_data, room_id="ewewdsdw121")
+    result = publish_create_order(order_data, room_id="ewewdsdw121", user_id="10")
 
     assert captured == {
         "url": "https://orders.example/create",
         "json": {
-            "apiKeyInfo": {
-                "ext_app_id": "89",
-                "ext_user_id": "jijuTms",
-                "jxt_open_id": "open-id",
-            },
             "data": order_data,
-            "userId": "dony",
+            "userId": "10",
             "roomId": "ewewdsdw121",
         },
         "timeout": settings.order_api_timeout_seconds,
@@ -208,7 +203,7 @@ def test_publish_accepts_numeric_code_and_object_data(monkeypatch):
 
     monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
 
-    result = publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+    result = publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert result == {"code": 200, "msg": "添加成功", "data": {"sn": "EX26040001"}}
 
@@ -232,7 +227,7 @@ def test_publish_reports_non_json_response_details(monkeypatch):
     monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.details == {
         "status_code": 200,
@@ -261,7 +256,7 @@ def test_publish_passes_through_full_upstream_error(monkeypatch):
     monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.http_status == 502
     assert caught.value.code == "order_upstream_error"
@@ -293,7 +288,7 @@ def test_publish_reports_http_error_with_body(monkeypatch):
     monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1")
+        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.details == {
         "status_code": 500,

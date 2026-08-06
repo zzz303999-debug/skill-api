@@ -12,6 +12,7 @@ class CreateOrderFromTextRequest(BaseModel):
 
     content: str = Field(min_length=1, description="上游传入的自由文本订单内容")
     roomId: str = Field(min_length=1, description="上游会话/房间标识，原样回传")
+    userId: str = Field(min_length=1, description="上游用户标识，透传给下游订单接口")
 
 
 class OrderApiResponse(BaseModel):

@@ -191,21 +191,19 @@ def test_query_filter_by_ip():
 
 def test_json_body_recorded_for_orders(monkeypatch):
     import app.main as main_module
-    from app.config import settings
 
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
-    monkeypatch.setattr(settings, "order_api_user_id", "dony")
-
-    async def fake_publish(order_data, *, room_id):
+    async def fake_publish(order_data, *, room_id, user_id):
         return {"code": "200", "msg": "ok", "data": []}
 
     monkeypatch.setattr(main_module, "_publish_order", fake_publish)
     client = TestClient(app)
     resp = client.post(
         "/orders",
-        json={"content": "提单号：KMTCSHAP950393；托运人：海丰", "roomId": "audit-room-1"},
+        json={
+            "content": "提单号：KMTCSHAP950393；托运人：海丰",
+            "roomId": "audit-room-1",
+            "userId": "10",
+        },
     )
     assert resp.status_code == 200
     entry = _items(client.get("/api/logs", params={"path": "/orders"}).json())[0]
@@ -220,13 +218,9 @@ def test_json_body_truncated_when_over_limit(monkeypatch):
     import app.main as main_module
     from app.config import settings
 
-    monkeypatch.setattr(settings, "order_api_ext_app_id", "89")
-    monkeypatch.setattr(settings, "order_api_ext_user_id", "jijuTms")
-    monkeypatch.setattr(settings, "order_api_jxt_open_id", "open-id")
-    monkeypatch.setattr(settings, "order_api_user_id", "dony")
     monkeypatch.setattr(settings, "access_log_body_max_chars", 64)
 
-    async def fake_publish(order_data, *, room_id):
+    async def fake_publish(order_data, *, room_id, user_id):
         return {"code": "200", "msg": "ok", "data": []}
 
     monkeypatch.setattr(main_module, "_publish_order", fake_publish)
@@ -234,7 +228,11 @@ def test_json_body_truncated_when_over_limit(monkeypatch):
     resp = client.post(
         "/orders",
         # 内容超长（含必要字段），验证日志侧截断不影响业务解析
-        json={"content": "提单号：KMTCSHAP950393；托运人：海丰；" + "A" * 500, "roomId": "audit-room-2"},
+        json={
+            "content": "提单号：KMTCSHAP950393；托运人：海丰；" + "A" * 500,
+            "roomId": "audit-room-2",
+            "userId": "10",
+        },
     )
     assert resp.status_code == 200
     entry = _items(client.get("/api/logs", params={"path": "/orders"}).json())[0]
