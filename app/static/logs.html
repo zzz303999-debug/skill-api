@@ -136,6 +136,58 @@
     cursor: pointer;
   }
   #btn-more:disabled { opacity: .4; cursor: default; }
+
+  /* ---------- 移动端适配（≤768px） ---------- */
+  @media (max-width: 768px) {
+    body { font-size: 12px; }
+    header { padding: 12px 12px 10px; }
+    h1 { font-size: 16px; margin-bottom: 10px; }
+    main { padding: 4px 12px 24px; }
+
+    /* 工具栏双列网格 */
+    .toolbar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      align-items: center;
+      gap: 8px;
+    }
+    .toolbar input, .toolbar select { width: 100%; min-width: 0; padding: 7px 10px; }
+    .toolbar button { padding: 7px 12px; }
+    #count { grid-column: 1 / -1; margin-left: 0; text-align: right; }
+
+    /* 表格行转卡片 */
+    .table-wrap { background: transparent; border: none; overflow: visible; }
+    thead { display: none; }
+    tbody { display: block; }
+    tbody tr.row {
+      display: block;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 10px;
+      overflow: hidden;
+    }
+    tbody tr.row:hover td { background: none; }
+    tr.row td {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 7px 12px;
+      white-space: normal;
+      word-break: break-all;
+      border-top: 1px solid #f0f1f4;
+    }
+    tr.row td::before { content: attr(data-label); flex-shrink: 0; color: var(--muted); font-size: 11px; }
+    tr.row td:first-child { border-top: none; }
+    .expand-hint { margin-left: auto; font-size: 10px; }
+    tr.row td.path, tr.row td.file { flex-direction: column; align-items: flex-start; gap: 2px; }
+    .body-row, .body-row td { display: block; }
+    .body-row td { padding: 0; }
+    .reqid { white-space: normal; }
+    .op-btn { padding: 5px 12px; }
+    #btn-more { width: 100%; padding: 10px; }
+  }
 </style>
 </head>
 <body>
@@ -317,18 +369,18 @@ function renderRow(item) {
   const tr = document.createElement("tr");
   tr.className = "row" + (expandable ? " expandable" : "");
   tr.innerHTML =
-    "<td class='muted' title='" + esc(fmtTime(item.ts)) + "'>" + fmtRel(item.ts) + "</td>" +
-    "<td title='" + esc(ipTitle) + "'>" + esc(item.ip || "") +
+    "<td class='muted' data-label='时间' title='" + esc(fmtTime(item.ts)) + "'>" + fmtRel(item.ts) +
       (expandable ? "<span class='expand-hint'>" + (shouldExpand ? "▲" : "▼") + "</span>" : "") + "</td>" +
-    "<td><span class='method " + methodClass(item.method) + "'>" + esc(item.method) + "</span></td>" +
-    "<td class='path'>" + esc(item.path) + "</td>" +
-    "<td class='file'>" + esc(item.file) +
+    "<td data-label='IP' title='" + esc(ipTitle) + "'>" + esc(item.ip || "") + "</td>" +
+    "<td data-label='方法'><span class='method " + methodClass(item.method) + "'>" + esc(item.method) + "</span></td>" +
+    "<td class='path' data-label='路径'>" + esc(item.path) + "</td>" +
+    "<td class='file' data-label='文件'>" + esc(item.file) +
       (item.file_size != null ? " <span class='muted'>(" + fmtBytes(item.file_size) + ")</span>" : "") + "</td>" +
-    "<td>" + (item.duration_ms != null ? esc(item.duration_ms) + " ms" : "") + "</td>" +
-    "<td><span class='badge " + statusClass(item.status) + "'>" + esc(item.status) + "</span></td>" +
-    "<td class='" + (item.error_code ? "err" : "muted") + "'>" + esc(item.error_code || "") + "</td>" +
-    "<td class='reqid muted' title='点击复制'>" + esc(item.request_id) + "</td>" +
-    "<td><button class='op-btn' title='导出该请求完整 JSON（含错误信息）'>导出</button></td>";
+    "<td data-label='耗时'>" + (item.duration_ms != null ? esc(item.duration_ms) + " ms" : "") + "</td>" +
+    "<td data-label='状态'><span class='badge " + statusClass(item.status) + "'>" + esc(item.status) + "</span></td>" +
+    "<td class='" + (item.error_code ? "err" : "muted") + "' data-label='错误码'>" + esc(item.error_code || "") + "</td>" +
+    "<td class='reqid muted' data-label='请求 ID' title='点击复制'>" + esc(item.request_id) + "</td>" +
+    "<td data-label='操作'><button class='op-btn' title='导出该请求完整 JSON（含错误信息）'>导出</button></td>";
   tbody.appendChild(tr);
 
   // 单条导出
