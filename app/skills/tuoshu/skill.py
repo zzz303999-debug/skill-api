@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.core.skill_base import SkillBase
+from app.document_parsers import mineru
 from app.errors import BadRequestError, ConvertError, ParseError
 from app.llm import chat_json, image_to_data_url
 from app.logging_conf import get_logger
@@ -193,6 +194,7 @@ class TuoshuSkill(SkillBase):
 
         # 图片优先原图直传 MinerU；高置信时跳过 LLM vision 只用 OCR 文本提速，
         # 硬失败或低置信时才携原图走 vision 交叉核验。
+        # 当前 LLM 无视觉能力（llm_vision_enabled=False）时一律跳过 vision。
         if is_image(ext):
             parse_result = convert_image_to_parse_result(file_bytes, filename)
             doc_format = parse_result.input_format
@@ -201,9 +203,12 @@ class TuoshuSkill(SkillBase):
             source_text = parse_result.markdown or None
             route_text = f"{filename}\n{source_text or ''}"
             skip_vision = (
-                settings.image_vision_skip_when_confident
-                and parse_result.parser == "mineru"
-                and not parse_result.parser_fallback
+                not settings.llm_vision_enabled
+                or (
+                    settings.image_vision_skip_when_confident
+                    and parse_result.parser == "mineru"
+                    and not parse_result.parser_fallback
+                )
             )
             if parse_result.vision_images and not skip_vision:
                 images = list(parse_result.vision_inputs)
@@ -274,8 +279,18 @@ class TuoshuSkill(SkillBase):
                             "blocking": False,
                         }
                     )
+                if not source_text:
+                    # 无 OCR 文本可降级且模型无视觉时，绝不能把空文档喂给 LLM——
+                    # 模型会输出整份捏造数据。直接拒绝并提示检查 MinerU 服务。
+                    raise ConvertError(
+                        "image has no OCR text and the current LLM model has no "
+                        "vision capability; check the MinerU service or use a "
+                        "vision-capable model",
+                        code="vision_disabled_no_ocr",
+                        details={"file": Path(filename).name},
+                    )
                 user_content = build_user_message_text(
-                    source_text or "",
+                    source_text,
                     filename=filename,
                     doc_format=doc_format,
                     extracted_at=extracted_at,
@@ -307,57 +322,106 @@ class TuoshuSkill(SkillBase):
                         "document has no extractable text; convert it to PDF/image or install LibreOffice",
                         details={"file": Path(filename).name, "reason": hint_detail},
                     )
-                page_images = render_pdf_pages(
-                    file_bytes,
-                    max_pages=settings.vision_max_pdf_pages,
-                    scale=settings.vision_pdf_render_scale,
-                )
-                total_image_bytes = sum(len(image) for image in page_images)
-                if total_image_bytes > settings.vision_max_image_bytes:
-                    # 渲染出的 PNG 总字节同样受 vision 直传上限约束，
-                    # 超限时报错提示拆分，避免网关拒绝与内存峰值。
-                    raise ConvertError(
-                        "rendered scan pages exceed the vision upload limit; "
-                        "split the PDF into smaller parts and retry",
-                        code="vision_image_too_large",
-                        details={
-                            "file": Path(filename).name,
-                            "bytes": total_image_bytes,
-                            "max_bytes": settings.vision_max_image_bytes,
-                        },
-                    )
-                data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
-                parser_review_issues.extend(
-                    {
-                        "code": "vision_only_unverified",
-                        "field": f"source.pages[{page_index}]",
-                        "message": "扫描 PDF 页面仅由 vision 识别，没有独立 OCR 文本可交叉核验，必须人工复核",
-                        "source_values": [],
-                        "blocking": True,
-                    }
-                    for page_index in range(len(page_images))
-                )
-                conversion_meta = {
-                    "parser": "vision",
-                    "parser_fallback": True,
-                    "input_format": "pdf",
-                    "page_routes": [
+                if not settings.llm_vision_enabled:
+                    # 扫描 PDF：模型无视觉，改交 MinerU OCR 解析而不是直接拒绝
+                    try:
+                        scanned = mineru.parse_document(
+                            file_bytes, filename, mime_type="application/pdf"
+                        )
+                    except Exception as exc:
+                        raise ConvertError(
+                            "scan PDF has no extractable text and MinerU OCR failed; "
+                            "check the MinerU service or use a text-based PDF",
+                            code="vision_disabled_no_ocr",
+                            details={
+                                "file": Path(filename).name,
+                                "mineru_error": f"{exc.__class__.__name__}: {exc}",
+                            },
+                        ) from exc
+                    if not scanned.markdown.strip():
+                        raise ConvertError(
+                            "scan PDF has no extractable text and MinerU OCR returned "
+                            "empty; check the MinerU service or use a text-based PDF",
+                            code="vision_disabled_no_ocr",
+                            details={"file": Path(filename).name},
+                        )
+                    # MinerU OCR 成功：走纯文本抽取；扫描件无独立文本层可交叉核验
+                    parser_review_issues.append(
                         {
-                            "page": page_index + 1,
-                            "parser": "vision",
-                            "confidence": "low",
-                            "issues": ["vision_only_unverified"],
+                            "code": "scanned_pdf_ocr_unverified",
+                            "field": "source",
+                            "message": "扫描 PDF 由 MinerU OCR 解析，无独立文本层可交叉核验，必须人工复核",
+                            "source_values": [],
+                            "blocking": True,
+                        }
+                    )
+                    conversion_meta = {
+                        "parser": "mineru",
+                        "parser_fallback": True,
+                        "input_format": "pdf",
+                    }
+                    user_content = build_user_message_text(
+                        scanned.markdown,
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                    )
+                else:
+                    page_images = render_pdf_pages(
+                        file_bytes,
+                        max_pages=settings.vision_max_pdf_pages,
+                        scale=settings.vision_pdf_render_scale,
+                    )
+                    total_image_bytes = sum(len(image) for image in page_images)
+                    if total_image_bytes > settings.vision_max_image_bytes:
+                        # 渲染出的 PNG 总字节同样受 vision 直传上限约束，
+                        # 超限时报错提示拆分，避免网关拒绝与内存峰值。
+                        raise ConvertError(
+                            "rendered scan pages exceed the vision upload limit; "
+                            "split the PDF into smaller parts and retry",
+                            code="vision_image_too_large",
+                            details={
+                                "file": Path(filename).name,
+                                "bytes": total_image_bytes,
+                                "max_bytes": settings.vision_max_image_bytes,
+                            },
+                        )
+                    data_urls = [image_to_data_url(image, mime="image/png") for image in page_images]
+                    parser_review_issues.extend(
+                        {
+                            "code": "vision_only_unverified",
+                            "field": f"source.pages[{page_index}]",
+                            "message": "扫描 PDF 页面仅由 vision 识别，没有独立 OCR 文本可交叉核验，必须人工复核",
+                            "source_values": [],
+                            "blocking": True,
                         }
                         for page_index in range(len(page_images))
-                    ],
-                }
-                user_content = build_user_message_vision(
-                    data_urls,
-                    filename=filename,
-                    doc_format=doc_format,
-                    extracted_at=extracted_at,
-                )
-            elif parse_result is not None and parse_result.vision_images:
+                    )
+                    conversion_meta = {
+                        "parser": "vision",
+                        "parser_fallback": True,
+                        "input_format": "pdf",
+                        "page_routes": [
+                            {
+                                "page": page_index + 1,
+                                "parser": "vision",
+                                "confidence": "low",
+                                "issues": ["vision_only_unverified"],
+                            }
+                            for page_index in range(len(page_images))
+                        ],
+                    }
+                    user_content = build_user_message_vision(
+                        data_urls,
+                        filename=filename,
+                        doc_format=doc_format,
+                        extracted_at=extracted_at,
+                    )
+            elif (
+                parse_result is not None
+                and parse_result.vision_images
+                and settings.llm_vision_enabled
+            ):
                 source_text = str(markdown) or None
                 route_text = f"{filename}\n{source_text or ''}"
                 images = list(parse_result.vision_inputs)

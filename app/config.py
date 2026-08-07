@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     llm_thinking_mode: str = "disabled"
 
     # Vision
+    # LLM 是否具备视觉（多模态）能力；当前生产模型无视觉时为 False：
+    # 图片/扫描件一律只走 OCR 文本，禁止把原图发给 LLM
+    llm_vision_enabled: bool = False
     vision_max_pdf_pages: int = Field(default=10, ge=1, le=10)
     vision_pdf_render_scale: float = Field(default=2.0, gt=0, le=4.0)
     # 图片高置信时跳过 LLM vision 交叉核验，只用 MinerU OCR 文本走 LLM 以提速

@@ -132,6 +132,8 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
 def test_scanned_pdf_is_sent_as_vision_pages(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 
+    # 启用 LLM 视觉能力，验证扫描 PDF 转 vision 页面的路径
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
     captured: dict = {}
     monkeypatch.setattr(
         skill_module,
@@ -211,6 +213,9 @@ def test_incomplete_review_issue_is_repaired_once(monkeypatch):
 
     monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
 
+    # 启用 LLM 视觉能力（无视觉时该流程在 convert 阶段即被拒绝）
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
+
     response = TuoshuSkill().run(
         file_bytes=b"\x89PNG\r\n\x1a\nimage",
         filename="order.png",
@@ -240,6 +245,9 @@ def test_incomplete_review_issue_still_fails_after_one_repair(monkeypatch):
         }, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+
+    # 启用 LLM 视觉能力（无视觉时该流程在 convert 阶段即被拒绝）
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     with pytest.raises(ParseError, match="required structure"):
         TuoshuSkill().run(
@@ -286,6 +294,8 @@ def test_parser_fallback_issue_reaches_final_output(monkeypatch):
             {"model": "fake", "usage": None},
         ),
     )
+    # 启用 LLM 视觉能力（无视觉时 parser=vision 且无 OCR 文本会被拒绝）
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     response = TuoshuSkill().run(
         file_bytes=b"\x89PNG\r\n\x1a\nimage",
@@ -363,6 +373,8 @@ def test_low_confidence_mineru_image_keeps_vision_cross_check(monkeypatch):
         ],
     )
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    # 启用 LLM 视觉能力，验证低置信图片携原图走 vision 交叉核验
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
@@ -404,6 +416,8 @@ def test_oversized_image_degrades_to_text_and_flags_manual_review(monkeypatch):
         ],
     )
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    # 启用 LLM 视觉能力，验证超限降级路径
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
@@ -448,6 +462,8 @@ def test_oversized_image_without_ocr_text_rejected(monkeypatch):
         ],
     )
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    # 启用 LLM 视觉能力，验证“超限且无 OCR”拒绝路径
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     with pytest.raises(ConvertError) as exc_info:
         TuoshuSkill().run(
@@ -456,10 +472,39 @@ def test_oversized_image_without_ocr_text_rejected(monkeypatch):
     assert exc_info.value.code == "vision_image_too_large"
 
 
+def test_image_without_ocr_text_rejected_when_vision_disabled(monkeypatch):
+    """默认无视觉模型：图片无 OCR 文本（MinerU 失败/降级）时拒绝，禁止空文档喂 LLM。"""
+    import app.skills.tuoshu.skill as skill_module
+    from app.document_parsers.models import ParsedPage, ParseResult
+
+    parse_result = ParseResult(
+        input_format="png",
+        pages=[
+            ParsedPage(
+                page_number=1,
+                parser="vision",
+                confidence="low",
+                # markdown 为空：MinerU 失败降级到纯 vision
+                vision_image=b"\x89PNG\r\n\x1a\nimage",
+                vision_mime="image/png",
+            )
+        ],
+    )
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+
+    with pytest.raises(ConvertError) as exc_info:
+        TuoshuSkill().run(
+            file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+        )
+    assert exc_info.value.code == "vision_disabled_no_ocr"
+
+
 def test_scan_pdf_vision_bytes_budget(monkeypatch):
     """扫描 PDF 渲染出的 PNG 总字节超过 vision 上限时报错，而不是超限直传。"""
     import app.skills.tuoshu.skill as skill_module
 
+    # 启用 LLM 视觉能力，验证扫描 PDF 转 vision 的字节预算路径
+    monkeypatch.setattr(settings, "llm_vision_enabled", True)
     monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
     monkeypatch.setattr(
         skill_module,
@@ -470,6 +515,58 @@ def test_scan_pdf_vision_bytes_budget(monkeypatch):
     with pytest.raises(ConvertError) as exc_info:
         TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
     assert exc_info.value.code == "vision_image_too_large"
+
+
+def test_scan_pdf_goes_to_mineru_when_vision_disabled(monkeypatch):
+    """默认无视觉模型：扫描 PDF 交给 MinerU OCR 解析，而不是直接报错。"""
+    import app.skills.tuoshu.skill as skill_module
+
+    captured: dict = {}
+    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
+    monkeypatch.setattr(
+        skill_module.mineru,
+        "parse_document",
+        lambda *_args, **_kwargs: type(
+            "Scanned", (), {"markdown": "提单号：KMTCSHAP950393\n托运人：某托运人公司"}
+        )(),
+    )
+
+    def fake_chat_json(messages, **_kwargs):
+        captured["messages"] = messages
+        return {"source": {}}, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+
+    response = TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+
+    user_content = captured["messages"][-1]["content"]
+    # MinerU OCR 文本走纯文本通道，不再携带图片
+    assert isinstance(user_content, str)
+    assert "提单号：KMTCSHAP950393" in user_content
+    # 扫描件无独立文本层可交叉核验，必须人工复核
+    issues = response["result"]["review_issues"]
+    assert any(
+        issue["code"] == "scanned_pdf_ocr_unverified" and issue["blocking"]
+        for issue in issues
+    )
+    assert response["result"]["ready_for_order"] is False
+
+
+def test_scan_pdf_rejected_when_mineru_fails_and_vision_disabled(monkeypatch):
+    """无视觉模型且 MinerU 也失败时，扫描 PDF 才报错（明确归因 MinerU）。"""
+    import app.skills.tuoshu.skill as skill_module
+
+    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
+    monkeypatch.setattr(
+        skill_module.mineru,
+        "parse_document",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("mineru down")),
+    )
+
+    with pytest.raises(ConvertError) as exc_info:
+        TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+    assert exc_info.value.code == "vision_disabled_no_ocr"
+    assert "MinerU" in exc_info.value.message
 
 
 def test_auth_middleware_enforces_api_key(monkeypatch):

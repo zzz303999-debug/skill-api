@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.config import settings
+from app.document_parsers import mineru
 from app.errors import BadRequestError, ConvertError, ParseError
 from app.llm import chat_json, image_to_data_url
 from app.logging_conf import get_logger
@@ -43,9 +44,8 @@ _CONTAINER_TYPE_RE = re.compile(
 )
 _CONTAINER_SUFFIXES = frozenset(STANDARD_CONTAINER_SUFFIXES)
 
-# 提单号：字母数字混合且同时包含字母与数字，至少 8 位；
-# 排除纯数字（电话/日期/内部编号）与纯字母（船名/人名）
-_BILL_NO_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{8,}$")
+# 提单号：纯数字或字母数字组成，至少 8 位；排除纯字母（船名/人名）
+_BILL_NO_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9]{8,}$")
 
 # 日期：YYYY-MM-DD
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -68,8 +68,16 @@ _MARKDOWN_STRIP_RE = re.compile(r"^_(?:p|l)\d+(?:: \(empty\))?_\s*", re.IGNORECA
 # 文档抬头区域取前 N 个非空行
 _HEADER_LINES = 6
 
-# “客户简称+装箱/做箱通知”标题形式
-_NOTICE_HEADING_RE = re.compile(r"^([^|：:\n]{2,40}?)(?:装箱|做箱)通知(?:书)?$")
+# “客户简称+单据标题”抬头形式：装箱/做箱通知、海运出口运输委托单/托书等
+# （长后缀在前，避免“海运出口运输委托单”被“委托单”抢先匹配）
+_DOC_HEADING_SUFFIXES = (
+    "海运出口运输委托单|出口运输委托单|运输委托单|"
+    "装箱通知书|做箱通知书|装箱通知|做箱通知|"
+    "委托单|委托书|托书|托运单"
+)
+_DOC_HEADING_RE = re.compile(
+    rf"^([^|：:\n]{{2,40}}?)(?:{_DOC_HEADING_SUFFIXES})$"
+)
 
 # 公司特征词：用于从文档抬头主动识别公司名
 _COMPANY_TOKEN_RE = re.compile(
@@ -112,6 +120,8 @@ def _header_company_lines(source_text: str) -> list[str]:
     for raw_line in source_text.splitlines():
         line = _MARKDOWN_STRIP_RE.sub("", raw_line.strip()).strip()
         line = line.lstrip("# ").strip().strip("*_` ")
+        # 去掉 markdown/OCR 常见前导符号（如 “# +公司名委托单” 的 +/列表符）
+        line = line.lstrip("+·•＋").strip()
         if line.startswith("|"):
             line = line.strip("|").strip()
         if line:
@@ -332,7 +342,7 @@ def _revise_c_title_to_value(raw_value: str | None, source_text: str | None) -> 
     for line in header_lines:
         if line == wanted:
             return wanted
-        heading = _NOTICE_HEADING_RE.fullmatch(line)
+        heading = _DOC_HEADING_RE.fullmatch(line)
         if heading and heading.group(1).strip() == wanted:
             return wanted
         cells = [cell.strip() for cell in line.split("|") if cell.strip()]
@@ -376,8 +386,8 @@ def _extract_header_company(source_text: str | None) -> str | None:
         for cell in cells:
             if cell.isdigit() or "：" in cell or ":" in cell:
                 continue
-            # “客户简称+装箱/做箱通知”标题优先（否则会被标签词“做箱/装箱”拦截）
-            heading = _NOTICE_HEADING_RE.fullmatch(cell)
+            # “客户简称+装箱/做箱通知/运输委托单”标题优先（否则会被标签词拦截）
+            heading = _DOC_HEADING_RE.fullmatch(cell)
             if heading:
                 company = heading.group(1).strip()
                 if len(company) >= 5 or _COMPANY_TOKEN_RE.search(company):
@@ -463,13 +473,13 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 
 # 抽取规则
 1. 编号逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
-2. `order_num1` 必须为字母数字混合（同时含字母与数字）且至少 8 位；不得保留空格、连字符或其他符号；纯数字（如电话号码）与纯字母串不算提单号，不符合时填 null。**关单号即提单号**；`报关单号`/`报关号` 不是提单号，禁止作为 `order_num1`；`运编号`/`业务编号`/`我司业务编号` 是内部编号（归 `c_sn`），禁止作为 `order_num1`；关单号与运编号并存时取关单号。
+2. `order_num1` 必须至少 8 位且仅由数字或英文字母数字组成（纯数字也允许）；不得保留空格、连字符或其他符号；纯字母串（船名/人名）不算提单号，不符合时填 null。**关单号即提单号**；`报关单号`/`报关号` 不是提单号，禁止作为 `order_num1`；`运编号`/`业务编号`/`我司业务编号` 是内部编号（归 `c_sn`），禁止作为 `order_num1`；关单号与运编号并存时取关单号。
 3. `box[].b_type` 必须是 4 位：箱长 `20`/`25`/`40` 加两位字母后缀（`GP/HC/HQ/RF/OT/TK/FR/PL/OH/RH/UT/VH` 等），与原文一致，禁止在 HQ/HC/DV/GP 等代码间改写；`box[].box_num` 为箱量（`3*40HQ` → box_num=3）。多个箱型分多条输出；**多数据行同为相同箱型时 box_num 必须累加**（如 3 个数据行各 `1*40HC` → `[{"b_type": "40HC", "box_num": 3}]`），禁止只取第一行的箱量。
 4. `c_title` 取文档抬头公司（顶部公司名称）或 `FM：`/`FROM：` 后的公司名称（一般为公司名称或简称）；同行含联系人姓名/电话时只取公司名部分；都无 → 填 null（人工确认）。`TO:`/`ATTN:`/`致:` 后的值是收件/通知对象，**禁止**作为 c_title；文件名不是原文，**禁止**从文件名前缀推断 c_title。
 5. `factory_bei` 取门点详细街道地址（保留省市区县、道路、门牌号和园区/楼栋信息），并**附上原文的现场联系人姓名与电话**——地址同行或独立的联系人/电话行都要并入（格式如 `金泰路转诚泰路17号 朱劲松 13776121224`，对齐订单创建接口文档：门点地址含现场联系人、电话）；不要把公司名并入地址（公司名在 `factory_name`）。
 6. `b_date` 输出 `YYYY-MM-DD`；原文缺年时按文档日期、文件名年份推断，无法推断填 null。`b_date_time_start` 只取 `做箱时间`/`装箱时间` 标签后的时间描述（如 `早上8点`/`9:00`/`下午2点`），值为日期格式时归 `b_date` 而非 `b_date_time_start`；**`截单时间`/`截关时间` 等不是装箱时间，禁止填入 `b_date_time_start`**。
 7. `packages`/`gross_weight`/`volume` 只清洗单位和千分位：件数为整数；毛重、体积按原文精度保留 2-3 位小数，超过 3 位四舍五入到 3 位，不补无意义的尾零；单位（CTNS/KGS/CBM）可省略。任一值 ≤0 填 null。
-8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位。
+8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯数字或字母数字值可按格式特征在全文中定位。
 9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`b_date_time_start`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述（`b_end_port` 中转港标签后明确写出的待查描述除外，见规则 13）。
 10. `b_open_ship_time`/`b_date`/`b_date_time_start` 是三个不同字段：前者是开船时间，`b_date` 是做箱/装箱**日期**（`YYYY-MM-DD`），`b_date_time_start` 是做箱/装箱**时间描述**（如 `早上8点`/`9:00`），按标签与值格式严格区分，禁止混填。
 11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`data[].hh`（货名）与 `data[].mt`（唛头）可选，原文有则逐字保留，无则 null。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
@@ -556,10 +566,14 @@ def _convert_file(
         doc_format = parse_result.input_format
         conversion_meta = parse_result.meta()
         source_text = parse_result.markdown or None
+        # 当前 LLM 无视觉能力（llm_vision_enabled=False）时一律跳过 vision
         skip_vision = (
-            settings.image_vision_skip_when_confident
-            and parse_result.parser == "mineru"
-            and not parse_result.parser_fallback
+            not settings.llm_vision_enabled
+            or (
+                settings.image_vision_skip_when_confident
+                and parse_result.parser == "mineru"
+                and not parse_result.parser_fallback
+            )
         )
         if parse_result.vision_images and not skip_vision:
             images = list(parse_result.vision_inputs)
@@ -596,8 +610,18 @@ def _convert_file(
         else:
             if skip_vision:
                 conversion_meta["vision_cross_check"] = "skipped_confident"
+            if not source_text:
+                # 无 OCR 文本可降级且模型无视觉时，绝不能把空文档喂给 LLM——
+                # 模型会输出整份捏造数据。直接拒绝并提示检查 MinerU 服务。
+                raise ConvertError(
+                    "image has no OCR text and the current LLM model has no "
+                    "vision capability; check the MinerU service or use a "
+                    "vision-capable model",
+                    code="vision_disabled_no_ocr",
+                    details={"file": Path(filename).name},
+                )
             user_content = _build_user_message_text(
-                source_text or "", filename, doc_format
+                source_text, filename, doc_format
             )
         return source_text, doc_format, conversion_meta, user_content
 
@@ -611,7 +635,7 @@ def _convert_file(
             conversion_meta = {"parser": parser}
 
     if markdown.startswith("SCAN_OR_IMAGE_HINT:"):
-        # 扫描件 PDF：整本转图片走 vision
+        # 扫描件 PDF：无视觉模型时交 MinerU OCR，否则整本转图片走 vision
         if ext != ".pdf":
             raise ConvertError(
                 "document has no extractable text; convert it to PDF/image",
@@ -619,6 +643,42 @@ def _convert_file(
                     "file": Path(filename).name,
                     "convert_hint": markdown.partition("#")[2].strip(),
                 },
+            )
+        if not settings.llm_vision_enabled:
+            # 扫描 PDF：模型无视觉，改交 MinerU OCR 解析而不是直接拒绝
+            try:
+                scanned = mineru.parse_document(
+                    file_bytes, filename, mime_type="application/pdf"
+                )
+            except Exception as exc:
+                raise ConvertError(
+                    "scan PDF has no extractable text and MinerU OCR failed; "
+                    "check the MinerU service or use a text-based PDF",
+                    code="vision_disabled_no_ocr",
+                    details={
+                        "file": Path(filename).name,
+                        "mineru_error": f"{exc.__class__.__name__}: {exc}",
+                    },
+                ) from exc
+            if not scanned.markdown.strip():
+                raise ConvertError(
+                    "scan PDF has no extractable text and MinerU OCR returned "
+                    "empty; check the MinerU service or use a text-based PDF",
+                    code="vision_disabled_no_ocr",
+                    details={"file": Path(filename).name},
+                )
+            # MinerU OCR 成功：走纯文本抽取；扫描件无独立文本层可交叉核验
+            conversion_meta = {
+                "parser": "mineru",
+                "parser_fallback": True,
+                "input_format": "pdf",
+                "ocr_unverified": True,
+            }
+            return (
+                scanned.markdown,
+                doc_format,
+                conversion_meta,
+                _build_user_message_text(scanned.markdown, filename, doc_format),
             )
         page_images = render_pdf_pages(
             file_bytes,
@@ -649,7 +709,11 @@ def _convert_file(
         )
 
     source_text = str(markdown)
-    if parse_result is not None and parse_result.vision_images:
+    if (
+        parse_result is not None
+        and parse_result.vision_images
+        and settings.llm_vision_enabled
+    ):
         images = list(parse_result.vision_inputs)
         total_image_bytes = sum(len(image) for image, _ in images)
         if total_image_bytes > settings.vision_max_image_bytes:

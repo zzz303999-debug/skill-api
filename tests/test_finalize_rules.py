@@ -194,7 +194,7 @@ def test_child_bill_aliases_never_fall_back_to_master_bill():
     assert result["ready_for_order"] is False
 
 
-@pytest.mark.parametrize("bill_no", ["ABC12345", "HLCUSHA2111JWDA1", "OOLU2120860080"])
+@pytest.mark.parametrize("bill_no", ["ABC12345", "HLCUSHA2111JWDA1", "OOLU2120860080", "12345678"])
 def test_valid_bill_number_formats_are_preserved(bill_no):
     result = finalize_extraction(
         {
@@ -210,7 +210,7 @@ def test_valid_bill_number_formats_are_preserved(bill_no):
 
 
 @pytest.mark.parametrize(
-    "bill_no", ["1234567", "ABC-12345", "提单12345678", "12345678", "ABCDEFGH"]
+    "bill_no", ["1234567", "ABC-12345", "提单1234567", "ABCDEFGH"]
 )
 def test_invalid_bill_number_formats_are_cleared(bill_no):
     result = finalize_extraction(

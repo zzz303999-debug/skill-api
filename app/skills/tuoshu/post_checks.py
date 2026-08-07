@@ -52,10 +52,9 @@ _DATE_ONLY_RE = re.compile(DATE_PATTERN)
 _DATE_OR_DATETIME_RE = re.compile(DATE_OR_DATETIME_PATTERN)
 
 
-# 提单号：字母数字混合且同时包含字母与数字，至少 8 位。
-# 排除纯数字（电话/日期/内部编号）与纯字母（船名/人名），
-# 与 _restore_mbl_no_from_source 及 prompt 的“排除纯数字”规则保持一致。
-_BILL_NO_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{8,}$")
+# 提单号：纯数字或字母数字组成，至少 8 位；排除纯字母（船名/人名）
+# 与数字+单位（件数）形式；与 _restore_mbl_no_from_source 及 prompt 保持一致。
+_BILL_NO_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9]{8,}$")
 
 
 _PACKAGE_UNIT_ALIASES = {
@@ -494,6 +493,10 @@ _CUSTOMS_DECLARATION_LABELS = ("报关单号", "报关号")
 _CHILD_BILL_LABELS = ("子提单号", "子单号", "分提单号", "分单号", "HBL NO", "HB/L")
 
 
+# 电话/手机标签值不是提单号：格式特征恢复时排除，防止纯数字电话号码误恢复
+_PHONE_LABELS = ("电话", "手机", "联系电话", "联系人电话", "TEL", "MOBILE", "FAX")
+
+
 _KNOWN_FIELD_METADATA_KEYS = frozenset(
     {"raw_text_snippet", "source", "doc_type", "template_hint", "extracted_at"}
 )
@@ -584,6 +587,12 @@ def _restore_mbl_no_from_source(
         ) | set(
             _extract_separated_label_values(source_text, _CHILD_BILL_LABELS)
         )
+        # 电话/手机标签值不是提单号：排除后防止纯数字电话号码被恢复为 mbl_no
+        phone_values = set(
+            _extract_explicit_values(source_text, _PHONE_LABELS)
+        ) | set(
+            _extract_separated_label_values(source_text, _PHONE_LABELS)
+        )
         # 报关单号/报关号不是提单号：即使未被 LLM 识别也不得按格式特征恢复为 mbl_no
         declaration_values = set(
             _extract_explicit_values(source_text, _CUSTOMS_DECLARATION_LABELS)
@@ -596,10 +605,9 @@ def _restore_mbl_no_from_source(
             for token in re.findall(r"[A-Za-z0-9]{8,}", source_text)
             if _BILL_NO_RE.fullmatch(token)
             and not _looks_like_quantity(token)
-            and re.search(r"[A-Za-z]", token)
-            and re.search(r"\d", token)
             and token not in known_values
             and token not in child_values
+            and token not in phone_values
             and token not in declaration_values
         }
         if len(plausible) != 1:

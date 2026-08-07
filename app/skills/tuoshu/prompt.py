@@ -195,7 +195,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 
 # 抽取规则
 1. 编号和人名逐字复制，严禁改大小写、形近字或 O/0、I/1；图片中的红章、水印、logo、品牌图及其 OCR 一律忽略。
-2. `我司编号/业务编号→internal_ref`，`报关单号/报关号→customs_declaration_no`（报关单号不是提单号），`关单号→mbl_no`（关单号即提单号；与运编号/业务编号并存时取关单号），`提单号→mbl_no`，PO/订单号进对应 `containers[].po_no/customer_ref`。提单号必须至少 8 位且只能由数字或英文字母数字组成，不得保留空格、连字符或其他符号；不符合时填 null。
+2. `我司编号/业务编号→internal_ref`，`报关单号/报关号→customs_declaration_no`（报关单号不是提单号），`关单号→mbl_no`（关单号即提单号；与运编号/业务编号并存时取关单号），`提单号→mbl_no`，PO/订单号进对应 `containers[].po_no/customer_ref`。提单号必须至少 8 位且仅由数字或英文字母数字组成（纯数字也允许），不得保留空格、连字符或其他符号；不符合时填 null。
 3. `船名航次→vessel+voyage`；`船 公 司` 等标签先去空白再匹配，船公司原文值（包括 `EMC CPS` 这类全称）优先于提单号推断；`中转港（卸港）` 归入 `transit_port`；其中“见设备交接单/见设”等待查原文必须保留；`开港时间`不是 `etd`。表格若为“表头行＋值行”布局（如 `| 中转港代码： | 交货地： |` 下方才是 `| KRPUS | BUSAN |`），取 `中转港代码` 列下方值 `KRPUS`，严禁把表头行其他标签（如 `交货地：`）当值。
 4. `loading_time` 取做箱/装箱日期；日期为 `YYYY-MM-DD`，时间为 `YYYY-MM-DDTHH:MM:SS`；原文有时分不得降精度。MinerU 相邻单元格 `日期：20` + `21.5.28` 必须拼为 `2021-05-28`。缺年按文档日期、文件名/业务号年份推断，否则 null。
 5. `factory.address` 只取可用于到达门点的详细街道地址，保留省市区县、道路、门牌号和园区/楼栋信息；不要把公司名、联系人或电话并入地址。
@@ -206,7 +206,7 @@ SYSTEM_PROMPT_TEMPLATE = """你是海运托书结构化抽取助手。读取 Mar
 10. `carrier` 只有原文明示承运人/船公司才是直接值；由主单前缀或船名推断时加 blocking `carrier_by_mbl/carrier_by_vessel` 并列依据；原文明示值优先，只有原文缺失时才使用前缀/船名兜底。
 11. 港口州/国家修饰信息不得丢弃，`COLUMBUS(OH)` 归一为 `COLUMBUS, OH`。`source` 使用用户给出的 file/doc_format/extracted_at；所有复核项只写 `review_issues`，每个 code 只允许一条且禁止 `unstructured_review_issue`。每项必须完整包含非空字符串 `code`、`field`、`message`，以及字符串数组 `source_values` 和布尔值 `blocking`。
 12. `remark`、`containers[].remark`、`seal_no` 等自由文本必须能在来源中找到依据；禁止补写原文没有的操作要求、术语或语句。图片输入时，MinerU 文本只是 OCR 辅助，原图可见文字才是最终依据；OCR 中出现但图片上看不到的词句必须剔除，并写 blocking `ungrounded_text`。`customer` 优先逐字取 `FM` 后的值（公司名称、简称或其他原文称呼），缺失时依次取明确的客户栏、`海丰装箱通知` 这类“客户简称+装箱/做箱通知”抬头和正文抬头公司；仍缺失时填 null，并添加 blocking `missing_customer` 说明。`sender_contact` 仅在 `FM/FROM` 值明确是人名时填写，页脚“联系人/我司联系人”不得填入。
-13. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落、中间隔着多个空段，值甚至可能出现在标签之前。此时把标签后第一个非空、非标签（不以冒号结尾、不含冒号）的段落当作该标签的值；`提单号/主提单号` 的 8+ 位纯字母数字值可按格式特征在全文中定位，但排除纯数字（电话/日期）、纯字母（船名/人名）以及 `数字+单位`（如 `1100CTNS`）形式的词。
+13. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落、中间隔着多个空段，值甚至可能出现在标签之前。此时把标签后第一个非空、非标签（不以冒号结尾、不含冒号）的段落当作该标签的值；`提单号/主提单号` 的 8+ 位纯数字或字母数字值可按格式特征在全文中定位，但排除纯字母（船名/人名）以及 `数字+单位`（如 `1100CTNS`）形式的词。
 
 `doc_type` 仅 PACKING_NOTICE/TRANSPORT_ORDER/TRUCKING_ORDER/BOOKING_NOTE/UNKNOWN。标题优先；“做箱通知”若以提箱、进港、司机为主则 TRUCKING_ORDER。本地提示：doc_type={route_doc_type}，template_hint={route_template_hint}；与原文冲突时以原文为准。
 """

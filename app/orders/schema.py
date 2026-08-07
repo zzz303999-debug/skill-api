@@ -102,7 +102,7 @@ class DocumentCargoItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     b_order_num: str | None = Field(
-        None, description="该行提单号，字母数字混合且至少 8 位（须同时含字母与数字）"
+        None, description="该行提单号，纯数字或字母数字且至少 8 位"
     )
     j: str | None = Field(None, description="件数，纯数字字符串")
     m: str | None = Field(None, description="毛重，纯数字字符串")
@@ -125,7 +125,7 @@ class OrderDocumentExtraction(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    order_num1: str | None = Field(None, description="提单号，字母数字混合且至少 8 位（须同时含字母与数字）")
+    order_num1: str | None = Field(None, description="提单号，纯数字或字母数字且至少 8 位")
     c_title: str | None = Field(None, description="客户，取 FM 后的值或抬头公司")
     c_name: str | None = Field(None, description="现场联系人")
     c_phone: str | None = Field(None, description="联系电话")

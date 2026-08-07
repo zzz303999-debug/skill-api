@@ -73,6 +73,7 @@ _ALWAYS_BLOCKING_CODES = {
     "mineru_low_confidence",
     "confirmed_ocr_artifact",
     "vision_image_too_large",
+    "scanned_pdf_ocr_unverified",
     "ungrounded_text",
     "sender_contact_not_from_from_field",
     "carrier_prefix_mismatch",

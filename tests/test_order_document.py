@@ -65,6 +65,9 @@ def test_normalize_bill_no_accepts_8_plus_alphanumeric():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "OOLU2120860080"})
     assert extracted.order_num1 == "OOLU2120860080"
 
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "12345678"})
+    assert extracted.order_num1 == "12345678"
+
 
 @pytest.mark.parametrize(
     "value",
@@ -72,7 +75,6 @@ def test_normalize_bill_no_accepts_8_plus_alphanumeric():
         "1234567",  # 不足 8 位
         "提单号1234567",  # 混合文字
         "1234_5678",  # 下划线视为非法字符
-        "12345678",  # 纯数字（电话/日期/内部编号）
         "ABCDEFGH",  # 纯字母（船名/人名）
     ],
 )
@@ -122,8 +124,8 @@ def test_revise_bill_no_bill_label_takes_priority_over_customs_no():
 
 
 def test_revise_bill_no_ignores_invalid_customs_no():
-    """关单号不合提单号格式（如纯数字）时不覆盖，保持 LLM 值。"""
-    source = "运编号：MAX202011824A\n关单号：12345678\n船名航次：COSCO SHIPPING RHINE / 019W"
+    """关单号不合提单号格式（如不足 8 位）时不覆盖，保持 LLM 值。"""
+    source = "运编号：MAX202011824A\n关单号：1234567\n船名航次：COSCO SHIPPING RHINE / 019W"
     assert _revise_bill_no("MAX202011824A", source) == "MAX202011824A"
 
 
@@ -1164,6 +1166,38 @@ def test_revise_c_title_returns_none_without_fm_from():
     """原文无 FM/FROM 行时置空（走人工确认），不放行 TO 收件方。"""
     text = "TO：俊泰\n关单号：SECU13842\n"
     assert _revise_c_title_to_value("俊泰", text) is None
+
+
+def test_revise_c_title_keeps_company_in_transport_order_title():
+    """“公司名+海运出口运输委托单”连写标题：标题公司是合法客户来源。"""
+    text = (
+        "# +江苏亚东朗升国际物流有限公司海运出口运输委托单\n"
+        "TO：上海柚理供应链管理有限公司\n"
+        "基本信息：\n"
+    )
+    assert _revise_c_title_to_value("江苏亚东朗升国际物流有限公司", text) == (
+        "江苏亚东朗升国际物流有限公司"
+    )
+    # TO 收件人仍不是客户来源
+    assert _revise_c_title_to_value("上海柚理供应链管理有限公司", text) is None
+
+
+def test_extract_header_company_returns_company_only_from_transport_order_title():
+    """委托单标题兜底补全只返回公司名部分，不得把整个标题行当公司名。"""
+    text = "# +江苏亚东朗升国际物流有限公司海运出口运输委托单\nTO：上海柚理供应链管理有限公司\n"
+    assert _extract_header_company(text) == "江苏亚东朗升国际物流有限公司"
+
+
+def test_extract_header_company_keeps_notice_heading_prefix():
+    """原有“客户简称+装箱/做箱通知”标题前缀解析不受影响。"""
+    text = "常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\n"
+    assert _extract_header_company(text) == "常州赛格威"
+
+
+def test_extract_header_company_keeps_transport_order_title_short_prefix():
+    """委托单标题前缀过短（如“运输委托书”纯标题行）不作为公司名。"""
+    text = "运输委托书\nTO：某客户\n提单号：ABC1234567\n"
+    assert _extract_header_company(text) is None
 
 
 def test_revise_c_title_rejects_fabricated_value():
