@@ -203,13 +203,33 @@ messages = [
 
 ## 错误处理
 
-用 `app/errors.py` 里的类型：
+统一错误契约：`app/errors.py` 的 `SkillAPIError` 基类 + `main.py` 全局异常处理器，
+对外固定输出 `{"error": {"code", "message", "description", "details"}}`。
+**完整「公开错误码速查表」（HTTP 状态 / code / 中文说明）见 `app/errors.py` 模块 docstring**，
+新增错误码时必须同步更新。
+
+### 新增错误码 checklist（强制）
+
+1. **继承**：定义 `class XxxError(SkillAPIError)`，设置 `http_status` 与 `code`；业务错误可定义在业务模块（如 `orders/client.py` 的 `OrderUpstreamError`）
+2. **登记中文说明**：在 `ERROR_CODE_DESCRIPTIONS` 注册，否则 description 会 fallback 为英文 message，调用方无法判断含义
+3. **同步映射表**：更新 `app/errors.py` docstring 速查表 + 本节，避免 HTTP 状态码与 code 语义漂移
+
+### 私有异常模式（解析/转换模块）
+
+解析/转换模块（如 `document_parsers/mineru.py` 的 `MinerUError`）内部可用私有异常
+（继承普通 Exception），但必须在模块边界被上层捕获并转换为公开 `SkillAPIError`
+（如 `parse_error` / `convert_error`）。**禁止私有异常直接穿透到 API 层**，
+其他解析/转换模块必须遵循同样模式。
+
+### 内置错误类型
 
 - `BadRequestError` (400) — 客户端输入问题
 - `SkillNotFoundError` (404)
 - `ConvertError` (422) — 格式转换失败
 - `LLMError` (502) — 网关/模型问题
 - `ParseError` (502) — 模型输出无法解析
+- `ServiceBusyError` (503) — 并发满/排队超时
+- 中间件直出（不经 SkillAPIError）：`unauthorized` (401)、`payload_too_large` (413)、`rate_limited` (429)
 
 批量接口对单文件错误使用同样的 `code/message/details` 结构，但整体请求可以继续处理
 其他文件。意外异常只记录服务端日志，对外统一返回 `internal_error`，不得暴露原始堆栈。
