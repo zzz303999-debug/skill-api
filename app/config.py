@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     api_key: str = ""
 
     # 订单创建接口
-    order_api_url: str = "https://pre-s3.jxt56.com/Car/publishCreateOrder"
+    order_api_url: str = "https://s3.jxt56.com/Car/publishCreateOrder"
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
     # OpenAI-compatible LLM
