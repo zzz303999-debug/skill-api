@@ -570,17 +570,21 @@ def convert_docx(path: str) -> tuple[str, dict[str, object]]:
             sep = "| " + " | ".join(["---"] * (ncols + 1)) + " |"
             _emit(header)
             _emit(sep)
-            seen_table_cells: set[int] = set()
+            # 用 lxml 元素对象本身做去重 key：同一 XML 节点始终是同一 proxy
+            # 对象且 set 持有引用。不能用 id()——proxy 被 GC 后地址会被复用，
+            # 导致首次出现的单元格被误判为合并重复而输出为空（WPS 老 .doc
+            # 转 docx 后大量合并单元格，实测会丢大部分字段）
+            seen_table_cells: set[object] = set()
             for r_idx, row in enumerate(rows, start=1):
                 row_cells = [str(r_idx)]
                 cells = row.cells
                 for c_idx in range(ncols):
                     if c_idx < len(cells):
-                        cell_key = id(cells[c_idx]._tc)
-                        if cell_key in seen_table_cells:
+                        tc = cells[c_idx]._tc
+                        if tc in seen_table_cells:
                             v = ""
                         else:
-                            seen_table_cells.add(cell_key)
+                            seen_table_cells.add(tc)
                             v = cells[c_idx].text or ""
                     else:
                         v = ""

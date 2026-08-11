@@ -1110,6 +1110,33 @@ def test_parse_document_to_order_marks_invalid_values(monkeypatch):
     assert result["order_data"]["driver"] == [{}]
 
 
+def test_parse_document_marks_measurement_not_in_row(monkeypatch):
+    """单值毛重格式合法且已归一，但明细行缺件数/体积被跳过时，
+    缺失原因标"已提取但明细行不完整"而非误导性的"格式不合法"。"""
+    monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
+
+    def fake_chat_json(messages, **_kwargs):
+        return {
+            "order_num1": "275005063",
+            "c_sn": "HZC2608099",
+            "gross_weight": "8000",
+        }, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-doc", "275005063.doc")
+
+    assert result["extracted"]["gross_weight"] == "8000"
+    # 明细行缺件数/体积被跳过 → 回退仅含提单号的行，三项仍标记缺失
+    assert {"packages", "gross_weight", "volume"} <= set(result["missing_fields"])
+    assert result["missing_reasons"]["packages"] == "原文未找到，请人工确认"
+    assert result["missing_reasons"]["gross_weight"] == "已提取但明细行不完整，请人工确认"
+    assert result["missing_reasons"]["volume"] == "原文未找到，请人工确认"
+    assert result["order_data"]["data"][0]["m"] is None
+    assert result["order_data"]["data"][0]["j"] is None
+    assert result["order_data"]["data"][0]["t"] is None
+
+
 def test_parse_document_to_order_rejects_unsupported_extension(monkeypatch):
     with pytest.raises(Exception) as caught:
         parse_document_to_order(b"fake", "order.exe")

@@ -69,6 +69,68 @@ def test_docx_story_text_textboxes_and_images_are_discovered(tmp_path):
     assert len(report["embedded_images"]) == 1
 
 
+def test_docx_vmerged_table_keeps_all_rows_under_gc_pressure(tmp_path):
+    """回归：大量合并单元格的表格，所有行的内容都必须保留。
+
+    历史 bug：用 id(单元格) 去重，lxml proxy 被 GC 后地址复用导致
+    首次出现的单元格被误判为合并重复而输出为空。
+    """
+    from docx import Document
+
+    source = tmp_path / "vmerge.docx"
+    document = Document()
+    table = document.add_table(rows=2, cols=4)
+    # 垂直合并 A1:A2，制造 vMerge 去重路径
+    table.cell(0, 0).merge(table.cell(1, 0))
+    table.cell(0, 0).text = "垂直合并标题"
+    # 多行多列内容，制造 GC 压力（行数越多 id 复用概率越大）
+    for r_idx in range(2, 60):
+        row = table.add_row()
+        for c_idx in range(4):
+            row.cells[c_idx].text = f"R{r_idx}C{c_idx}"
+    document.save(source)
+
+    output, _report = converter.convert_docx(str(source))
+
+    assert output.count("垂直合并标题") == 1
+    for r_idx in range(2, 60):
+        for c_idx in range(4):
+            assert f"R{r_idx}C{c_idx}" in output, f"单元格 R{r_idx}C{c_idx} 丢失"
+
+
+def test_docx_wps_legacy_merged_table_keeps_all_fields():
+    """回归：WPS 老 .doc 转 docx 后大量合并单元格，字段必须全部保留。
+
+    真实样本 275005063.docx：修复前转换丢失柜型/提单号/船名/毛重/备注/地址，
+    导致 LLM 提取结果几乎全空。
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    source = repo_root / "tests/golden/tuoshu/documents/275005063.docx"
+    assert source.exists(), f"缺少 golden 样本: {source}"
+
+    output, _report = converter.convert_docx(str(source))
+
+    # 表格关键字段逐项保留（标签与值）
+    for expected in (
+        "柜型：",
+        "40HQ*1",
+        "B/L: 提单号",
+        "275005063",
+        "V/N: 船名航次",
+        "MARSTAL MAERSK V.631W",
+        "装柜时间",
+        "2026/08/",
+        "船期",
+        "2026/08/13",
+        "毛重8000KGS",
+        "260430S",
+        "GDANSK",
+        "HZC2608099",
+        "安吉桦珩家居有限公司",
+    ):
+        assert expected in output, f"字段丢失: {expected}"
+
+
 def test_docx_embedded_image_is_routed_as_visual_evidence(tmp_path, monkeypatch):
     from app.config import settings
 

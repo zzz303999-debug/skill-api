@@ -1082,9 +1082,14 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
 
 # ---- 必填校验 + 组装 ----
 
-# 缺失原因：原文中未抽取到 / 值格式不合法被归一化清洗
+# 缺失原因：原文中未抽取到 / 值格式不合法被归一化清洗 / 单值已提取但明细行不完整
 _MISSING_REASON_NOT_FOUND = "原文未找到，请人工确认"
 _MISSING_REASON_INVALID = "格式不合法"
+_MISSING_REASON_NOT_IN_ROW = "已提取但明细行不完整，请人工确认"
+
+# 件数/毛重/体积：单值字段格式合法且已归一，但明细行三项不全被跳过时，
+# 缺失原因不是"格式不合法"（值本身合法），而是"未计入明细行"
+_MEASUREMENT_FIELDS = ("packages", "gross_weight", "volume")
 
 
 def _missing_fields(extracted: OrderDocumentExtraction) -> list[str]:
@@ -1124,6 +1129,10 @@ def _missing_field_reasons(
             reasons[field] = _MISSING_REASON_NOT_FOUND
         elif isinstance(value, (list, dict)) and not value:
             reasons[field] = _MISSING_REASON_NOT_FOUND
+        elif field in _MEASUREMENT_FIELDS and getattr(extracted, field):
+            # 单值格式合法且已归一（如毛重 8000），但明细行件数/体积缺失
+            # 被整体跳过 → 未计入订单 data，原因是行不完整而非值不合法
+            reasons[field] = _MISSING_REASON_NOT_IN_ROW
         else:
             reasons[field] = _MISSING_REASON_INVALID
     return reasons
