@@ -264,12 +264,15 @@ def test_normalize_data_items_falls_back_to_single_values():
     ]
 
 
-def test_normalize_data_items_no_fallback_when_data_key_empty():
-    """显式输出 data: [] 说明未提取到明细行，不回退（走缺失校验）。"""
+def test_normalize_data_items_empty_data_falls_back_bill_no():
+    """显式输出 data: [] 且单值缺失时，回退一条仅含提单号的行（data 不允许为空）。"""
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "data": [], "packages": None, "gross_weight": None, "volume": None}
     )
-    assert extracted.data == []
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", None, None, None),
+    ]
+    # 件数/毛重/体积仍缺失，走人工确认
     assert document_module._missing_fields(extracted) == [
         "packages",
         "gross_weight",
@@ -278,9 +281,11 @@ def test_normalize_data_items_no_fallback_when_data_key_empty():
 
 
 def test_normalize_data_items_ignores_non_list():
-    """data 非列表（如 dict）时忽略，且不触发回退。"""
+    """data 非列表（如 dict）时忽略，单值三项齐全则回退组装完整行。"""
     extracted = normalize_document_extraction({**COMPLETE_RAW, "data": {"j": "680"}})
-    assert extracted.data == []
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", "100", "1234.568", "25.5"),
+    ]
 
 
 def test_normalize_data_items_single_row_falls_back_bill_no():
@@ -312,28 +317,73 @@ def test_normalize_data_items_accepts_numeric_types():
     ]
 
 
-def test_missing_fields_marks_measurements_when_rows_dropped():
-    """data 行不全被跳过或显式空列表时，即使单值字段存在也标记缺失（防静默丢数据）。"""
+def test_normalize_data_items_incomplete_rows_fall_back_to_single_values():
+    """data 行内三项缺失/非法被过滤时，单值三项齐全则回退组装完整行。"""
     extracted = normalize_document_extraction(
         {
             **COMPLETE_RAW,
+            "data": [{"b_order_num": "KMTCSHAP950393", "j": None, "m": None, "t": None}],
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", "100", "1234.568", "25.5"),
+    ]
+    # 单值字段与回退行对齐，缺失校验通过
+    assert extracted.packages == "100"
+    assert document_module._missing_fields(extracted) == []
+
+
+def test_missing_fields_marks_measurements_when_rows_dropped():
+    """data 行不全被过滤且单值不全时，回退仅含提单号的行并标记缺失（防静默丢数据）。"""
+    extracted = normalize_document_extraction(
+        {
+            **{k: v for k, v in COMPLETE_RAW.items() if k != "volume"},
             "data": [{"b_order_num": "OOLU2120860080", "j": "680", "m": "8602"}],
         }
     )
-    assert extracted.data == []
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", None, None, None),
+    ]
     assert document_module._missing_fields(extracted) == [
         "packages",
         "gross_weight",
         "volume",
     ]
 
-    extracted = normalize_document_extraction({**COMPLETE_RAW, "data": []})
-    assert extracted.data == []
+    extracted = normalize_document_extraction(
+        {
+            **{k: v for k, v in COMPLETE_RAW.items() if k != "gross_weight"},
+            "data": [],
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", None, None, None),
+    ]
     assert document_module._missing_fields(extracted) == [
         "packages",
         "gross_weight",
         "volume",
     ]
+
+
+def test_missing_fields_cleared_when_single_values_fill_data_rows():
+    """data 行不全/为空但单值三项齐全时，用单值组装完整行且不再标记缺失。"""
+    extracted = normalize_document_extraction(
+        {
+            **COMPLETE_RAW,
+            "data": [{"b_order_num": "OOLU2120860080", "j": "680", "m": "8602"}],
+        }
+    )
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", "100", "1234.568", "25.5"),
+    ]
+    assert document_module._missing_fields(extracted) == []
+
+    extracted = normalize_document_extraction({**COMPLETE_RAW, "data": []})
+    assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
+        ("KMTCSHAP950393", "100", "1234.568", "25.5"),
+    ]
+    assert document_module._missing_fields(extracted) == []
 
 
 def test_build_document_order_data_fills_missing_bill_no():
@@ -557,6 +607,8 @@ def test_missing_fields_reported_when_no_complete_row():
 
 def test_missing_fields_returns_all_when_empty():
     extracted = normalize_document_extraction({})
+    # 无提单号可回退时 data 返回 null，不静默为空数组
+    assert extracted.data is None
     assert document_module._missing_fields(extracted) == [
         "order_num1",
         "box",
@@ -567,6 +619,23 @@ def test_missing_fields_returns_all_when_empty():
         "gross_weight",
         "volume",
     ]
+
+
+def test_data_null_when_no_bill_and_no_complete_row():
+    """无完整明细行、单值不全且无提单号：data 返回 null 而非空数组（不静默）。"""
+    extracted = normalize_document_extraction({"c_title": "某公司", "data": [{"j": "680"}]})
+    assert extracted.data is None
+    assert document_module._missing_fields(extracted) == [
+        "order_num1",
+        "box",
+        "factory_bei",
+        "b_date",
+        "packages",
+        "gross_weight",
+        "volume",
+    ]
+    order_data = build_document_order_data(extracted)
+    assert order_data["data"] is None
 
 
 def test_missing_fields_reports_partial():
@@ -631,6 +700,65 @@ def test_parse_document_customs_no_overrides_llm_bill_no(monkeypatch):
     result = parse_document_to_order(b"fake-pdf", "order.pdf")
     assert result["extracted"]["order_num1"] == "CNWW036474"
     assert result["order_data"]["order_num1"] == "CNWW036474"
+
+
+def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
+    """整票无货物明细行（件数/毛重/体积缺失）时，data 输出一条仅含提单号的行。"""
+
+    def fake_convert(file_bytes, filename):
+        markdown = (
+            "_p1_ 运编号：MAX202011824A/B/C\n"
+            "_p2_ TO：上海乐博/老蔡\n"
+            "_p4_ 上海麦可斯国际物流有限公司\n"
+            "_p5_ 装箱通知\n"
+            "_p7_ 地址：浙江省湖州练市工业区彩蝶路1号 湖州彩蝶纺织有限公司\n"
+            "_p8_ 安排车子 2020-11-20（周五）上午8:00去装柜\n"
+            "_p9_ 船名航次：COSCO SHIPPING RHINE / 019W\n"
+            "_p11_ 关单号：CNWW036474\n"
+            "_p15_ CTNR：1X20GP\n"
+            "_p16_ 船期：2020-11-25\n"
+            "_p17_ 目的港：PORT SAID WEST\n"
+            "_p21_ 周五不管开港与否，都正常做箱！"
+        )
+        return markdown, "doc", {"parser": "local"}, ("markdown:" + markdown)
+
+    def fake_chat_json(messages, **_kwargs):
+        return {
+            "order_num1": "CNWW036474",
+            "c_title": "上海麦可斯国际物流有限公司",
+            "c_name": "魏先生",
+            "c_phone": "13757324928",
+            "b_ship_name": "COSCO SHIPPING RHINE",
+            "b_ship_num": "019W",
+            "factory_name": "湖州彩蝶纺织有限公司",
+            "factory_bei": "浙江省湖州练市工业区彩蝶路1号 魏先生：13757324928",
+            "b_end_dock": "PORT SAID WEST",
+            "b_open_ship_time": "2020-11-25",
+            "b_date": "2020-11-20",
+            "b_date_time_start": "上午8:00",
+            "c_sn": "MAX202011824A/B/C",
+            "c_note": "周五不管开港与否，都正常做箱！",
+            "packages": None,
+            "gross_weight": None,
+            "volume": None,
+            "data": [],
+            "box": [{"b_type": "20GP", "box_num": 1}],
+        }, {"model": "fake", "usage": None}
+
+    monkeypatch.setattr(document_module, "_convert_file", fake_convert)
+    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+
+    result = parse_document_to_order(b"fake-doc", "湖州彩蝶(2).doc")
+    # data 必须有提单号（对齐自由文本 mapper 契约：每行提单号非空）
+    assert result["extracted"]["data"] == [
+        {"b_order_num": "CNWW036474", "j": None, "m": None, "t": None, "hh": None, "mt": None}
+    ]
+    assert result["order_data"]["data"] == [
+        {"b_order_num": "CNWW036474", "j": None, "m": None, "t": None, "hh": None, "mt": None}
+    ]
+    # 件数/毛重/体积原文缺失，仍标记人工确认
+    assert result["missing_fields"] == ["packages", "gross_weight", "volume"]
+    assert result["needs_manual_confirmation"] is True
 
 
 def test_parse_document_to_order_marks_missing_fields(monkeypatch):

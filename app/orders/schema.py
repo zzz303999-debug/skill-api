@@ -154,9 +154,10 @@ class OrderDocumentExtraction(BaseModel):
     packages: str | None = Field(None, description="件数，数字 + CTNS（单位可省略）")
     gross_weight: str | None = Field(None, description="毛重，数字 + KGS（单位可省略），保留 2-3 位小数")
     volume: str | None = Field(None, description="体积，数字 + CBM（单位可省略），保留 2-3 位小数")
-    data: list[DocumentCargoItem] = Field(
-        default_factory=list,
-        description="货物明细行：每行含该行提单号 b_order_num、件数 j、毛重 m、体积 t"
+    data: list[DocumentCargoItem] | None = Field(
+        default=None,
+        description="货物明细行：每行含该行提单号 b_order_num、件数 j、毛重 m、体积 t；"
+        "无任何可输出行时为 null（不静默为空数组）",
     )
     box: list[DocumentBoxItem] = Field(default_factory=list)
 

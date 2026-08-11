@@ -482,7 +482,7 @@ _SYSTEM_PROMPT = """你是海运托书/做箱通知结构化抽取助手。读�
 8. 老式 `.doc` 等文档转换后可能被展平为 `_pN_` 段落流（`_pN: (empty)_` 是空单元格）：标签与值分属不同段落，把标签后第一个非空、非标签的段落当作该标签的值；`提单号` 的 8+ 位纯数字或字母数字值可按格式特征在全文中定位。
 9. `b_ship_name`/`b_ship_num`/`b_ship_company`/`b_start_dock`/`b_end_port`/`b_end_dock`/`b_wharf`/`b_open_ship_time`/`b_date_time_start`/`factory_name`/`b_factory_not`/`c_name`/`c_phone`/`c_sn`/`c_note` 等可选字段只在原文明确出现时逐字抽取；原文未给出时填 null，禁止填 `未知`/`待定`/`看设备单上`/`还未知`/`无` 等占位表述（`b_end_port` 中转港标签后明确写出的待查描述除外，见规则 13）。
 10. `b_open_ship_time`/`b_date`/`b_date_time_start` 是三个不同字段：前者是开船时间，`b_date` 是做箱/装箱**日期**（`YYYY-MM-DD`），`b_date_time_start` 是做箱/装箱**时间描述**（如 `早上8点`/`9:00`），按标签与值格式严格区分，禁止混填。
-11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`data[].hh`（货名）与 `data[].mt`（唛头）可选，原文有则逐字保留，无则 null。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。
+11. `data` 为货物明细列表，**必须列出文档中每一个数据行**（表格数据行/按客户编号或提单号分组的行），禁止只取第一行或把多行合并成一行：每条含该行提单号 `b_order_num`（无提单号的行填 null，禁止填整票提单号）、件数 `j`、毛重 `m`、体积 `t`；某行三项（件数/毛重/体积）不全时跳过该行。`data[].hh`（货名）与 `data[].mt`（唛头）可选，原文有则逐字保留，无则 null。`packages`/`gross_weight`/`volume` 单值字段填第一条数据行的值（与 `data[0]` 一致）；文档只有一行数据时 `data` 同样输出一条。文档整体无货物明细行（件数/毛重/体积均未出现）时，`data` 输出一条仅含整票提单号的行（`b_order_num` 填 `order_num1`，件数/毛重/体积/货名/唛头填 null）。
 12. `b_end_dock` 只取**最终卸货港**（`目的港`/`卸货港`/`PORT OF DISCHARGE` 标签后的值）。带 `中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 等标签或其旁注含"中转/转运/transship"字样的港口**禁止**填入 `b_end_dock`（如"中转港：INCHON"时 INCHON 不是目的港，应填入 `b_end_port`）；原文未明确给出最终目的港（只有中转港或中转描述）时 `b_end_dock` 填 null（人工确认），禁止用中转港冒充目的港。
 13. `b_end_port` 只取**中转港**（`中转港`/`转运港`/`中转港代码`/`TRANSSHIPMENT PORT` 标签后的值），与 `b_end_dock`（目的港）严格区分；**中转港标签后明确写出**的待查描述（如 `见设备单`/`见设`/`待定`）逐字保留，其他位置出现的占位词仍按规则 9 填 null，只有原文真正缺失时才是 null。
 """
@@ -1011,11 +1011,12 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
     packages = _normalize_packages(data.get("packages"))
     gross_weight = _normalize_weight(data.get("gross_weight"))
     volume = _normalize_volume(data.get("volume"))
-    # data 明细行为主；仅当 LLM 未输出 data 键（旧模型兼容）且单值三项齐全时
-    # 回退组装一条完整行；单值不全或显式输出空列表时不回退（走缺失校验 + 人工确认）
+    # data 明细行为主；无完整明细行（LLM 未输出 data 键、显式空列表或行内
+    # 三项缺失/非法被过滤）但单值三项齐全时，用单值字段回退组装一条完整行；
+    # 单值不全时才在提单号存在时回退仅含提单号的行（对齐自由文本 mapper 契约）
     raw_data = data.get("data")
     data_items = _normalize_data_items(raw_data)
-    if raw_data is None and (packages and gross_weight and volume):
+    if not data_items and (packages and gross_weight and volume):
         data_items = [
             DocumentCargoItem(
                 b_order_num=order_num1,
@@ -1032,6 +1033,11 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
         # 单行明细且行内提单号缺失时回退主提单号（对齐自由文本 mapper 约定）
         if len(data_items) == 1 and not data_items[0].b_order_num:
             data_items[0].b_order_num = order_num1
+    elif order_num1:
+        # 无任何完整明细行但有整票提单号：data 输出一条仅含提单号的行，
+        # 对齐自由文本 mapper 契约（data 不允许为空，下游每行提单号非空）；
+        # 件数/毛重/体积缺失仍由 _missing_fields 标记走人工确认
+        data_items = [DocumentCargoItem(b_order_num=order_num1)]
     try:
         return OrderDocumentExtraction.model_validate(
             {
@@ -1063,7 +1069,7 @@ def normalize_document_extraction(data: dict[str, Any]) -> OrderDocumentExtracti
                 "packages": packages,
                 "gross_weight": gross_weight,
                 "volume": volume,
-                "data": data_items,
+                "data": data_items or None,
                 "box": _normalize_boxes(data.get("box")),
             }
         )
@@ -1098,7 +1104,7 @@ def _missing_fields(extracted: OrderDocumentExtraction) -> list[str]:
     # 存在但明细行缺失/被跳过时，宁可人工确认也不静默丢数据（避免 data=[]
     # 且确认标记为绿直接导致下游漏数据）
     has_complete_row = any(
-        item.j and item.m and item.t for item in extracted.data
+        item.j and item.m and item.t for item in (extracted.data or [])
     )
     if not has_complete_row:
         missing += ["packages", "gross_weight", "volume"]
@@ -1155,18 +1161,22 @@ def build_document_order_data(
         "b_open_ship_time": extracted.b_open_ship_time,
         "c_sn": extracted.c_sn,
         "c_note": extracted.c_note,
-        "data": [
-            {
-                # 行内无提单号时回填主提单号（对齐自由文本 mapper 契约：下游每行非空）
-                "b_order_num": item.b_order_num or extracted.order_num1,
-                "j": item.j,
-                "m": item.m,
-                "t": item.t,
-                "hh": item.hh,
-                "mt": item.mt,
-            }
-            for item in extracted.data
-        ],
+        "data": (
+            [
+                {
+                    # 行内无提单号时回填主提单号（对齐自由文本 mapper 契约：下游每行非空）
+                    "b_order_num": item.b_order_num or extracted.order_num1,
+                    "j": item.j,
+                    "m": item.m,
+                    "t": item.t,
+                    "hh": item.hh,
+                    "mt": item.mt,
+                }
+                for item in extracted.data
+            ]
+            if extracted.data
+            else None
+        ),
         "box": [
             {"b_type": item.b_type, "box_num": item.box_num}
             for item in extracted.box
