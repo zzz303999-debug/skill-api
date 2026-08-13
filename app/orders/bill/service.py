@@ -83,7 +83,7 @@ def build_result(
             # 既有语义：双通道下单（行为语义不变）
             create_orders(orders)
         elif canonical_orders:
-            from .payload import create_canonical_orders
+            from .client import create_canonical_orders
 
             create_canonical_orders(canonical_orders)
         summary = {

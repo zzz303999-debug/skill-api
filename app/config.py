@@ -40,10 +40,10 @@ class Settings(BaseSettings):
     jxt_login_url: str = "https://a3.jxt56.com/Api/login"
     jxt_addwork_url: str = "https://s3.jxt56.com/Car/WorkOut/AddWork"
     jxt_timeout_seconds: int = Field(default=30, ge=1, le=300)
-    # 竞品账单下单通道：json=嵌套 JSON + sk 头（默认，POST publishCreateOrder 与 /orders
-    # 同一下游地址，body 为 order_data 原样嵌套、无 roomId/userId）；form=AddWork 表单
-    # （旧链路，降级备用，不删除）
-    jxt_create_channel: Literal["json", "form"] = "json"
+    # 竞品账单下单通道：form=AddWork 表单（默认，AddWork 端点 + sk 头实测可用
+    # 2026-08-13；publishCreateOrder 现强制要求 userId+roomId，204 拒单）；
+    # json=嵌套 JSON（旧默认，暂不可用，保留代码供 roomId 来源明确后恢复）
+    jxt_create_channel: Literal["json", "form"] = "form"
 
     @field_validator("jxt_create_channel", mode="before")
     @classmethod

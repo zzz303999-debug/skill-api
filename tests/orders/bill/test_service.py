@@ -150,6 +150,50 @@ class TestCreateMode:
         assert result.summary is None
         assert calls["n"] == 0
 
+    def test_canonical_create_mode_uses_addwork(self, monkeypatch):
+        """标准字段家族（canonical 语义）create_order=True → create_canonical_orders
+        （AddWork 端点 + sk 头 + create_order=true，2026-08-13 实测定论）。"""
+        responses = iter(
+            [
+                FakeResponse({"code": 200, "web_key": "wk"}),
+                FakeResponse({"code": 200, "data": {"token": "sk"}}),
+                FakeResponse({"code": "200", "data": [{"sn": "EX1", "o_id": "2101"}]}),
+            ]
+        )
+        posts: list[str] = []
+
+        def fake_post(url, **_kwargs):
+            posts.append(url)
+            return next(responses)
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        # junyu 家族表头（L2 族级近似命中，canonical 语义）
+        headers = {
+            "A": "序号",
+            "B": "客户名称",
+            "C": "门点",
+            "D": "箱型箱量",
+            "E": "提单号",
+            "F": "箱号",
+            "G": "做箱时间",
+            "H": "港区",
+            "I": "司机",
+            "J": "应收备注",
+        }
+        result = build_result(
+            filename="junyu.xlsx",
+            file_bytes=build_bill_bytes(
+                headers,
+                [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "F": "TCLU1"}],
+            ),
+            create_order=True,
+        )
+        assert result.summary == {"total": 1, "success": 1, "failed": 0}
+        assert result.canonical_orders[0].create_result["success"] is True
+        assert result.canonical_orders[0].create_result["sn"] == "EX1"
+        assert result.canonical_orders[0].create_result["o_id"] == "2101"
+        assert sum(1 for u in posts if "AddWork" in u) == 1  # TMS 直连走 AddWork 端点
+
 
 class TestConstructed:
     def test_no_period_bill(self):
