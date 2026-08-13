@@ -99,6 +99,8 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT,
             "failed": 0,
+            "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
+            "failed_details": [],
         }
         assert all(o["create_result"]["success"] for o in data["orders"])
         assert all(o["create_result"]["sn"] == "EX26080042" for o in data["orders"])
@@ -160,6 +162,14 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT - 1,
             "failed": 1,
+            "success_sns": ["EX1"] * (REAL_ORDER_COUNT - 1),
+            "failed_details": [
+                {
+                    "order_num": data["orders"][0]["order_num1"],
+                    "error_code": "order_upstream_error",
+                    "error_message": "AddWork rejected the order: 添加失败",
+                }
+            ],
         }
         assert data["orders"][0]["create_result"]["success"] is False
         assert data["orders"][0]["create_result"]["error"]["details"]["upstream_code"] == "204"

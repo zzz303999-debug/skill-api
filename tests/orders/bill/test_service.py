@@ -83,6 +83,10 @@ class TestOverview:
         assert first["source_template"] == "jinxin_v1"
         assert first["box_groups"] and first["box_groups"][0]["b_type"]
         assert first["missing_fields"] == []
+        # 客户字段（2026-08-13 实证）：c_title=客户名称（旧链路 AddWork 实证 dump），
+        # c_name=客户联系人；金科信经转换后同样适用（表单键断言见 test_payload）
+        assert first["customer_name"]
+        assert first["unmapped_note"] is None  # 客户字段已有 c_title 落点，无未映射字段
 
 
 @pytest.mark.skipif(
@@ -110,6 +114,8 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT,
             "failed": 0,
+            "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
+            "failed_details": [],
         }
         assert all(
             o.create_result and o.create_result["success"] and o.create_result["sn"] == "EX26080042"
@@ -188,11 +194,22 @@ class TestCreateMode:
             ),
             create_order=True,
         )
-        assert result.summary == {"total": 1, "success": 1, "failed": 0}
+        assert result.summary == {
+            "total": 1,
+            "success": 1,
+            "failed": 0,
+            "success_sns": ["EX1"],
+            "failed_details": [],
+        }
         assert result.canonical_orders[0].create_result["success"] is True
         assert result.canonical_orders[0].create_result["sn"] == "EX1"
         assert result.canonical_orders[0].create_result["o_id"] == "2101"
         assert sum(1 for u in posts if "AddWork" in u) == 1  # TMS 直连走 AddWork 端点
+        # 客户字段：c_title=客户名称（旧链路实证，表单键断言见 test_payload）；
+        # 军羽无联系人列 → customer_contact 空
+        order = result.canonical_orders[0]
+        assert order.customer_name == "客户甲"
+        assert order.customer_contact is None
 
 
 class TestConstructed:
