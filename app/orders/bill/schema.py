@@ -179,6 +179,10 @@ class BillParseResult(BaseModel):
     summary: dict[str, Any] | None = Field(
         None, description="汇总 total/success/failed，由创建步骤填充；preview 模式为 null"
     )
+    upstream: dict[str, Any] | None = Field(
+        None,
+        description="上游原始回显（create 模式；对齐 /orders 的 upstream：{code, msg, data:[每单回显]}），preview 模式为 null",
+    )
     meta: dict[str, Any] = Field(
         default_factory=dict, description="溯源信息（文件哈希、解析时间、引擎等）"
     )

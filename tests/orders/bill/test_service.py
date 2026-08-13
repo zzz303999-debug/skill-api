@@ -63,6 +63,7 @@ class TestOverview:
             "orders",
             "canonical_orders",
             "summary",
+            "upstream",
             "meta",
         }
         assert set(dumped["orders"][0]) == {
@@ -116,6 +117,11 @@ class TestCreateMode:
             "failed": 0,
             "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
             "failed_details": [],
+        }
+        assert result.upstream == {
+            "code": 200,
+            "msg": "添加成功",
+            "data": [{"sn": "EX26080042"}] * REAL_ORDER_COUNT,
         }
         assert all(
             o.create_result and o.create_result["success"] and o.create_result["sn"] == "EX26080042"
@@ -201,9 +207,15 @@ class TestCreateMode:
             "success_sns": ["EX1"],
             "failed_details": [],
         }
+        assert result.upstream == {
+            "code": 200,
+            "msg": "添加成功",
+            "data": [{"sn": "EX1", "o_id": "2101"}],
+        }
         assert result.canonical_orders[0].create_result["success"] is True
         assert result.canonical_orders[0].create_result["sn"] == "EX1"
         assert result.canonical_orders[0].create_result["o_id"] == "2101"
+        assert result.canonical_orders[0].create_result["upstream"] == {"sn": "EX1", "o_id": "2101"}
         assert sum(1 for u in posts if "AddWork" in u) == 1  # TMS 直连走 AddWork 端点
         # 客户字段：c_title=客户名称（旧链路实证，表单键断言见 test_payload）；
         # 军羽无联系人列 → customer_contact 空

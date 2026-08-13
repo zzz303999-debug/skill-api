@@ -505,7 +505,7 @@ class TestAddWork:
         # 顶层展平字段：与 b 的 JSON 同内容、逐键存在
         top = {k: v for k, v in captured["data"].items() if k not in ("a", "b", "c")}
         assert top == EXPECTED_FLAT
-        assert result == {"success": True, "sn": "EX26080042", "error": None}
+        assert result == {"success": True, "sn": "EX26080042", "error": None, "upstream": {"sn": "EX26080042"}}
 
     def test_success_sn_missing_ok(self, urls, monkeypatch):
         """code 200 但 data[0] 无 sn → 仍成功，sn=None。"""
@@ -516,7 +516,7 @@ class TestAddWork:
                 {"code": "200", "msg": "添加成功", "data": [{"o_id": 1}]}
             ),
         )
-        assert add_work("sk", ORDER_DATA) == {"success": True, "sn": None, "error": None}
+        assert add_work("sk", ORDER_DATA) == {"success": True, "sn": None, "error": None, "upstream": {"o_id": 1}}
 
     def test_rejected_204(self, urls, monkeypatch):
         """code '204'（字符串）→ 失败 error，含 upstream 三元组。"""
@@ -598,7 +598,7 @@ class TestAddOrderJson:
         assert "userId" not in captured["json"]
         assert "roomId" not in captured["json"]
         assert {"order_num1", "type", "c_title", "data", "box", "driver"} <= set(captured["json"])
-        assert result == {"success": True, "sn": "EX26080042", "error": None}
+        assert result == {"success": True, "sn": "EX26080042", "error": None, "upstream": {"sn": "EX26080042"}}
 
     def test_success_sn_missing_ok(self, urls, monkeypatch):
         """code 200 但 data[0] 无 sn → 仍成功，sn=None。"""
@@ -609,7 +609,7 @@ class TestAddOrderJson:
                 {"code": "200", "msg": "添加成功", "data": [{"o_id": 1}]}
             ),
         )
-        assert add_order_json("sk", ORDER_DATA) == {"success": True, "sn": None, "error": None}
+        assert add_order_json("sk", ORDER_DATA) == {"success": True, "sn": None, "error": None, "upstream": {"o_id": 1}}
 
     def test_rejected_error_passthrough(self, urls, monkeypatch):
         """code '204' → 失败 error，含 upstream 三元组（透传下游原文）。"""
@@ -701,8 +701,8 @@ class TestCreateOrders:
         orders = [make_order(), make_order()]
         create_orders(orders)
         assert calls["all"] == 4  # GetWebKey + login + 2×AddWork
-        assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None}
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None}
+        assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None, "upstream": {"sn": "EX26080001"}}
+        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
 
     def test_partial_failure_isolated(self, urls, monkeypatch):
         """第一单 204 失败不影响第二单；两单均被调用。"""
@@ -718,7 +718,7 @@ class TestCreateOrders:
         assert calls["addwork"] == 2
         assert orders[0].create_result["success"] is False
         assert orders[0].create_result["error"]["details"]["upstream_code"] == "204"
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None}
+        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
 
     def test_credential_failure_no_addwork(self, urls, monkeypatch):
         """GetWebKey 业务失败 → UpstreamError（502），AddWork 调用次数 0。"""
@@ -774,7 +774,7 @@ class TestCreateOrders:
         assert calls["n"] == 2  # 每单一发，超时不重试
         assert orders[0].create_result["success"] is False
         assert orders[0].create_result["error"]["details"]["error_type"] == "TimeoutException"
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None}
+        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
 
     def test_missing_fields_still_submitted(self, urls, monkeypatch):
         """missing_fields 非空（如 box 缺失）→ 照常提交（本服务不拦截）。"""
@@ -862,8 +862,8 @@ class TestCreateOrdersJson:
         orders = [make_order(), make_order()]
         create_orders(orders)
         assert calls["all"] == 4  # GetWebKey + login + 2×下单
-        assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None}
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None}
+        assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None, "upstream": {"sn": "EX26080001"}}
+        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
 
     def test_json_body_no_wrapper(self, urls, monkeypatch):
         """json 通道请求：URL=order_api、header sk、body=order_data 嵌套原样（无 data 包裹层、
@@ -900,4 +900,4 @@ class TestCreateOrdersJson:
         assert calls["submit"] == 2
         assert orders[0].create_result["success"] is False
         assert orders[0].create_result["error"]["details"]["upstream_code"] == "204"
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None}
+        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}

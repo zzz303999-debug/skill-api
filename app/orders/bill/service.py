@@ -215,6 +215,7 @@ def build_result(
         fee_reconciliation = _build_fee_reports(output, canonical_orders)
 
     summary = None
+    upstream = None
     if create_order:
         if orders:
             # 既有语义：双通道下单（行为语义不变）
@@ -247,6 +248,16 @@ def build_result(
                 if not o.create_result.get("success")
             ],
         }
+        # 上游原始回显（对齐 /orders 的 upstream：code 200 + msg 添加成功 + 每单回显）；
+        # 全部失败时保持 null（失败原因见 summary.failed_details）
+        upstream_data = [
+            o.create_result.get("upstream")
+            for o in created
+            if o.create_result.get("success") and o.create_result.get("upstream")
+        ]
+        upstream = (
+            {"code": 200, "msg": "添加成功", "data": upstream_data} if upstream_data else None
+        )
 
     meta: dict = {
         "source_sha256": _sha256(file_bytes),
@@ -276,5 +287,6 @@ def build_result(
         orders=orders,
         canonical_orders=canonical_orders,
         summary=summary,
+        upstream=upstream,
         meta=meta,
     )

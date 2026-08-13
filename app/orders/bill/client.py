@@ -333,6 +333,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
     """下游下单响应 → create_result（add_work 与 add_order_json 共用同一口径）。
 
     code "200"（字符串/数字皆可）→ 成功取 data[0].sn（缺 sn 仍成功，sn=None）；
+    成功时原样保留 data[0] 回显（upstream 键，对齐 /orders 的 upstream.data[0]）；
     其他 → error 三元组（不抛异常，调用方按单处理）。网络异常由调用方捕获。
     """
     if response.status_code >= 400:
@@ -373,7 +374,10 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
     if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
         sn = data_list[0].get("sn")
     log.info("jxt_order_ok", extra={"step": step, "sn": sn})
-    return {"success": True, "sn": sn, "error": None}
+    result: dict[str, Any] = {"success": True, "sn": sn, "error": None}
+    if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
+        result["upstream"] = data_list[0]  # 原始回显（对齐 /orders 的 upstream.data[0]）
+    return result
 
 
 def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
@@ -495,6 +499,9 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
     result: dict[str, Any] = {"success": True, "sn": sn, "error": None}
     if o_id is not None:
         result["o_id"] = o_id
+    if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
+        # 原始回显（对齐 /orders 的 upstream.data[0]：sns/o_id/c_title 等回写字段）
+        result["upstream"] = data_list[0]
     return result
 
 

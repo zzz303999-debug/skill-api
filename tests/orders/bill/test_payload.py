@@ -172,7 +172,13 @@ class TestSubmitCanonical:
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         order = _sample_order()
         result = client_module.submit_canonical("sk-token", order)
-        assert result == {"success": True, "sn": "EX26080355", "o_id": "21034692", "error": None}
+        assert result == {
+            "success": True,
+            "sn": "EX26080355",
+            "o_id": "21034692",
+            "error": None,
+            "upstream": {"sn": "EX26080355", "o_id": "21034692"},  # 原始回显原样保留
+        }
         # form-data 提交：create_order=true + 提单号 + 鉴权头
         assert captured["data"]["create_order"] == "true"
         assert captured["data"]["data[0][b_order_num]"] == "OOLU4044379500"

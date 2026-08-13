@@ -52,6 +52,7 @@ class TestPreview:
                 "orders",
                 "canonical_orders",
                 "summary",
+                "upstream",
                 "meta",
             }
             assert data["order_count"] == REAL_ORDER_COUNT
@@ -63,11 +64,12 @@ class TestPreview:
             assert all(o["create_result"] is None for o in data["orders"])
 
     def test_preview_create_result_null(self):
-        """预览模式 create_result 全 null（零下游调用）。"""
+        """预览模式 create_result/summary/upstream 全 null（零下游调用）。"""
         with TestClient(app) as client:
             r = upload(client, "b.xls", REAL_XLS.read_bytes(), headers=AUTH_HEADERS)
             assert r.status_code == 200
             assert r.json()["summary"] is None
+            assert r.json()["upstream"] is None
             assert all(o["create_result"] is None for o in r.json()["orders"])
 
 
@@ -101,6 +103,11 @@ class TestCreateMode:
             "failed": 0,
             "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
             "failed_details": [],
+        }
+        assert data["upstream"] == {
+            "code": 200,
+            "msg": "添加成功",
+            "data": [{"sn": "EX26080042"}] * REAL_ORDER_COUNT,
         }
         assert all(o["create_result"]["success"] for o in data["orders"])
         assert all(o["create_result"]["sn"] == "EX26080042" for o in data["orders"])
@@ -170,6 +177,12 @@ class TestCreateMode:
                     "error_message": "AddWork rejected the order: 添加失败",
                 }
             ],
+        }
+        # 部分失败：upstream 只含成功单回显（与 /orders 的 upstream 同构）
+        assert data["upstream"] == {
+            "code": 200,
+            "msg": "添加成功",
+            "data": [{"sn": "EX1"}] * (REAL_ORDER_COUNT - 1),
         }
         assert data["orders"][0]["create_result"]["success"] is False
         assert data["orders"][0]["create_result"]["error"]["details"]["upstream_code"] == "204"
