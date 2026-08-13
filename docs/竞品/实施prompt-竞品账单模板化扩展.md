@@ -89,7 +89,7 @@
 
 - `build_order_form(order: CanonicalOrder) -> dict`：按《逆推规范》§4 映射表生成扁平 form 字段：
   - 提单号 → `data[0][b_order_num]`；箱型 → `box[N][b_type]`/`box[N][box_num]`（多箱型展开）；箱号/封号 → `b_num`/`b_lock`
-  - 船名/航次/船公司、客户（c_name/c_sn）、门点（factory_name）、做箱时间（`driver[0][b_date]`）、提/还箱点（`driver[0][b_get_address/b_back_address]`）、件数/毛重/货名（`data[0][j/m/hh]`）、备注（b_note）
+  - 船名/航次/船公司、客户（c_title=客户名称，旧链路 AddWork 实证 dump：c_title=小王；c_name=客户联系人，2026-08-13 实证渲染为 UI「联系人」；c_sn）、门点（factory_name）、做箱时间（`driver[0][b_date]`）、提/还箱点（`driver[0][b_get_address/b_back_address]`）、件数/毛重/货名（`data[0][j/m/hh]`）、备注（b_note）
   - `order_date` → 派生 `month`（YYYY-MM）；`biz_no` → 拼入 b_note 备查；`biz_type/io_type` → `type` 枚举映射表（目前仅确认 1=出口，其余值留 TODO 并默认 1）
   - 常量：`order_num1=1`、`create_order=true`、`o_id` 留空、费用四通道（shou/pay/duo_get/cost）本轮整体省略
   - 同时生成 `b` 字段（JSON 双写，子集范围与抓包一致：见《逆推规范》§1）

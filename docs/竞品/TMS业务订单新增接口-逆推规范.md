@@ -1,8 +1,7 @@
 # TMS 业务订单新增接口 · 抓包逆推规范
 
 > 依据：2026-08-13 浏览器 form-data 抓包（新增一单 20GP×1 出口订单）+ 响应报文。
-> 状态：**最小报文 A/B 实测已完成（2026-08-13，生产环境）**——见 §6 各条目结论；
-> 字段语义为逆推结论 + 实测确认。
+> 状态：字段语义为逆推结论，**待最小报文 A/B 实测确认**（见 §6）。
 > 与既有 bill-import 的关系：该 form-data 结构即下单「AddWork 表单通道」的字段格式，本规范可直接作为其 payload 构造依据。
 
 ---
@@ -133,7 +132,8 @@
 | `seal_no` | `b_lock` | |
 | `vessel` / `voyage` | `b_ship_name` / `b_ship_num` | |
 | `shipping_company` | `b_ship_company` | |
-| `customer_name` | `c_name`（或 `c_title`） | 命中档案则回 cu_id；建议同时传 c_sn=客户编号助匹配 |
+| `customer_name` | `c_title` | 【2026-08-13 实测确认】响应回显验证（EX26081037/38 回显 `c_title=测试客户204`），TMS「客户」字段自由文本可保存；注意 c_title 非空时控制器硬读 `c_id`，必须同发 `c_id` 空串（缺键 204 拒单 Undefined index: c_id）；「客户」档案选择器与自由文本的自动建档关系待界面确认 |
+| `customer_contact` | `c_name` | 客户联系人 → UI「联系人」（2026-08-13 实证；军羽/123/赢辉无此字段，留空） |
 | `customer_no` | `c_sn` | |
 | `door_point` | `factory_name` | |
 | `work_date` | `driver[0][b_date]` | `date_flex` 已归一为 YYYY-MM-DD |
@@ -162,18 +162,15 @@
 
 ## 6. 不确定点与验证实验（按优先级）
 
-> 实测结论（2026-08-13，生产环境最小报文验证，全部完成）：
-> **#1/#4/#7 已定论；#3 部分定论；#2/#5/#6 待界面抓包/实测。**
-
-| # | 问题 | 验证方法 | 结论 |
-|---|---|---|---|
-| 1 | 费用四通道全空能否成功新增（本轮核心前提） | 最小报文：仅 提单号+箱型+month+type，shou/pay/duo_get/cost 全部省略 | **✅ 成立**：AddWork 端点 + sk 头 + create_order=true 添加成功（sn=EX26080356） |
-| 2 | `b_wharf` 与 `b_start_dock` 语义边界（港区映射目标） | 两字段分别置不同值提交，看 TMS 界面落点 | 待界面确认 |
-| 3 | 一票多箱号时 `b_num` 写法（逗号分隔？重复字段？还是仅首箱） | 一票两箱测试单 | **⚠️ 部分定论**：b_num 首箱正确写入（sn=EX26080358），第二箱号无落点；`split_per_container` 配置位预留，待界面确认是否拆分/拼接 |
-| 4 | `b` 字段是否后端必需（JSON 双写冗余） | 省略 `b` 只发扁平表单，对比结果 | **✅ 非必需**：剥离 a/b/c 双写仍添加成功（sn=EX26080357），payload 已移除 b 双写 |
-| 5 | `type` 枚举全值（进口/倒箱/内装…） | 界面切换类型抓包对比 | 待界面抓包（当前仅确认 1=出口） |
-| 6 | `order_num1` 语义（票数/序号） | 多单抓包对比 | 待实测 |
-| 7 | 端点 URL 与鉴权 | 实测 | **已定论**：publishCreateOrder 无论 JSON/form-data 均强制要求有效 userId+roomId（204 拒单，login.data.cid 可作 userId，roomId 需有效群配置）；**TMS 直连走 AddWork 端点 + sk 头 + create_order=true** |
+| # | 问题 | 验证方法 |
+|---|---|---|
+| 1 | 费用四通道全空能否成功新增（本轮核心前提） | 最小报文：仅 提单号+箱型+month+type+user_name，shou/pay/duo_get/cost 全部省略 |
+| 2 | `b_wharf` 与 `b_start_dock` 语义边界（港区映射目标） | 两字段分别置不同值提交，看 TMS 界面落点 |
+| 3 | 一票多箱号时 `b_num` 写法（逗号分隔？重复字段？还是仅首箱） | 一票两箱测试单 |
+| 4 | `b` 字段是否后端必需（JSON 双写冗余） | 省略 `b` 只发扁平表单，对比结果 |
+| 5 | `type` 枚举全值（进口/倒箱/内装…） | 界面切换类型抓包对比 |
+| 6 | `order_num1` 语义（票数/序号） | 多单抓包对比 |
+| ~~7~~ | ~~端点 URL 与鉴权~~ | **已解决（2026-08-13）**：复用 `/orders` 通道 + `create_order=true` |
 
 ---
 
