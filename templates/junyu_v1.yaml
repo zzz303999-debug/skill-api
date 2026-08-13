@@ -37,3 +37,17 @@ normalizers:
   work_date: date_flex
   bl_no: strip_float_tail
   box_type_qty: box_parse
+# 费用段（T15）：应收对账家族仅应收；column_range 模式费用列自动发现（columns 未映射
+# 列排除锚点/备注），mapping 只负责码解析；无标准码的费目（如有）走字典 → to_other
+fees:
+  channels:
+    应收: shou
+  mapping:
+    应收.运费: freight
+    应收.打/改单费: amend
+    应收.其它费: other
+  unmapped_fee: to_other
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"

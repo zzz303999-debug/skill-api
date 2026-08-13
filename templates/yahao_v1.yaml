@@ -68,3 +68,59 @@ normalizers:
   plate_no: strip_float_tail
   biz_no: strip_float_tail
   box_type_qty: box_parse
+# 费用段（T15）：亚灏四区块实测启用 应收/应付/车辆成本；公司成本→duo_get 语义
+# 未验证，一律注释掉不启用（验证后配置开启）；mapping 覆盖可映射标准码的高频费目，
+# 长尾（压车费/停车费/堆存费/疏港费/代办费等）走字典 → to_other
+fees:
+  channels:
+    应收: shou
+    应付: pay
+    车辆成本: cost
+    # 公司成本: duo_get
+  mapping:
+    应收.运费: freight
+    应收.洋山提空箱: yangshan
+    应收.空箱还洋山: yangshan
+    应收.预提费: pre_pick
+    应收.落箱费: drop_box
+    应收.预进港: pre_inport
+    应收.待时费: waiting
+    应收.打单费: amend
+    应收.超重费: overweight
+    应收.上下车费: lift
+    应收.搬移费: move
+    应收.坏/污箱费: damage_box
+    应收.动植场地费: inspect
+    应收.动检费: inspect
+    应收.动检掏箱费: inspect
+    应收.其它费: other
+    应收.理货费: tally
+    应收.港建费: port_misc
+    应收.港杂费: port_misc
+    应收.船公司坏污箱费: damage_box
+    应收.超期费: overdue
+    应收.过磅费: weigh
+    应付.运费: freight
+    应付.待时费: waiting
+    应付.上下车费: lift
+    应付.搬移费: move
+    应付.预提费: pre_pick
+    应付.坏/污箱费: damage_box
+    应付.预进港: pre_inport
+    应付.落箱费: drop_box
+    应付.动检费: inspect
+    应付.超重费: overweight
+    应付.其它费: other
+    车辆成本.出车费: trip
+    车辆成本.上下车费: lift
+    车辆成本.搬移费: move
+    车辆成本.坏/污箱费: damage_box
+    车辆成本.油费: fuel
+    车辆成本.落箱费: drop_box
+    车辆成本.预进港: pre_inport
+    车辆成本.其它费: other
+  unmapped_fee: to_other
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"
