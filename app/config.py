@@ -17,6 +17,10 @@ class Settings(BaseSettings):
         env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # 运行环境（test/prod）：决定 config/fee_price_map.{env}.yaml 等按环境隔离的
+    # 配置文件名；环境切换只换文件，代码零环境名/if
+    env: str = "test"
+
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 9000
@@ -44,6 +48,9 @@ class Settings(BaseSettings):
     # 2026-08-13；publishCreateOrder 现强制要求 userId+roomId，204 拒单）；
     # json=嵌套 JSON（旧默认，暂不可用，保留代码供 roomId 来源明确后恢复）
     jxt_create_channel: Literal["json", "form"] = "form"
+    # to_other 长尾监控阈值（T14）：某原费目名归并次数 ≥ 该值 → 对账报告 warning
+    # 提示升级为显式映射（补映射 = 改模板 fees.mapping，零代码）
+    fee_to_other_warning_threshold: int = Field(default=50, ge=1, le=10000)
 
     @field_validator("jxt_create_channel", mode="before")
     @classmethod

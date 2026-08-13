@@ -9,7 +9,8 @@
 - `type` 枚举：目前仅确认 1=出口，其余值留 TODO（《逆推规范》§6-5）默认 1；
 - 多箱号 `b_num`：实测首箱可正确写入（VRCU000001），第二箱号无落点
   （《逆推规范》§6-3 待界面确认），配置位 `split_per_container` 预留（默认 false）；
-- 费用四通道（shou/pay/duo_get/cost）本轮整体省略（§5 范围外）。
+- 费用四通道（T13）：shou/pay/cost/duo_get 键位严格按《逆推规范》§2.7，
+  合计由我方计算回写（EX26080031 实测 b_totle_ys/yf 回显可为 0.00，不可信）。
 
 build_order_form 为纯函数，返回 (form 字段字典, 警告清单)；客户端与
 测试共用同一实现（保证 live 与生产一致）。
@@ -17,13 +18,18 @@ build_order_form 为纯函数，返回 (form 字段字典, 警告清单)；客�
 
 from __future__ import annotations
 
-from .schema import CanonicalOrder
+from .schema import CanonicalOrder, FeeItem
 
 # type 枚举：1=出口（2026-08-13 抓包确认）；其余值待实测补全（TODO），暂默认 1
 _TYPE_EXPORT = "1"
 
 # 多箱号拆分调用配置位（《逆推规范》§6-3 待验证）：true 时逐箱拆单，本轮默认 false
 SPLIT_PER_CONTAINER = False
+
+# 费用通道默认值（模板 fees.fee_defaults 未配置时的兜底，T13 实证值）
+_FEE_DEFAULT_PRICE_TYPE = "1"
+_FEE_DEFAULT_IS_PROFIT = "1"
+_FEE_DEFAULT_DAI_DIAN = "1"
 
 
 def _first(value: str | None) -> str | None:
@@ -65,18 +71,97 @@ def _build_note(order: CanonicalOrder) -> str | None:
     return "；".join(segments) if segments else None
 
 
+def collect_unmapped_note(order: CanonicalOrder) -> str | None:
+    """收集无 TMS 表单落点的标准字段 → 报告说明（预览/对账报告可见）。
+
+    当前客户字段已由 `c_title` 承接（旧链路 AddWork 实测 2026-08-12 dump：
+    c_title=小王），其余标准字段均有落点（《逆推规范》§4）；本函数为扩展点，
+    未来 F3 档案匹配策略（客户未命中报告）在此扩展。
+    """
+    segments: list[str] = []
+    return "；".join(segments) if segments else None
+
+
+def _emit_fees(form: dict[str, str], order: CanonicalOrder) -> None:
+    """费用四通道发射（T13，键位严格按《逆推规范》§2.7）。
+
+    - 每通道每费目：`{channel}[0][{tms_name}][money]`=两位小数字符串、`[price_id]`、
+      `[price_type]`/`[is_profit]`/`[dai_dian]` 取模板 fees.fee_defaults（默认 "1"）；
+    - 合计回写（我方计算，不依赖 TMS 汇总）：`driver[0][get_ys_zj]`=Σshou、
+      `driver[0][pay_yf_zj]`=Σpay、`cost[0][supplier_hj_zj]`=Σcost（键位按抓包原样）；
+      duo_get 合计 `duo_get_hj_zj` 预留、默认不出（公司成本通道默认不启用）；
+    - to_other 原名进**通道级** note（`{channel}[0][note]`，拼接「原名 ¥金额」列表）
+      ——2026-08-13 live 实证：控制器硬读该键，**有费用的通道 note 必须恒发**
+      （无 to_other 项时发空串，缺键 204 拒单 Undefined index: note）；
+      per-费目 note 键未实证，先用通道级，实测后再细化；
+    - 空通道整段省略；excluded 项（税金/price_id 待补）不录入、不进合计。
+    """
+    defaults = getattr(order, "_fee_defaults", {}) or {}
+    price_type = defaults.get("price_type") or _FEE_DEFAULT_PRICE_TYPE
+    is_profit = defaults.get("is_profit") or _FEE_DEFAULT_IS_PROFIT
+    dai_dian = defaults.get("dai_dian") or _FEE_DEFAULT_DAI_DIAN
+
+    by_channel: dict[str, list[FeeItem]] = {}
+    for fee in order.fees:
+        if fee.excluded or fee.price_id is None or not fee.tms_name:
+            continue  # 不录入项（税金/price_id 待补）整段省略
+        by_channel.setdefault(fee.channel, []).append(fee)
+
+    totals: dict[str, float] = {}
+    notes: dict[str, list[str]] = {}
+    for channel, items in by_channel.items():
+        for fee in items:
+            prefix = f"{channel}[0][{fee.tms_name}]"
+            form[f"{prefix}[money]"] = f"{fee.money:.2f}"
+            form[f"{prefix}[price_id]"] = str(fee.price_id)
+            form[f"{prefix}[price_type]"] = price_type
+            form[f"{prefix}[is_profit]"] = is_profit
+            form[f"{prefix}[dai_dian]"] = dai_dian
+            if channel == "cost":
+                # cost 费目条目硬读 driver_name（《逆推规范》§2.7 + 2026-08-13 live
+                # 实证：缺键 204 拒单 Undefined index: driver_name，层级为费目条目内）
+                form[f"{prefix}[driver_name]"] = ""
+            totals[channel] = totals.get(channel, 0.0) + float(fee.money)
+            if fee.code == "other" and fee.note:
+                notes.setdefault(channel, []).append(f"{fee.note} ¥{fee.money:.2f}")
+    for channel in by_channel:
+        # 通道级 note 恒发（live 实证：缺键 204 拒单 Undefined index: note）
+        form[f"{channel}[0][note]"] = "；".join(notes.get(channel, []))
+
+    # 合计回写（键位按抓包原样）：应收/应付进 driver[0]，成本进 cost[0]
+    shou = totals.get("shou")
+    if shou:
+        form["driver[0][get_ys_zj]"] = f"{shou:.2f}"
+    pay = totals.get("pay")
+    if pay:
+        form["driver[0][pay_yf_zj]"] = f"{pay:.2f}"
+    cost = totals.get("cost")
+    if cost:
+        form["cost[0][supplier_hj_zj]"] = f"{cost:.2f}"
+
+
 def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     """CanonicalOrder → (form-data 字段字典, 警告清单)。
 
-    字段布局（《逆推规范》§2/§4）：单头业务字段（顶层）+ 客户（c_name/c_sn）+
+    字段布局（《逆推规范》§2/§4）：单头业务字段（顶层）+ 客户（c_title/c_name/c_sn）+
     货物明细 data[0]（b_order_num/j/m/hh）+ 箱信息（box[N] + 顶层 b_num/b_lock）+
     门点（factory_name）+ 派车段 driver[0]。费用四通道省略。
+
+    客户字段口径（2026-08-13 实测确认，见《逆推规范》§4）：
+    - `c_title`=客户名称：响应回显确认（EX26081037/38 回显 c_title=测试客户204），
+      TMS「客户」字段正确落点，自由文本可保存；
+    - `c_name`=客户联系人：实证渲染为 UI「联系人」；
+    - `c_id` 恒发空串：PHP 控制器硬读（c_title 非空即读 c_id，缺键 204 拒单，
+      Undefined index: c_id，2026-08-13 实测）；c_phone/c_note 同旧链路超集恒发。
     """
     warnings: list[str] = []
     month = _pick_month(order)
     note = _build_note(order)
     containers = order.containers or []
     first_container = containers[0] if containers else None
+    unmapped = collect_unmapped_note(order)
+    if unmapped:
+        warnings.append(unmapped)
 
     # 多箱号写法（《逆推规范》§6-3）：b_num 顶层单值，实测首箱可正确写入；
     # 第二箱号无落点（split_per_container 配置位预留，待界面确认后调整）
@@ -99,9 +184,15 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
         # 单头业务字段
         "type": _type_value(order),
         "b_note": note or "",
-        # 客户
-        "c_name": order.customer_name or "",
+        # 客户：c_title=客户名称（2026-08-13 实测响应回显确认，TMS「客户」字段落点）；
+        # c_name=客户联系人（实证渲染为 UI「联系人」，勿填客户名称）；
+        # c_id/c_phone/c_note 恒发：PHP 控制器硬读（c_title 非空即读 c_id，缺键 204 拒单）
+        "c_title": order.customer_name or "",
+        "c_name": order.customer_contact or "",
+        "c_phone": order.contact_phone or "",
         "c_sn": order.customer_no or "",
+        "c_note": "",
+        "c_id": "",
         # 门点
         "factory_name": order.door_point or "",
         # 箱信息（顶层单值）
@@ -142,6 +233,10 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     }
     for key, value in driver.items():
         form[f"driver[0][{key}]"] = value
+
+    # 费用四通道（T13）：有费用的通道整段发射 + 合计回写；空通道省略
+    if order.fees:
+        _emit_fees(form, order)
 
     return form, warnings
 
