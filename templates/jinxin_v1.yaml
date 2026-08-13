@@ -1,0 +1,63 @@
+# 应收对账单内置模板（原代码内置金科信模板迁移至此，与各家族模板同 schema 同加载路径）。
+# 指纹 e31deea1 与《模板配置初稿》tonghuan_v1 相同：金科信账单即通寰应收对账单，
+# 本模板承担其既有解析语义（columns 目标 = BillRow 字段，含费用列），通寰家族不再
+# 单列 YAML，避免同指纹双模板歧义；TMS 通道由「BillOrder → CanonicalOrder」转换覆盖。
+template_id: jinxin_v1
+family: jinxin
+name: 应收对账单（内置模板迁移）
+match:
+  fingerprints:
+  - e31deea1
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: false
+data:
+  row_filter: seq_numeric
+  # 无 stop_on：尾部合计/箱量/大写行是归集对账锚点，须保留（与迁移前一致）
+fee_boundary: column_range
+required:
+- order_num1
+- c_title
+- b_type
+group_key:
+  primary: bl_no
+year_source:
+- filename
+- settlement_row
+columns:
+  seq: 序号
+  b_date: 日期
+  c_title: 客户名称
+  c_name:
+  - 客户联系人
+  - 联系人
+  c_sn: 客户编号
+  biz_type: 业务类型
+  order_num1: 提单号
+  factory_name: 门点
+  b_type: 箱型
+  c_phone: 联系电话
+  factory_bei:
+  - 装卸货地点
+  - 装卸货地址
+  container_no: 箱号
+  b_date_time: 做箱时间
+  b_wharf: 港区
+  b_get_address: 提箱堆场
+  b_back_address: 还箱堆场
+  d_num: 车牌号
+  fleet: 车队
+  d_name: 司机
+  d_phone: 司机手机
+  remark: 备注
+  payable_remark: 应付备注
+# 费用列映射（既有流程费用归集用；TMS 通道本轮不映射费用）：标准费用名 → 源列名
+fees:
+  运费: 运费
+  待时费: 待时费
+  预提费: 预提费
+  洋山费: 洋山费
+  落还箱费: 落/还箱费
+  其它费: 其它费
+normalizers: {}

@@ -1,0 +1,545 @@
+"""竞品账单导入下游客户端：GetWebKey → login 取 sk → 逐单下单（双通道）。
+
+对齐《竞品账单导入接口文档》v1.1 §2.2/§3.7/§5.3 与 2026-08-12 业务决策：
+- 凭证获取一次（GetWebKey → login 取 sk），逐单串行下单，不做缓存
+- 下单通道由 JXT_CREATE_CHANNEL 决定：
+  json=嵌套 JSON + sk 头（默认，POST publishCreateOrder 与 /orders 同一下游地址，
+  body 为 order_data 原样嵌套含 shou 费用，不带 roomId/userId）；
+  form=AddWork 表单（旧链路，a+b+c+顶层展平，降级备用不删除）
+- 任何情况不自动重试（防重复下单）；单失败不影响后续订单
+- 凭证获取失败 → 抛 UpstreamError（502 order_upstream_error），不逐单执行
+- 超时/网络异常 → 该单 error（order_upstream_error），不中断整批（凭证阶段除外）
+- missing_fields 非空的单照常提交（本服务不拦截）
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import httpx
+
+from app.config import settings
+from app.errors import SkillAPIError
+from app.logging_conf import get_logger
+
+from .schema import BillOrder
+
+log = get_logger(__name__)
+
+
+class UpstreamError(SkillAPIError):
+    """下游凭证/系统级失败：502 order_upstream_error（全局异常处理器统一转换）。"""
+
+    http_status = 502
+    code = "order_upstream_error"
+
+
+# AddWork 固定值字段（§2.2/§5.3 + 2026-08-11 抓包）：appendCost=true、o_id 新建为空、
+# 图片/多皮重数组为空、双拖/成本合计恒发 0.00（只发合计键，不构造费用条目，
+# 避免幻影费用行；若下轮报 Undefined index: pay 再补 pay 合计）
+_FIXED_FIELDS: dict[str, str] = {
+    "appendCost": "true",
+    "o_id": "",
+    "img_data": "[]",
+    "img_data_id": "[]",
+    "multiple_tare": "[]",
+    "duo_get[0][duo_get_hj_zj]": "0.00",
+    "cost[0][supplier_hj_zj]": "0.00",
+}
+
+# 顶层固定键集（§2.2 已确认的键名，全部恒发；有值填值，无值空字符串，
+# 满足 PHP 控制器直接索引读取——2026-08-12 实测缺 c_id/note 即拒单）：
+# 订单（type 固定 1；c_id/note 本期恒空）/ 运输 / 门点
+_TOP_FIXED_KEYS: tuple[str, ...] = (
+    "order_num1",
+    "type",
+    "c_title",
+    "c_name",
+    "c_phone",
+    "c_sn",
+    "c_note",
+    "c_id",
+    "month",
+    "note",
+    "b_ship_name",
+    "b_ship_num",
+    "b_ship_company",
+    "b_start_dock",
+    "b_end_port",
+    "b_end_dock",
+    "b_wharf",
+    "b_open_ship_time",
+    "b_close_ship_time",
+    "b_operator",
+    "factory_name",
+    "factory_bei",
+    "factory_id",
+    "b_factory_not",
+    "b_tare",
+)
+# type 固定为 1（§5.3）；c_id/note 本期恒发空字符串（账单无客户 ID；note 为订单级备注，
+# 实测缺键即拒单，先恒空保过，如需填充再议来源）
+_TOP_FIXED_VALUES: dict[str, str] = {"type": "1"}
+
+# data[N] 子键固定集（§2.2 确认：b_order_num/j/m/t/hh/mt；note 为 2026-08-12
+# live 实证：顶层已发仍报 Undefined index: note，控制器读的是嵌套条目），全部恒发：
+# b_order_num 取实际提单号，其余本期恒空
+_DATA_KEYS: tuple[str, ...] = ("b_order_num", "j", "m", "t", "hh", "mt", "note")
+
+# driver[N] 固定键集（§2.2/§5.1 全量键名 + live 实证 note）：无论有无值都发送，
+# 无值发空字符串
+_DRIVER_KEYS: tuple[str, ...] = (
+    "d_id",
+    "b_date",
+    "b_date_time_start",
+    "b_get_address",
+    "b_back_address",
+    "d_name",
+    "d_num",
+    "d_phone",
+    "distance",
+    "you_hao",
+    "driver_note",
+    "get_ys_zj",
+    "pay_yf_zj",
+    "note",
+)
+
+# shou 属性键固定集（2026-08-11 抓包确认：price_id/price_type/is_profit/dai_dian
+# + money；note 为 live 实证下沉）：全部费用挂在 shou[0] 单条目下，属性恒发
+_SHOU_KEYS: tuple[str, ...] = (
+    "money",
+    "price_id",
+    "price_type",
+    "is_profit",
+    "dai_dian",
+    "note",
+)
+
+# 不发送字段（§5.3/§2.2 明确）：user_name/car_name/section_name（走 web key 登录身份）、
+# box_type_text/box_type/顶层 b_date/b_date_pick、pay[]/duo_get[]/cost[]（本期不发送
+# 应付/双拖/成本线）、audit_status/b_lock 等状态类键
+# —— 实现上通过固定键集天然排除，无需额外过滤
+
+_ERROR_DESCRIPTION = "订单系统拒绝了请求或不可达，请稍后重试"
+
+
+def _put_value(flat: dict[str, str], key: str, value: Any) -> None:
+    """null → 空字符串，其余 str()（展平键值统一字符串化）。"""
+    flat[key] = "" if value is None else str(value)
+
+
+def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
+    """order_data（嵌套）→ 顶层展平表单字段（超集键集 + 值填充，§2.2/§5.3）。
+
+    PHP 控制器硬读键名（未知键忽略、缺键报错），故按 §2.2/抓包已确认键名发超集，
+    note 除顶层外同步下沉到全部嵌套条目（2026-08-12 live 实证：顶层 note 已发
+    仍报 Undefined index: note，控制器读的是嵌套结构）：
+    - 顶层固定键集 25 键（订单/运输/门点，type 固定 1，c_id/note 恒空）
+    - data[N] 7 子键（b_order_num 实际值，j/m/t/hh/mt/note 恒空）、
+      driver[N] 14 键全部恒发
+    - shou 单条目形态（抓包 2026-08-11）：所有费用挂 shou[0] 下不同费用名键，
+      每费用名 6 属性键（money 实际金额，price_id/price_type/is_profit/dai_dian/note 恒空）
+    - box[N][b_type/box_num] 按实际内容，box[N][note] 恒空
+    - 固定值：type=1 / appendCost=true / o_id="" / img_data=[] / img_data_id=[] /
+      multiple_tare=[] / duo_get[0][duo_get_hj_zj]=0.00 / cost[0][supplier_hj_zj]=0.00
+    - 不发送 user_name/car_name/section_name/box_type_text/box_type/顶层 b_date/
+      b_date_pick、pay[]/duo_get[]/cost[] 费用条目、audit_status/b_lock 等
+    """
+    flat: dict[str, str] = dict(_FIXED_FIELDS)
+
+    for key in _TOP_FIXED_KEYS:
+        if key in _TOP_FIXED_VALUES:
+            flat[key] = _TOP_FIXED_VALUES[key]
+        else:
+            _put_value(flat, key, order_data.get(key))
+
+    for i, entry in enumerate(order_data.get("data", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        for key in _DATA_KEYS:
+            _put_value(flat, f"data[{i}][{key}]", entry.get(key))
+
+    for i, entry in enumerate(order_data.get("box", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        _put_value(flat, f"box[{i}][note]", "")
+        for key in ("b_type", "box_num"):
+            if key in entry:
+                _put_value(flat, f"box[{i}][{key}]", entry[key])
+
+    for i, entry in enumerate(order_data.get("driver", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        for key in _DRIVER_KEYS:
+            _put_value(flat, f"driver[{i}][{key}]", entry.get(key))
+
+    for _i, entry in enumerate(order_data.get("shou", []) or []):
+        if not isinstance(entry, dict):
+            continue
+        for name, spec in entry.items():
+            if not isinstance(spec, dict):
+                continue
+            # 抓包形态：所有费用挂 shou[0] 单条目下（不同费用名作键）
+            for key in _SHOU_KEYS:
+                _put_value(flat, f"shou[0][{name}][{key}]", spec.get(key))
+
+    return flat
+
+
+def _error_result(message: str, *, details: dict[str, Any]) -> dict[str, Any]:
+    """单失败 create_result（不抛异常，调用方按单处理，不中断整批）。"""
+    return {
+        "success": False,
+        "sn": None,
+        "error": {
+            "code": "order_upstream_error",
+            "message": message,
+            "description": _ERROR_DESCRIPTION,
+            "details": details,
+        },
+    }
+
+
+def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """POST JSON → dict；网络/HTTP/非 JSON 失败抛 UpstreamError（凭证阶段，全局 502）。"""
+    try:
+        response = httpx.post(url, json=payload, timeout=settings.jxt_timeout_seconds)
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_credential_network_error",
+            extra={"url": url, "error_type": exc.__class__.__name__},
+        )
+        raise UpstreamError(
+            f"credential API network error: {exc.__class__.__name__}",
+            details={"url": url, "error_type": exc.__class__.__name__},
+        ) from exc
+    if response.status_code >= 400:
+        raise UpstreamError(
+            f"credential API returned an HTTP error: {response.status_code}",
+            details={
+                "url": url,
+                "status_code": response.status_code,
+                "upstream_response": response.text[:2000],
+            },
+        )
+    try:
+        raw = response.json()
+    except ValueError as exc:
+        raise UpstreamError(
+            "credential API returned a non-JSON response",
+            details={"url": url, "body_preview": response.text[:500]},
+        ) from exc
+    if not isinstance(raw, dict):
+        raise UpstreamError(
+            "credential API response is not a JSON object",
+            details={
+                "url": url,
+                "response_type": type(raw).__name__,
+                "body_preview": response.text[:500],
+            },
+        )
+    return raw
+
+
+def get_web_key() -> str:
+    """POST GetWebKey → web_key；code 为数字 200 才取，否则抛 UpstreamError（含上游原文）。"""
+    payload = {
+        "ext_app_id": settings.jxt_ext_app_id,
+        "ext_user_id": settings.jxt_ext_user_id,
+        "jxt_open_id": settings.jxt_jxt_open_id,
+        "order_info": [{}],
+    }
+    raw = _post_json(settings.jxt_getwebkey_url, payload)
+    if raw.get("code") != 200:
+        raise UpstreamError(
+            f"GetWebKey rejected the request: {raw.get('msg', '')}",
+            details={
+                "upstream_code": raw.get("code"),
+                "upstream_message": raw.get("msg"),
+                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+            },
+        )
+    web_key = raw.get("web_key")
+    if not web_key:
+        raise UpstreamError(
+            "GetWebKey response has no web_key field",
+            details={"upstream_response": json.dumps(raw, ensure_ascii=False)[:2000]},
+        )
+    log.info("jxt_get_web_key_ok")
+    return str(web_key)
+
+
+def _pick_login_token(raw: dict[str, Any]) -> str | None:
+    """从 login 响应中探测 token（#2 实测定论，2026-08-12）。
+
+    实测响应结构：{"code": 200, "data": {"token": "..."}, "msg": "..."}，
+    即实际取值路径 = data.token。候选顺序：data.token → sk → data.sk → token，
+    取第一个非空；字段名再次变化时按此顺序扩展即可（单点维护）。
+    """
+    data = raw.get("data")
+    for value in (
+        data.get("token") if isinstance(data, dict) else None,
+        raw.get("sk"),
+        data.get("sk") if isinstance(data, dict) else None,
+        raw.get("token"),
+    ):
+        if value:
+            return str(value)
+    return None
+
+
+def login(web_key: str) -> str:
+    """POST login → token（AddWork 请求头 sk 值）；候选路径见 _pick_login_token。"""
+    payload = {"port": "tmsWebKey", "web_key": web_key}
+    raw = _post_json(settings.jxt_login_url, payload)
+    if raw.get("code") != 200:
+        raise UpstreamError(
+            f"login rejected the request: {raw.get('msg', '')}",
+            details={
+                "upstream_code": raw.get("code"),
+                "upstream_message": raw.get("msg"),
+                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+            },
+        )
+    token = _pick_login_token(raw)
+    if not token:
+        raise UpstreamError(
+            "login response has no token field",
+            details={
+                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "response_keys": sorted(raw),
+            },
+        )
+    log.info("jxt_login_ok")
+    return token
+
+
+def build_add_work_form(order_data: dict[str, Any]) -> dict[str, str]:
+    """组装 AddWork 表单（§5.3）：a="{}"、c="{}"、b=URL 编码 JSON（键为展平
+    写法、与顶层同内容）、顶层超集展平字段。纯函数，add_work 与联调脚本共用
+    （保证 live 与生产同一份实现）。"""
+    flat = flatten_order(order_data)
+    return {
+        "a": "{}",
+        "c": "{}",
+        "b": json.dumps(flat, ensure_ascii=False),
+        **flat,
+    }
+
+
+def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, Any]:
+    """下游下单响应 → create_result（add_work 与 add_order_json 共用同一口径）。
+
+    code "200"（字符串/数字皆可）→ 成功取 data[0].sn（缺 sn 仍成功，sn=None）；
+    其他 → error 三元组（不抛异常，调用方按单处理）。网络异常由调用方捕获。
+    """
+    if response.status_code >= 400:
+        return _error_result(
+            f"{step} returned an HTTP error: {response.status_code}",
+            details={
+                "status_code": response.status_code,
+                "upstream_response": response.text[:2000],
+            },
+        )
+    try:
+        raw = response.json()
+    except ValueError:
+        return _error_result(
+            f"{step} returned a non-JSON response",
+            details={"body_preview": response.text[:500]},
+        )
+    if not isinstance(raw, dict):
+        return _error_result(
+            f"{step} response is not a JSON object",
+            details={
+                "response_type": type(raw).__name__,
+                "body_preview": response.text[:500],
+            },
+        )
+    if str(raw.get("code")) != "200":
+        log.warning("jxt_order_rejected", extra={"step": step, "upstream_code": raw.get("code")})
+        return _error_result(
+            f"{step} rejected the order: {raw.get('msg', '')}",
+            details={
+                "upstream_code": raw.get("code"),
+                "upstream_message": raw.get("msg"),
+                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+            },
+        )
+    data_list = raw.get("data")
+    sn = None
+    if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
+        sn = data_list[0].get("sn")
+    log.info("jxt_order_ok", extra={"step": step, "sn": sn})
+    return {"success": True, "sn": sn, "error": None}
+
+
+def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
+    """POST AddWork 创建一单 → create_result（{success, sn, error}）。
+
+    表单（§5.3）：a="{}"、c="{}"、b=URL 编码 JSON（键为展平写法，与顶层同内容）、
+    顶层展平字段；header sk；content-type application/x-www-form-urlencoded。
+    响应口径见 _parse_create_response（code "200" → 取 data[0].sn）。
+    """
+    form = build_add_work_form(order_data)
+    try:
+        response = httpx.post(
+            settings.jxt_addwork_url,
+            data=form,
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_add_work_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return _error_result(
+            f"AddWork network error: {exc.__class__.__name__}",
+            details={"error_type": exc.__class__.__name__},
+        )
+    return _parse_create_response(response, step="AddWork")
+
+
+def add_order_json(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
+    """POST 嵌套 JSON 创建一单（与 /orders 同一下游地址）→ create_result。
+
+    body = order_data 嵌套 JSON 原样（含 shou 费用），不带 roomId/userId；鉴权靠
+    header sk（web-key 登录身份，替代 /orders 的 userId/roomId 调用上下文）。
+    响应口径与 add_work 一致（_parse_create_response）：code "200" → 取 data[0].sn。
+    """
+    try:
+        response = httpx.post(
+            settings.order_api_url,
+            json=order_data,
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_order_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return _error_result(
+            f"order API network error: {exc.__class__.__name__}",
+            details={"error_type": exc.__class__.__name__},
+        )
+    return _parse_create_response(response, step="order API")
+
+
+def create_orders(orders: list[BillOrder]) -> None:
+    """逐单串行下单并原地填充 create_result。
+
+    先 GetWebKey → login 取 sk 一次；凭证失败抛 UpstreamError（不逐单执行）；
+    通道由 JXT_CREATE_CHANNEL 决定：json=嵌套 JSON + sk 头（默认）；form=AddWork
+    表单（旧链路，降级备用）。单失败不影响后续；任何情况不自动重试；
+    missing_fields 非空照常提交。
+    """
+    if not orders:
+        return
+    sk = login(get_web_key())
+    submit = add_order_json if settings.jxt_create_channel == "json" else add_work
+    for order in orders:
+        order.create_result = submit(sk, order.order_data or {})
+
+
+def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
+    """TMS 通道响应判定（《逆推规范》§3）：code 为字符串 "200" → 成功，
+    回取 data[0].sn（TMS 业务编号）与 data[0].o_id；其余 → error 三元组。
+    网络/HTTP 异常由调用方捕获；判定失败不抛异常（按单处理）。
+    """
+    if response.status_code >= 400:
+        return _error_result(
+            f"order API returned an HTTP error: {response.status_code}",
+            details={
+                "status_code": response.status_code,
+                "upstream_response": response.text[:2000],
+            },
+        )
+    try:
+        raw = response.json()
+    except ValueError:
+        return _error_result(
+            "order API returned a non-JSON response",
+            details={"body_preview": response.text[:500]},
+        )
+    if not isinstance(raw, dict):
+        return _error_result(
+            "order API response is not a JSON object",
+            details={
+                "response_type": type(raw).__name__,
+                "body_preview": response.text[:500],
+            },
+        )
+    if str(raw.get("code")) != "200":
+        log.warning(
+            "jxt_canonical_order_rejected", extra={"upstream_code": raw.get("code")}
+        )
+        return _error_result(
+            f"order API rejected the order: {raw.get('msg', '')}",
+            details={
+                "upstream_code": raw.get("code"),
+                "upstream_message": raw.get("msg"),
+                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+            },
+        )
+    data_list = raw.get("data")
+    sn = None
+    o_id = None
+    if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
+        sn = data_list[0].get("sn")
+        o_id = data_list[0].get("o_id")
+    log.info("jxt_canonical_order_ok", extra={"sn": sn, "o_id": o_id})
+    result: dict[str, Any] = {"success": True, "sn": sn, "error": None}
+    if o_id is not None:
+        result["o_id"] = o_id
+    return result
+
+
+def submit_canonical(sk: str, order) -> dict[str, Any]:
+    """TMS 通道 POST 一单（form-data + b 双写 + create_order=true，sk 头鉴权）。
+
+    payload 构造见 payload.build_order_payload（接口怪癖全部封装在适配层）；
+    多箱号等 warning 仅记日志（不阻断下单）；响应判定见 _parse_canonical_response。
+    """
+    from .payload import build_order_payload
+
+    form, warnings = build_order_payload(order)
+    if warnings:
+        log.warning(
+            "canonical_payload_warning",
+            extra={"bl_no": order.bl_no, "warnings": warnings},
+        )
+    try:
+        response = httpx.post(
+            settings.order_api_url,
+            data=form,
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_canonical_order_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return _error_result(
+            f"order API network error: {exc.__class__.__name__}",
+            details={"error_type": exc.__class__.__name__},
+        )
+    return _parse_canonical_response(response)
+
+
+def create_canonical_orders(orders) -> None:
+    """TMS 通道逐单串行下单（CanonicalOrder → form-data）并原地填充 create_result。
+
+    先 GetWebKey → login 取 sk 一次（复用既有凭证链路）；凭证失败抛 UpstreamError
+    （不逐单执行）；单失败隔离不中断；任何情况不自动重试（防重复下单）；
+    missing_fields 非空照常提交。响应回取 data[0].sn（TMS 业务编号）与 o_id。
+    """
+    if not orders:
+        return
+    sk = login(get_web_key())
+    for order in orders:
+        order.create_result = submit_canonical(sk, order)

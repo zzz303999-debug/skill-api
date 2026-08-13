@@ -1,0 +1,52 @@
+# 费用区无区块表头，以「应收合计/应付合计/成本合计」列分界；业务列右边界 = 应收合计列。
+template_id: yinghui_v1
+family: yinghui
+name: 利润明细表·赢辉家族
+match:
+  fingerprints:
+  - cc7c8158
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: false
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: total_columns
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  order_date: 做箱日期
+  biz_no: 运单编号
+  customer_name: 客户名称
+  bl_no: 提单号
+  box_type_qty: 箱型
+  pickup_point: 提箱堆场
+  door_point: 装卸工厂
+  port_area: 港区
+  fleet: 车队
+  plate_no: 车牌号
+  driver_name: 司机
+  io_type: 进出口
+  biz_type: 业务类型
+  load_point: 装卸地点
+  vessel: 船名
+  voyage: 航次
+  container_no: 箱号
+  seal_no: 封条号
+normalizers:
+  order_date: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse

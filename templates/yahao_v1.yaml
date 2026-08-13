@@ -1,0 +1,70 @@
+# 实测表头某列为无表头空列（非合并单元格），直接忽略，不影响映射。
+template_id: yahao_v1
+family: yahao
+name: 利润明细表·亚灏家族
+match:
+  fingerprints:
+  - '91534182'
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: true
+  section_fill: forward
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: section_header
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  order_date: 日期
+  biz_no: 业务编号
+  customer_name: 客户名称
+  customer_contact: 客户联系人
+  contact_phone: 联系电话
+  customer_no: 客户编号
+  biz_type: 业务类型
+  door_point: 门点
+  contact_person: 联系人
+  load_address: 装卸货地址
+  vessel: 船名
+  voyage: 航次
+  ship_date: 船期
+  discharge_port: 卸货港
+  delivery_place: 交货地
+  bl_no: 提单号
+  box_type_qty: 箱型箱量
+  container_no: 箱号
+  seal_no: 封条号
+  work_date: 做箱时间
+  port_area: 港区
+  port_open_time: 开港时间
+  port_cut_time: 截港时间
+  port_in_time: 进港时间
+  pickup_point: 提箱点
+  load_point: 装卸点
+  return_point: 还箱点
+  driver_name: 司机
+  plate_no: 车牌号
+  driver_phone: 司机手机
+normalizers:
+  order_date: date_flex
+  work_date: date_flex
+  ship_date: date_flex
+  port_open_time: date_flex
+  port_cut_time: date_flex
+  port_in_time: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse

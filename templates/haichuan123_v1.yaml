@@ -1,0 +1,54 @@
+# 存在同名重复列（车牌号×2、提箱场站×2，实测数据一致）；plate_no 用「车牌号#1」取首次出现；
+# order_date 别名列表按优先级取「时间」→「到厂时间」。
+template_id: haichuan123_v1
+family: haichuan123
+name: 利润明细表·123家族
+match:
+  fingerprints:
+  - 62d6b07d
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: true
+  section_fill: forward
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: section_header
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  biz_no: 业务编号
+  order_date:
+  - 时间
+  - 到厂时间
+  customer_name: 客户简称
+  load_point: 装货地点
+  biz_type: 业务类型
+  work_date: 做柜日期(年-月-日)
+  pickup_point: 提箱场站
+  bl_no: 提单号
+  box_type_qty: 箱型
+  container_no: 箱号
+  plate_no: 车牌号#1
+  fleet: 车队
+  driver_name: 司机
+  driver_phone: 司机手机
+  remark: 大表备注
+normalizers:
+  order_date: date_flex
+  work_date: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse

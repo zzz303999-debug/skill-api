@@ -12,3 +12,9 @@ build/
 ._*
 .idea/
 .vscode/
+
+.tmp/
+
+# 竞品账单 golden 表格样本（大文件，不入库；测试按存在性跳过）
+tests/golden/bill/**/*.xls
+tests/golden/bill/**/*.xlsx

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,7 +13,9 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
     # API
     api_host: str = "0.0.0.0"
@@ -28,6 +31,25 @@ class Settings(BaseSettings):
     # 订单创建接口
     order_api_url: str = "https://s3.jxt56.com/Car/publishCreateOrder"
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+    # 竞品账单导入下游（GetWebKey → login → AddWork；凭据为服务端静态配置，不随请求传入）
+    jxt_ext_app_id: str = ""
+    jxt_ext_user_id: str = ""
+    jxt_jxt_open_id: str = ""
+    jxt_getwebkey_url: str = "https://a3.jxt56.com/Api/Account/GetWebKey"
+    jxt_login_url: str = "https://a3.jxt56.com/Api/login"
+    jxt_addwork_url: str = "https://s3.jxt56.com/Car/WorkOut/AddWork"
+    jxt_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    # 竞品账单下单通道：json=嵌套 JSON + sk 头（默认，POST publishCreateOrder 与 /orders
+    # 同一下游地址，body 为 order_data 原样嵌套、无 roomId/userId）；form=AddWork 表单
+    # （旧链路，降级备用，不删除）
+    jxt_create_channel: Literal["json", "form"] = "json"
+
+    @field_validator("jxt_create_channel", mode="before")
+    @classmethod
+    def _normalize_create_channel(cls, value: str) -> str:
+        """环境变量大小写宽容（JSON/Form → json/form）；before 模式在 Literal 校验前执行。"""
+        return value.strip().lower()
 
     # OpenAI-compatible LLM
     llm_base_url: str = "https://api.openai.com/v1"
@@ -49,9 +71,7 @@ class Settings(BaseSettings):
     image_vision_skip_when_confident: bool = True
     # 原图 base64 直传 LLM 的字节数上限；超过则跳过 vision 并标记人工复核
     # （base64 会膨胀约 1/3，避免超网关请求体限制）
-    vision_max_image_bytes: int = Field(
-        default=8 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024
-    )
+    vision_max_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
 
     # PDF 文本层页级质量探测
     parser_text_min_chars: int = Field(default=50, ge=1, le=1000)

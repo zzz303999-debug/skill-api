@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, create_model
 
@@ -46,6 +46,7 @@ from app.orders import (
     parse_source_fields,
     publish_create_order,
 )
+from app.orders.bill import BillParseResult, build_result
 
 setup_logging()
 log = get_logger(__name__)
@@ -85,9 +86,7 @@ _light_limiter = rate_limit.SlidingWindowLimiter(
     window_seconds=settings.rate_limit_light_window_seconds,
 )
 _rate_limit_whitelist = frozenset(
-    ip.strip()
-    for ip in settings.rate_limit_whitelist.split(",")
-    if ip.strip()
+    ip.strip() for ip in settings.rate_limit_whitelist.split(",") if ip.strip()
 )
 _LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
 
@@ -306,9 +305,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         status_code = response.status_code
         if settings.access_log_record_response:
             try:
-                response, response_text, response_truncated = await _capture_json_response(
-                    response
-                )
+                response, response_text, response_truncated = await _capture_json_response(response)
             except Exception:
                 # 捕获失败时响应流可能已被部分消费，继续返回会造成空体与
                 # content-length 不匹配；直接抛出使请求走 500，避免静默损坏响应
@@ -318,9 +315,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         # 请求体超限（声明式 Content-Length 或 chunked 流式读取）：统一返回 413，
         # 与 try 内其他路径一致，finally 仍会记录审计
         status_code = 413
-        max_bytes = getattr(
-            request.state, "payload_max_bytes", settings.api_max_upload_bytes
-        )
+        max_bytes = getattr(request.state, "payload_max_bytes", settings.api_max_upload_bytes)
         request.state.error_code = "payload_too_large"
         request.state.error_detail = {
             "code": "payload_too_large",
@@ -422,9 +417,7 @@ async def _http_probe(base_url: str, path: str) -> str:
     仅连接失败/超时视为 unreachable。
     """
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.health_probe_timeout_seconds
-        ) as client:
+        async with httpx.AsyncClient(timeout=settings.health_probe_timeout_seconds) as client:
             await client.get(f"{base_url.rstrip('/')}{path}")
         return "ok"
     except (httpx.HTTPError, OSError):
@@ -660,6 +653,38 @@ async def parse_order_document(
     content = await _read_upload(file)
     request.state.file_size = len(content)
     return await _parse_document_to_order(content, file.filename or "unnamed")
+
+
+@app.post(
+    "/orders/bill/import",
+    response_model=BillParseResult,
+    tags=["orders"],
+    summary="Import a competitor bill and optionally create orders",
+)
+async def import_bill(
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    create_order: bool = Form(default=False),
+) -> BillParseResult:
+    """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
+
+    create_order 缺省 false（只预览不下单）；显式传 true 时逐单创建订单
+    （GetWebKey → login → AddWork 链路，见 app/orders/bill/client.py），
+    响应附 orders[].create_result 与 summary；凭证获取失败返回 502。
+    表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
+    请求自动记录访问日志（文件名/大小/耗时/状态码）。
+    """
+    request.state.file_name = file.filename or "unnamed"
+    content = await _read_upload(file)
+    request.state.file_size = len(content)
+    return await _run_in_executor(
+        partial(
+            build_result,
+            filename=file.filename or "unnamed",
+            file_bytes=content,
+            create_order=create_order,
+        )
+    )
 
 
 def _make_extract_route(skill: SkillBase):

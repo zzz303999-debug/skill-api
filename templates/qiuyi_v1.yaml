@@ -1,0 +1,56 @@
+# vessel/voyage 同源合并列「船名/航次」，由 vessel_voyage_split 拆分；族内 6 个指纹为逐年费用列漂移，业务列稳定。
+template_id: qiuyi_v1
+family: qiuyi
+name: 应收对账单·秋怡家族
+match:
+  fingerprints:
+  - 248494ad
+  - 2babff58
+  - 500ca5db
+  - 972efd43
+  - ca7df516
+  - d90b619c
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: false
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: column_range
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  biz_no: 业务编号
+  order_date: 日期
+  customer_name: 客户名称
+  customer_contact: 客户联系人
+  customer_no: 客户编号
+  biz_type: 业务类型
+  bl_no: 提单号
+  door_point: 门点
+  box_type_qty: 箱型
+  vessel: 船名/航次
+  voyage: 船名/航次
+  container_no: 箱号
+  pickup_point: 提箱点
+  load_point: 装卸点
+  return_point: 还箱点
+  remark: 备注
+normalizers:
+  order_date: date_flex
+  bl_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse
+  vessel: vessel_voyage_split
+  voyage: vessel_voyage_split
