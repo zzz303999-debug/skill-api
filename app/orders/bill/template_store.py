@@ -52,6 +52,8 @@ def _source_col_names(template: dict) -> set[str]:
 
     「区块.列名」（two_row 家族）取列名部分参与重合度比较——区块名不参与，
     因为 L2 扫描的是列名行；「列名#N」取 # 前部分（同名列消歧不影响列名集合）。
+    fees 段仅旧 schema（费目名 → 源列名，jinxin_v1 既有语义）参与；新 schema
+    （T10 费用通道配置，含 channels 键）费用列自动发现/配置声明，不参与 L2。
     """
     names: set[str] = set()
     for value in template.get("columns", {}).values():
@@ -63,7 +65,10 @@ def _source_col_names(template: dict) -> set[str]:
                 col = m.group(1)
             if col:
                 names.add(_normalize(col))
-    for value in template.get("fees", {}).values():
+    fees = template.get("fees", {}) or {}
+    if isinstance(fees, dict) and "channels" in fees:
+        return names
+    for value in fees.values():
         for col in value if isinstance(value, list) else [value]:
             col = str(col).strip()
             if col:

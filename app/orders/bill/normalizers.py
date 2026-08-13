@@ -227,11 +227,19 @@ def to_int(value) -> int | None:
 
 
 def to_number(value) -> float | None:
-    """毛重 → float；空值/非数字 → None（缺失语义，不报错）。"""
+    """金额/重量 → float；支持千分位/货币符号/负号（T9 费用解析口径）；
+    空值/非数字 → None（缺失语义，不报错）。"""
     if value is None:
         return None
+    text = str(value).strip()
+    if not text:
+        return None
+    # 货币符号与金额单位（¥/￥/$/€/元）及空白
+    text = re.sub(r"[¥￥$€\s元]", "", text)
+    # 千分位（1,234.5 → 1234.5）
+    text = text.replace(",", "")
     try:
-        return float(str(value).strip())
+        return float(text)
     except (ValueError, TypeError):
         return None
 

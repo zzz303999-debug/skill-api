@@ -30,7 +30,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 from app.errors import BadRequestError, ConvertError, LLMError, ParseError
 
 from . import template_store
-from .normalizers import NORMALIZER_REGISTRY, parse_year_hint
+from .fee_map import canonicalize_fee, is_new_fee_schema
+from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
 from .schema import (
     HEADER_ALIASES,
     HEADER_COLUMN_MAP,
@@ -195,17 +196,26 @@ def find_header_row(view: _SheetView) -> int:
 
 
 def _to_money(value: object) -> float | None:
-    """费用单元格转金额：数字直转；文本尝试解析数字；其余（含中文大写）返回 None。"""
+    """费用单元格转金额（T9 口径）：数字直转；文本按行拆分逐段解析累加
+    （合并单元格多值如 '1300\r\n2200' = 两柜各自费用）；复用 to_number 支持
+    千分位/货币符号/负号；任一段解析失败（含中文大写）→ None（该格记 warning）。"""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in re.split(r"[\r\n]+", text) if p.strip()]
+    if len(parts) == 1:
+        return to_number(parts[0])
+    total = 0.0
+    for part in parts:
+        money = to_number(part)
+        if money is None:
             return None
-    return None
+        total += money
+    return total
 
 
 def _header_columns(
@@ -331,6 +341,12 @@ _SEQ_NUMERIC_RE = re.compile(r"^\d+(\.\d+)?$")
 _TOTAL_COLUMNS = ("应收合计", "应付合计", "成本合计")
 # 双行表头家族的费用区块名（区块行非空单元格即区块名，费用区不参与业务列匹配）
 _SECTION_NAMES = ("应收", "应付", "车辆成本", "公司成本", "成本")
+
+# 对账锚点列关键字（T9）：含这些关键字的列不是费目（合计/小计/已收/未收/已付/未付/
+# 利润），值保留为对账锚点；bill_total 取「合计/小计」列，其余仅排除不抽取
+_ANCHOR_KEYWORDS = ("合计", "小计", "已收", "已付", "未收", "未付", "利润")
+# 备注类列名（column_range 家族费用列发现时排除，避免备注被当费用列）
+_NOTE_KEYWORDS = ("备注", "附言")
 
 
 # BillRow 字段名集合：模板 columns 目标字段 ⊆ 该集合 → 既有流程语义（构造 BillRow）
@@ -478,6 +494,123 @@ def _match_source_cols(
     ]
 
 
+def _is_anchor_column(name: str) -> bool:
+    """对账锚点列判定：列名含 合计/小计/已收/未收/已付/未付/利润 关键字。"""
+    return any(kw in name for kw in _ANCHOR_KEYWORDS)
+
+
+def _is_note_column(name: str) -> bool:
+    """备注类列判定（column_range 家族费用列发现时排除）。"""
+    return any(kw in name for kw in _NOTE_KEYWORDS)
+
+
+def _range_bounds(
+    ranges_cfg: dict, names: list[str], field_cols: dict[str, list[int]]
+) -> dict[str, tuple[int, int]]:
+    """单行 total_columns 家族：区块 → (费用区起点列, 终点列)（排他）。
+
+    区块费用区 = 上一分界列之后 到 本区块分界列（ranges 值 = 区块末尾合计列名）
+    之前；首个区块起点 = 业务列（columns 匹配）最后一列之后。分界列缺失 → 区块跳过。
+    """
+    business_last = max((c for cols in field_cols.values() for c in cols), default=0)
+    bounds: dict[str, tuple[int, int]] = {}
+    prev_end = business_last + 1
+    for section, anchor_name in ranges_cfg.items():
+        end = next(
+            (
+                col
+                for col, name in enumerate(names, start=1)
+                if name == _normalize_header(str(anchor_name))
+            ),
+            None,
+        )
+        if end is None:
+            continue
+        bounds[section] = (prev_end, end)
+        prev_end = end + 1
+    return bounds
+
+
+def _discover_fee_columns(
+    fees_cfg: dict,
+    names: list[str],
+    sections: list[str],
+    field_cols: dict[str, list[int]],
+    row_anchor: str = "序号",
+) -> tuple[dict[int, tuple[str, str]], dict[int, tuple[str, str]]]:
+    """新 fees schema（T9）：费用列/锚点列发现，代码零费目名硬编码。
+
+    返回 (费目列 {列号: (区块, 列名)}, 锚点列 {列号: (区块, 列名)})：
+    - two_row（区块行非空）：区块 ∈ fees.channels 的列；锚点列 = 含锚点关键字列；
+    - 单行 + fees.ranges（区块 → 末尾合计列名）：范围内列（长尾费目也抽取 → to_other），
+      边界合计列本身是锚点列（对账锚点）；
+    - 单行无 ranges（column_range 家族）：columns 未映射列中排除 row_anchor（序号）/
+      备注/IGNORED 后的全部列（mapping 只负责码解析，长尾自动 to_other，保证对账恒等）；
+      锚点列取 fees.anchors 显式声明（账单侧合计列语义家族差异大，配置为准）。
+    """
+    fee_cols: dict[int, tuple[str, str]] = {}
+    anchor_cols: dict[int, tuple[str, str]] = {}
+    anchor_row = _normalize_header(row_anchor)
+    if any(sections):
+        channels = set(fees_cfg.get("channels") or {})
+        for col, (section, name) in enumerate(zip(sections, names, strict=True), start=1):
+            if not section or section not in channels or not name:
+                continue
+            # two_row 表头列名为「区块.列名」复合键，抽取侧还原纯列名
+            # （区块参与匹配由 section 承担，费目名/字典/note 都须无前缀）
+            if name.startswith(section + "."):
+                name = name[len(section) + 1 :]
+            if _is_note_column(name):
+                continue  # 备注类列（防御：区块内误排备注）
+            if _is_anchor_column(name):
+                anchor_cols[col] = (section, name)
+            else:
+                fee_cols[col] = (section, name)
+        return fee_cols, anchor_cols
+    ranges = fees_cfg.get("ranges") or {}
+    if ranges:
+        bounds = _range_bounds(ranges, names, field_cols)
+        boundary_section = {_normalize_header(str(v)): s for s, v in ranges.items()}
+        for col, name in enumerate(names, start=1):
+            if not name:
+                continue
+            section = next(
+                (s for s, (lo, hi) in bounds.items() if lo <= col < hi), None
+            )
+            if section is None:
+                # 边界合计列（ranges 值）本身是锚点，归属声明区块
+                section = boundary_section.get(_normalize_header(name))
+                if section is not None:
+                    anchor_cols[col] = (section, name)
+                continue
+            if _is_note_column(name):
+                continue  # 备注类列（如赢辉大表备注，非费目）
+            if _is_anchor_column(name):
+                anchor_cols[col] = (section, name)
+            else:
+                fee_cols[col] = (section, name)
+        return fee_cols, anchor_cols
+    # column_range：columns 未映射列（排除序号/备注/IGNORED）即费用列；
+    # 锚点列 = fees.anchors 显式声明（如 秋怡小计列；军羽小计列恒值无效则不配）
+    mapped = {c for cols in field_cols.values() for c in cols}
+    for col, name in enumerate(names, start=1):
+        if col in mapped or not name:
+            continue
+        if _normalize_header(name) == anchor_row:
+            continue  # 序号列（row_anchor）非费用
+        if _is_note_column(name) or name in IGNORED_HEADERS:
+            continue
+        fee_cols[col] = ("", name)
+    anchors_cfg = fees_cfg.get("anchors") or {}
+    for section, anchor_names in anchors_cfg.items():
+        for anchor_name in anchor_names if isinstance(anchor_names, list) else [anchor_names]:
+            for col, name in enumerate(names, start=1):
+                if name == _normalize_header(str(anchor_name)):
+                    anchor_cols[col] = (str(section), name)
+                    fee_cols.pop(col, None)
+    return fee_cols, anchor_cols
+
+
 def _parse_with_template(
     view: _SheetView, match, engine: str, filename: str
 ) -> ParseOutput:
@@ -504,17 +637,33 @@ def _parse_with_template(
         if cols:
             field_cols[target_field] = cols
 
-    # fees 段（内置模板迁移：费用列映射，TMS 通道家族无此段）
-    fees = template.get("fees", {}) or {}
+    # fees 段：新 schema（T10 费用通道配置）→ 费用列/锚点列发现 + 行级费用抽取；
+    # 旧 schema（内置模板迁移：费用名 → 源列名）→ BillRow.fees 抽取（语义不变）
+    fees_cfg = template.get("fees", {}) or {}
     fee_cols: dict[int, str] = {}
-    for fee_name, spec in fees.items():
-        for col in _match_source_cols(spec, names, sections, business_end):
-            fee_cols[col] = fee_name
+    new_fee_cols: dict[int, tuple[str, str]] = {}
+    anchor_cols: dict[int, tuple[str, str]] = {}
+    channels: dict = {}
+    if is_new_fee_schema(fees_cfg):
+        row_anchor = _normalize_header(str(header_cfg.get("row_anchor") or "序号"))
+        new_fee_cols, anchor_cols = _discover_fee_columns(
+            fees_cfg, names, sections, field_cols, row_anchor
+        )
+        channels = fees_cfg.get("channels") or {}
+    else:
+        for fee_name, spec in fees_cfg.items():
+            for col in _match_source_cols(spec, names, sections, business_end):
+                fee_cols[col] = fee_name
 
     # 未识别列（非 IGNORED、非映射、数据区非空才上报）；unmatched 存原始表头文本；
     # AI 明确忽略的列（L3 候选配置 _ignored_cols）不告警
     ignored_cols = set(template.get("_ignored_cols") or [])
-    mapped_cols_flat = {c for cols in field_cols.values() for c in cols} | set(fee_cols)
+    mapped_cols_flat = (
+        {c for cols in field_cols.values() for c in cols}
+        | set(fee_cols)
+        | set(new_fee_cols)
+        | set(anchor_cols)
+    )
     unmatched_raw: dict[int, str] = {
         col: str(view.merged_cell(header_row, col)).strip()
         for col, name in enumerate(names, start=1)
@@ -585,7 +734,52 @@ def _parse_with_template(
             if str(raw).strip():
                 money = _to_money(raw)
                 fees_map[fee_name] = money if money is not None else str(raw)
-        if not values and not fees_map:
+
+        # 新 fees schema 行级费用抽取（T9）：费用列 → 行级费用项（随归集按键汇总）；
+        # 金额解析失败/空值/0 不生成记录，失败记 warning 进对账报告；锚点列值保留
+        fee_items: list[dict] = []
+        anchors: dict[str, dict[str, float]] = {}
+        fee_failures: list[dict] = []
+        fee_skipped: list[dict] = []
+        if new_fee_cols:
+            # column_range 家族单行表头无区块行，section 默认取唯一启用区块
+            # （保证「应收.费目」复合键映射与通道归属正确）
+            default_section = next(iter(channels), "")
+            for col, (section, name) in new_fee_cols.items():
+                section = section or default_section
+                raw = view.cell(row, col)
+                if raw is None or not str(raw).strip():
+                    continue
+                money = _to_money(raw)
+                if money is None:
+                    fee_failures.append({"section": section, "name": name, "raw": str(raw)})
+                    continue
+                if money == 0:
+                    continue  # 空值与 0 均不生成费用记录（账单侧合计仍按列值参与对账）
+                meta = canonicalize_fee(section, name, fees_cfg)
+                if not meta["code"]:
+                    fee_skipped.append({"section": section, "name": name, "money": money})
+                    continue
+                fee_items.append(
+                    {
+                        "section": section,
+                        "name": name,
+                        "channel": channels.get(section) or "shou",
+                        "code": meta["code"],
+                        "import": meta["import"],
+                        "reconcile": meta["reconcile"],
+                        "money": money,
+                    }
+                )
+            for col, (section, name) in anchor_cols.items():
+                raw = view.cell(row, col)
+                if raw is None or not str(raw).strip():
+                    continue
+                money = _to_money(raw)
+                if money is None:
+                    continue
+                anchors.setdefault(section, {})[name] = money
+        if not values and not fees_map and not fee_items:
             if is_billrow:
                 # 与迁移前 read_data_rows 一致：仅未映射列有值的行也保留（字段为空）
                 has_any = any(
@@ -612,6 +806,15 @@ def _parse_with_template(
                     )
                 if value is not None and value != "":
                     normalized[target_field] = value
+            # 行级费用私有键（归集侧按 group_key 聚合；下划线前缀不进响应）
+            if fee_items:
+                normalized["_fees"] = fee_items
+            if anchors:
+                normalized["_anchors"] = anchors
+            if fee_failures:
+                normalized["_fee_failures"] = fee_failures
+            if fee_skipped:
+                normalized["_fee_skipped"] = fee_skipped
             canonical_rows.append(normalized)
 
     unmatched = [

@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 # 识别有效账单必需的列：表头需同时包含「客户编号」「提单号」两列
 REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
@@ -205,6 +206,41 @@ class ContainerInfo(BaseModel):
     seal_no: str | None = Field(None, description="封条号")
 
 
+class FeeItem(BaseModel):
+    """一票一单的费用明细条目（T11，四通道）。
+
+    解析 → 归集（group_canonical）产出 code/money/excluded；price_id 回填
+    （apply_price_map）补 tms_name/price_id；price_id null 降级项 excluded=True
+    （不录入，进对账报告），import:false 项（如税金）同样 excluded=True（仅对账）。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    channel: Literal["shou", "pay", "cost", "duo_get"] = Field(description="TMS 费用通道")
+    code: str = Field(description="标准费目码（other=未匹配长尾归并）")
+    tms_name: str | None = Field(None, description="价格表费目名（price map 回填）")
+    price_id: int | None = Field(None, description="价格表 ID（price map 回填；null=待补降级）")
+    money: Decimal = Field(default=Decimal("0"), description="金额（两位小数）")
+    note: str | None = Field(None, description="to_other 时 = 原费目名")
+    excluded: bool = Field(default=False, description="不录入项（import:false 或 price_id null），仅对账")
+
+
+class FeeReconcile(BaseModel):
+    """单通道费用对账（T14，恒等校验只报告不拦截）。
+
+    恒等：bill_total（账单锚点列合计，含排除项）− recorded_total（录入合计）
+    = excluded_total（排除项合计），容差 0.01；差额超差 ok=False 进对账报告。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    bill_total: Decimal = Field(default=Decimal("0"), description="账单费用合计（锚点列 Σ，含排除项）")
+    recorded_total: Decimal = Field(default=Decimal("0"), description="录入合计（不录入项除外）")
+    excluded_total: Decimal = Field(default=Decimal("0"), description="排除项合计（import:false + price_id null）")
+    diff: Decimal = Field(default=Decimal("0"), description="bill − recorded − excluded")
+    ok: bool = Field(default=True, description="|diff| ≤ 0.01")
+
+
 class CanonicalOrder(BaseModel):
     """标准业务订单（业务信息类，27+ 字段，核心/常见/扩展三档，见《字段映射表》§1）。
 
@@ -259,13 +295,26 @@ class CanonicalOrder(BaseModel):
         default_factory=list, description="同组多行箱信息聚合（一票多箱）"
     )
     month: str | None = Field(None, description="账期 YYYY-MM（order_date 派生）")
+    # ---- 费用（T11，四通道；费用抽取/归一/聚合见 parser/aggregator）----
+    fees: list[FeeItem] = Field(
+        default_factory=list, description="费用明细；excluded 项（税金/price_id 待补）仅对账不录入"
+    )
+    fee_reconcile: dict[str, FeeReconcile] = Field(
+        default_factory=dict, description="通道 → 费用对账（恒等校验，只报告不拦截）"
+    )
     # ---- 元信息 ----
     missing_fields: list[str] = Field(default_factory=list, description="缺失字段清单（必填缺失行）")
+    unmapped_note: str | None = Field(
+        None,
+        description="未映射到 TMS 表单的标准字段说明（如 TMS「客户」字段键未确认前，客户名称只进报告不进表单），预览/对账报告可见",
+    )
     source_template: str = Field(default="", description="命中的 template_id")
     row_count: int = Field(default=0, description="归集原始行数")
     create_result: dict[str, Any] | None = Field(
         None, description="TMS 下单结果 {success, sn, o_id, error}；preview 模式为 null"
     )
+    # 私有：payload 层费用通道默认值（模板 fees.fee_defaults 烘焙，不进响应）
+    _fee_defaults: dict[str, str] = PrivateAttr(default_factory=dict)
 
     def add_missing(self, field: str) -> None:
         """登记缺失字段（去重保序）。"""
@@ -291,7 +340,11 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
 
     映射口径见《TMS业务订单新增接口-逆推规范》§4；旧流程 order_data 的扁平键
     逐项对齐到标准字段；缺失项（必填 bl_no/box_groups）登记 missing_fields。
+    费用：order_data["shou"]（费目名 → 金额）经费目别名字典归一为 FeeItem
+    （未命中字典 → other + 原名进 note），金额为 0/空不生成记录。
     """
+    from .fee_map import canonicalize_fee_name
+
     data = order.order_data or {}
     box_groups = [
         BoxGroup(b_type=box["b_type"], box_num=int(box.get("box_num", 1)))
@@ -299,6 +352,25 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
         if isinstance(box, dict) and box.get("b_type")
     ]
     driver = (data.get("driver") or [{}])[0]
+    fees: list[FeeItem] = []
+    for entry in data.get("shou", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        for name, spec in entry.items():
+            if not isinstance(spec, dict):
+                continue
+            money = spec.get("money")
+            if not isinstance(money, (int, float)) or money == 0:
+                continue  # 空值与 0 均不生成费用记录（账单侧合计仍参与对账）
+            code, note = canonicalize_fee_name(str(name))
+            fees.append(
+                FeeItem(
+                    channel="shou",
+                    code=code,
+                    money=Decimal(str(round(float(money), 2))),
+                    note=note,
+                )
+            )
     canonical = CanonicalOrder(
         bl_no=order.order_num1 or _first_nonempty(data, "order_num1"),
         box_groups=box_groups,
@@ -317,6 +389,7 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
         driver_phone=_first_nonempty(driver, "d_phone"),
         month=_first_nonempty(data, "month"),
         remark=_first_nonempty(data, "c_note"),
+        fees=fees,
         source_template=source_template,
         row_count=order.row_count,
     )

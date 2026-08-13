@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from decimal import Decimal
 
 from .schema import (
     MISSING_BOX,
@@ -27,6 +28,8 @@ from .schema import (
     BoxGroup,
     CanonicalOrder,
     ContainerInfo,
+    FeeItem,
+    FeeReconcile,
 )
 
 # 数据行序号：纯数字（真实账单为 "1.0" 形式）
@@ -585,6 +588,8 @@ _SINGLE_FIELDS: tuple[str, ...] = tuple(
         "missing_fields",
         "source_template",
         "row_count",
+        "fees",
+        "fee_reconcile",
     }
 )
 
@@ -688,15 +693,82 @@ def group_canonical(
     groups: list[list[dict]] = list(standalone) + list(by_key.values())
     orders: list[CanonicalOrder] = []
     for group in groups:
-        order = _build_canonical(group, template.get("template_id", ""), period)
+        order = _build_canonical(group, template, period)
         orders.append(order)
     return orders
 
 
+def _aggregate_fees(
+    group: list[dict], template: dict
+) -> tuple[list[FeeItem], dict[str, FeeReconcile]]:
+    """行级费用聚合（T10/T14）：按 (通道, 标准费目码) 累加 → FeeItem + 通道对账。
+
+    - import:false 项（税金等）excluded=True（不录入仅对账，金额进排除项合计）；
+    - to_other（code=other）原名去重进 note（payload 拼「原名 ¥金额」列表）；
+    - 对账恒等：bill_total（账单锚点列「合计/小计」Σ，含排除项）− recorded_total
+      = excluded_total，容差 0.01；超差 ok=False 进对账报告（只报告不拦截）。
+    """
+    fees_cfg = template.get("fees", {}) or {}
+    channels = fees_cfg.get("channels") or {}
+    default_channel = next(iter(channels.values()), "shou")
+
+    by_key: dict[tuple[str, str], FeeItem] = {}
+    reconcile: dict[str, FeeReconcile] = {}
+    for row in group:
+        for item in row.get("_fees") or []:
+            ch = str(item.get("channel") or "shou")
+            code = str(item.get("code") or "other")
+            money = Decimal(str(round(float(item.get("money") or 0), 2)))
+            importable = bool(item.get("import", True))
+            rec = reconcile.setdefault(ch, FeeReconcile())
+            key = (ch, code)
+            fee = by_key.get(key)
+            if fee is None:
+                fee = FeeItem(
+                    channel=ch,
+                    code=code,
+                    money=Decimal("0"),
+                    note=None,
+                    excluded=not importable,
+                )
+                by_key[key] = fee
+            fee.money += money
+            if code == "other":
+                _merge_fee_note(fee, item.get("name"))
+            if importable:
+                rec.recorded_total += money
+            else:
+                rec.excluded_total += money
+        for section, anchor_map in (row.get("_anchors") or {}).items():
+            ch = channels.get(section) or default_channel
+            rec = reconcile.setdefault(ch, FeeReconcile())
+            for name, money in anchor_map.items():
+                # bill_total 只取「合计/小计」列（已收/未收等状态列不参与）
+                if "合计" in name or "小计" in name:
+                    rec.bill_total += Decimal(str(money))
+    for rec in reconcile.values():
+        rec.diff = rec.bill_total - rec.recorded_total - rec.excluded_total
+        # 无锚点（bill_total=0，账单侧无有效合计列）不算 mismatch——与金科信
+        # no_anchor 语义一致（只报告不拦截，缺锚点不误报）；有锚点才判恒等
+        rec.ok = rec.bill_total == 0 or abs(rec.diff) <= Decimal("0.01")
+    return list(by_key.values()), reconcile
+
+
+def _merge_fee_note(fee: FeeItem, name) -> None:
+    """to_other 原名去重拼接（保留出现顺序）。"""
+    if not name:
+        return
+    parts = fee.note.split(",") if fee.note else []
+    if name not in parts:
+        parts.append(name)
+    fee.note = ",".join(parts)
+
+
 def _build_canonical(
-    group: list[dict], template_id: str, period: BillPeriod | None
+    group: list[dict], template: dict, period: BillPeriod | None
 ) -> CanonicalOrder:
     """组（同归集键 或 单独一行）→ CanonicalOrder。"""
+    template_id = template.get("template_id", "")
     # 单值字段：组内首行非空（行序即账单出现顺序）
     values: dict[str, object] = {}
     for field_name in _SINGLE_FIELDS:
@@ -711,16 +783,21 @@ def _build_canonical(
     month = values.get("month")
     if not month and group:
         month = _pick_month(group[0])
+    fees, fee_reconcile = _aggregate_fees(group, template)
 
     order = CanonicalOrder(
         bl_no=bl_no or values.get("bl_no"),
         box_groups=box_groups,
         containers=containers,
         month=month,
+        fees=fees,
+        fee_reconcile=fee_reconcile,
         source_template=template_id,
         row_count=len(group),
         **{k: v for k, v in values.items() if k != "bl_no"},
     )
+    # 费用通道默认值（payload 发射用）：模板 fees.fee_defaults 烘焙进私有属性
+    order._fee_defaults = (template.get("fees", {}) or {}).get("fee_defaults") or {}
     # 必填缺失登记（配置 required 优先，缺省 bl_no/box_groups）
     if not order.bl_no:
         order.add_missing("bl_no")

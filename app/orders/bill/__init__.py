@@ -22,6 +22,8 @@ from .schema import (
     BoxGroup,
     CanonicalOrder,
     ContainerInfo,
+    FeeItem,
+    FeeReconcile,
     to_canonical,
 )
 from .service import build_result
@@ -54,5 +56,7 @@ __all__ = [
     "BoxGroup",
     "CanonicalOrder",
     "ContainerInfo",
+    "FeeItem",
+    "FeeReconcile",
     "to_canonical",
 ]
