@@ -67,7 +67,8 @@ def _build_fee_reports(output, orders: list) -> dict:
                 rec.excluded_total += Decimal(entry["money"])
         for channel, rec in order.fee_reconcile.items():
             rec.diff = rec.bill_total - rec.recorded_total - rec.excluded_total
-            rec.ok = abs(rec.diff) <= Decimal("0.01")
+            # 与 aggregator 同口径：无锚点（bill_total=0）不算 mismatch（no_anchor 语义）
+            rec.ok = rec.bill_total == 0 or abs(rec.diff) <= Decimal("0.01")
             stats = channel_stats.setdefault(
                 channel,
                 {

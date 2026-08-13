@@ -590,14 +590,16 @@ def _discover_fee_columns(
             else:
                 fee_cols[col] = (section, name)
         return fee_cols, anchor_cols
-    # column_range：columns 未映射列（排除序号/备注/IGNORED）即费用列；
-    # 锚点列 = fees.anchors 显式声明（如 秋怡小计列；军羽小计列恒值无效则不配）
+    # column_range：columns 未映射列（排除序号/锚点/备注/IGNORED）即费用列；
+    # 锚点列取 fees.anchors 显式声明（如 秋怡小计列；军羽小计列恒值无效则不配）
     mapped = {c for cols in field_cols.values() for c in cols}
     for col, name in enumerate(names, start=1):
         if col in mapped or not name:
             continue
         if _normalize_header(name) == anchor_row:
             continue  # 序号列（row_anchor）非费用
+        if _is_anchor_column(name):
+            continue  # 合计/小计等锚点列非费目（锚点只取 fees.anchors 显式声明）
         if _is_note_column(name) or name in IGNORED_HEADERS:
             continue
         fee_cols[col] = ("", name)
