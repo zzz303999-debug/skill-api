@@ -7,11 +7,9 @@ client 侧响应判定（code 字符串 "200"）与 create_order=true 提交。
 
 from __future__ import annotations
 
-import json
-
 import app.orders.bill.client as client_module
 from app.orders.bill.client import create_canonical_orders
-from app.orders.bill.payload import build_b_field, build_order_form, build_order_payload
+from app.orders.bill.payload import build_order_form, build_order_payload
 from app.orders.bill.schema import BoxGroup, CanonicalOrder, ContainerInfo
 from helpers import FakeResponse
 
@@ -124,13 +122,12 @@ class TestBuildOrderForm:
         assert build_order_form(_sample_order(biz_type="进口"))[0]["type"] == "1"
         assert build_order_form(_sample_order(biz_type=None, io_type=None))[0]["type"] == "1"
 
-    def test_b_field_duplicates_flat_form(self):
-        """b 字段 = 顶层扁平字段 JSON 字符串双写（与抓包一致）。"""
+    def test_payload_flat_form_only(self):
+        """TMS 直连表单：扁平字段 + create_order=true；b 双写实测非必需（2026-08-13），不再发送。"""
         payload, _ = build_order_payload(_sample_order())
-        assert payload["a"] == "{}" and payload["c"] == "{}"
-        form, _ = build_order_form(_sample_order())
-        assert json.loads(payload["b"]) == form
-        assert build_b_field(form) == payload["b"]
+        assert "a" not in payload and "b" not in payload and "c" not in payload
+        assert payload["create_order"] == "true"
+        assert payload["data[0][b_order_num]"] == "OOLU4044379500"
 
 
 class TestSubmitCanonical:

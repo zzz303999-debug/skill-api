@@ -2,11 +2,13 @@
 
 接口怪癖全部封装在本层，不外泄：
 - form-data 扁平括号记法（group[idx][field]）；
-- `b` 字段 = 顶层扁平字段的 JSON 字符串双写（抓包确认与顶层全量一致）；
-- 响应 code 为字符串 "200"、`o_id` 留空 = 新增（见 client.py）；
+- `create_order=true` 触发下单、`o_id` 留空 = 新增；
+- 端点实测（2026-08-13）：TMS 直连走 AddWork 端点 + sk 头 + create_order=true
+  （publishCreateOrder 强制要求有效 userId+roomId，不可行）；b 字段（JSON 双写）
+  实测非必需，不再发送；
 - `type` 枚举：目前仅确认 1=出口，其余值留 TODO（《逆推规范》§6-5）默认 1；
-- 多箱号 `b_num` 写法未定（《逆推规范》§6-3）：先取首箱并记 warning，
-  配置位 `split_per_container` 预留（默认 false，后续实测调整）；
+- 多箱号 `b_num`：实测首箱可正确写入（VRCU000001），第二箱号无落点
+  （《逆推规范》§6-3 待界面确认），配置位 `split_per_container` 预留（默认 false）；
 - 费用四通道（shou/pay/duo_get/cost）本轮整体省略（§5 范围外）。
 
 build_order_form 为纯函数，返回 (form 字段字典, 警告清单)；客户端与
@@ -76,14 +78,16 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     containers = order.containers or []
     first_container = containers[0] if containers else None
 
-    # 多箱号写法未定（《逆推规范》§6-3）：b_num 顶层单值，先取首箱并记 warning
+    # 多箱号写法（《逆推规范》§6-3）：b_num 顶层单值，实测首箱可正确写入；
+    # 第二箱号无落点（split_per_container 配置位预留，待界面确认后调整）
     b_num = None
     if first_container is not None and first_container.container_no:
         b_num = first_container.container_no
     if len(containers) > 1:
         warnings.append(
-            f"一票多箱（{len(containers)} 箱），b_num 暂取首箱；"
-            "split_per_container 配置位预留（默认 false），待实测后调整"
+            f"一票多箱（{len(containers)} 箱），b_num 已写入首箱"
+            f"（{b_num or '无'}），其余箱号暂不发送；"
+            "split_per_container 配置位预留（默认 false），待界面确认后调整"
         )
 
     form: dict[str, str] = {
@@ -142,17 +146,9 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     return form, warnings
 
 
-def build_b_field(form: dict[str, str]) -> str:
-    """b 字段：顶层扁平字段的 JSON 字符串双写（抓包确认与顶层全量一致）。"""
-    import json
-
-    return json.dumps(form, ensure_ascii=False)
-
-
 def build_order_payload(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
-    """完整 payload 组装：扁平 form + b 双写（a/c 空对象与既有 AddWork 形态一致）。
+    """TMS 直连完整表单：扁平字段 + create_order=true（b 双写实测非必需，不再发送）。
 
-    返回 (form 字段字典（含 a/b/c）, 警告清单)。
+    返回 (form 字段字典, 警告清单)。
     """
-    form, warnings = build_order_form(order)
-    return {"a": "{}", "c": "{}", "b": build_b_field(form), **form}, warnings
+    return build_order_form(order)

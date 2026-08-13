@@ -499,10 +499,13 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
 
 
 def submit_canonical(sk: str, order) -> dict[str, Any]:
-    """TMS 通道 POST 一单（form-data + b 双写 + create_order=true，sk 头鉴权）。
+    """TMS 通道 POST 一单（form-data + create_order=true，AddWork 端点，sk 头鉴权）。
 
     payload 构造见 payload.build_order_payload（接口怪癖全部封装在适配层）；
     多箱号等 warning 仅记日志（不阻断下单）；响应判定见 _parse_canonical_response。
+    端点实测（2026-08-13 最小报文验证）：publishCreateOrder 无论 JSON/form-data
+    均强制要求有效 userId+roomId（204 拒单），AddWork 端点 + sk 头 + create_order=true
+    即可成功下单（费用四通道全空，sn=EX26080356）——TMS 直连以此为准。
     """
     from .payload import build_order_payload
 
@@ -514,7 +517,7 @@ def submit_canonical(sk: str, order) -> dict[str, Any]:
         )
     try:
         response = httpx.post(
-            settings.order_api_url,
+            settings.jxt_addwork_url,
             data=form,
             headers={"sk": sk},
             timeout=settings.jxt_timeout_seconds,
