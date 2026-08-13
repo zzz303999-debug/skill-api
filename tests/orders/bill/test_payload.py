@@ -20,6 +20,7 @@ def _sample_order(**overrides) -> CanonicalOrder:
         bl_no="OOLU4044379500",
         box_groups=[BoxGroup(b_type="40HQ", box_num=2), BoxGroup(b_type="20GP", box_num=1)],
         customer_name="德清华凯",
+        customer_contact="张经理",
         customer_no="SED161509",
         door_point="德清和普",
         work_date="2016-07-26",
@@ -64,8 +65,12 @@ class TestBuildOrderForm:
     def test_field_mapping_snapshot(self):
         """标准字段 → TMS 表单字段逐项落点（§4 映射表）。"""
         form, _ = build_order_form(_sample_order())
-        assert form["c_name"] == "德清华凯"  # customer_name
+        # 客户：c_title=客户名称（2026-08-13 实测响应回显确认）；c_name=客户联系人
+        # （实证 c_name 渲染为 UI「联系人」）；c_id 恒发（控制器硬读，缺键 204 拒单）
+        assert form["c_title"] == "德清华凯"  # customer_name
+        assert form["c_name"] == "张经理"  # customer_contact
         assert form["c_sn"] == "SED161509"  # customer_no
+        assert form["c_id"] == "" and form["c_note"] == ""  # 控制器硬读键恒发空串
         assert form["factory_name"] == "德清和普"  # door_point
         assert form["driver[0][b_date]"] == "2016-07-26"  # work_date
         assert form["driver[0][b_get_address]"] == "提箱点A"  # pickup_point
@@ -86,17 +91,36 @@ class TestBuildOrderForm:
         """多箱号：b_num 取首箱 + warning（split_per_container 预留，默认 false）。"""
         form, warnings = build_order_form(_sample_order())
         assert form["b_num"] == "TCLU1234567"
-        assert len(warnings) == 1
-        assert "一票多箱" in warnings[0] and "split_per_container" in warnings[0]
-        # 单箱无 warning
+        assert any("一票多箱" in w and "split_per_container" in w for w in warnings)
+        # 单箱无多箱 warning（unmapped 报告 warning 仍在：样例含客户名称）
         single = _sample_order(containers=[ContainerInfo(container_no="TCLU1234567")])
         _, warnings2 = build_order_form(single)
-        assert warnings2 == []
+        assert not any("一票多箱" in w for w in warnings2)
+
+    def test_junyu_customer_fields(self):
+        """军羽 r73 实证票（《修复prompt》F4）：客户名称「锦煦」曾误入 c_name。
+
+        修复后：c_title=客户名称（旧链路实证），c_name 由 customer_contact 供给，
+        军羽无该列 → 留空（联系人栏不再出现错误客户名称）。
+        """
+        junyu = _sample_order(
+            bl_no="ZIMUSNH3849269",
+            customer_name="锦煦",
+            customer_contact=None,
+        )
+        form, _ = build_order_form(junyu)
+        assert form["c_title"] == "锦煦"  # 客户名称 → c_title（实测回显确认）
+        assert form["c_name"] == ""  # 军羽无客户联系人列 → 留空
+        assert form["c_id"] == ""  # 控制器硬读键恒发，避免 204 拒单
+        # 有客户联系人的家族：c_name = 联系人值（通寰/秋怡/志驿/亚灏/1111）
+        form2, _ = build_order_form(_sample_order(customer_contact="朱经理"))
+        assert form2["c_name"] == "朱经理"
 
     def test_missing_optional_omitted_as_empty(self):
         """选填缺失 → 空串（PHP 控制器直接索引读取的语义，与既有链路一致）。"""
         order = _sample_order(
             customer_no=None,
+            customer_contact=None,
             door_point=None,
             work_date=None,
             vessel=None,
@@ -111,6 +135,7 @@ class TestBuildOrderForm:
         form, _ = build_order_form(order)
         assert form["c_sn"] == "" and form["factory_name"] == ""
         assert form["driver[0][b_date]"] == ""
+        assert form["c_name"] == ""  # customer_contact 缺失 → 空串
         assert form["b_ship_name"] == "" and form["b_ship_num"] == ""
         assert form["data[0][j]"] == "" and form["data[0][m]"] == "" and form["data[0][hh]"] == ""
         assert form["b_note"] == ""
