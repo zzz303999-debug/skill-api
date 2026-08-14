@@ -22,3 +22,24 @@ lift:        { tms_name: 上下车费, price_id: null }
 port_misc:   { tms_name: 港杂费,   price_id: null }
 tax:         { tms_name: 税金,     price_id: null, import: false }
 other:       { tms_name: 其它费,   price_id: null }
+
+# 费目自举（T24/T25）：生产默认关闭——价格表由运维管控，自举属越权行为，需显式开启。
+# 结构与 test 环境一致（结构同步便于运维开启后直接生效）；endpoint_key 复用 master_data endpoints。
+fee_bootstrap:
+  enabled: false
+  endpoint_key: price_create
+  create_defaults:
+    sn_prefix: AUTO
+    inout: "3"
+    is_get: on
+    is_pay: on
+    price_type: "1"
+    is_profit: "1"
+    status: "1"
+    dai_dian: "2"
+    bao_zhang: "1"
+    od: "0"
+    use_imprest: "0"
+    expense_rate: "5"
+    class_id: "4612"
+    classification_name: 运费

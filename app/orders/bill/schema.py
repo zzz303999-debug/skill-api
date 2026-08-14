@@ -319,6 +319,9 @@ class CanonicalOrder(BaseModel):
     )
     # 私有：payload 层费用通道默认值（模板 fees.fee_defaults 烘焙，不进响应）
     _fee_defaults: dict[str, str] = PrivateAttr(default_factory=dict)
+    # 私有：阶段三基础资料回填（kind → {archive_id, key}；已建档档案的 TMS 主键，
+    # payload 构造用，不进响应——未建档订单零变化）
+    _archive_refs: dict[str, dict[str, str]] = PrivateAttr(default_factory=dict)
 
     def add_missing(self, field: str) -> None:
         """登记缺失字段（去重保序）。"""

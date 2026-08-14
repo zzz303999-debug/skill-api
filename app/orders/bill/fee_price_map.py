@@ -1,9 +1,10 @@
-"""费目 price_id 映射表（T12）：标准费目码 → {tms_name, price_id}，配置先行。
+"""费目 price_id 映射表（T12/T24）：标准费目码 → {tms_name, price_id}，配置先行。
 
 - 启动/首次使用加载 `config/fee_price_map.{settings.env}.yaml`；缺文件/YAML 错误
   → 启动 fail fast（RuntimeError，不允许裸跑）；环境切换只换文件，代码零环境名。
-- 解析顺序：FeeItem.code 查表 → 回填 tms_name/price_id；`price_id is None` →
-  该条降级（excluded，不录入、进对账报告），不阻塞整单；
+- 解析顺序四级（T24 费目自举）：**YAML 显式 id → registry（自举产物）→ 自举创建
+  → 降级 skip_report**；YAML 与 registry 冲突时 YAML 优先（人工修正永远压过自动产物）；
+- `price_id is None` → 该条降级（excluded，不录入、进对账报告），不阻塞整单；
 - `other.price_id is None` 且存在 to_other 项 → 全部降级 skip_report + 显著 warning。
 - price_id 全局唯一、跨通道通用（EX26081252/EX26080031 双重实证），单表服务三通道。
 """
@@ -17,6 +18,8 @@ import yaml
 
 from app.config import settings
 from app.logging_conf import get_logger
+
+from .fee_registry import get_registry
 
 log = get_logger(__name__)
 
@@ -78,27 +81,51 @@ def reload_price_map() -> dict[str, dict]:
 
 
 def lookup(code: str) -> dict | None:
-    """标准费目码 → {tms_name, price_id, import}；未登记 → None。"""
-    return load_price_map().get(code)
+    """标准费目码 → {tms_name, price_id, import}（YAML → registry 两级；未登记 → None）。"""
+    entry = load_price_map().get(code)
+    if entry and entry.get("price_id") is not None:
+        return entry
+    rec = get_registry().lookup(code)
+    if rec:
+        return {
+            "tms_name": str(rec.get("tms_name") or "") or (entry or {}).get("tms_name"),
+            "price_id": rec["price_id"],
+            "import": bool((entry or {}).get("import", True)),
+        }
+    return entry
+
+
+def resolve_price_id(code: str) -> int | None:
+    """费目码 → price_id：YAML 显式 id → registry（T24 四级解析前两级）。
+
+    YAML 优先：人工修正（YAML 补 id）永远压过自举自动产物；registry 由
+    fee_bootstrap 建档成功后登记，命中即复用（幂等，不重发建档）。
+    """
+    entry = load_price_map().get(code) or {}
+    if entry.get("price_id") is not None:
+        return entry["price_id"]
+    rec = get_registry().lookup(code)
+    return int(rec["price_id"]) if rec else None
 
 
 def apply_price_map(fees: list) -> tuple[list, list[dict]]:
-    """FeeItem 列表回填 tms_name/price_id；返回 (原列表, 降级清单)。
+    """FeeItem 列表回填 tms_name/price_id（YAML → registry 两级解析）；返回 (原列表, 降级清单)。
 
     降级规则（映射表文档 §4）：
-    - 某费目 price_id null → 该条不录入（excluded=True），进对账报告，不阻塞整单；
+    - 某费目 price_id null（YAML 未补、registry 未登记、自举未建或失败）→ 该条不录入
+      （excluded=True），进对账报告，不阻塞整单；
     - other.price_id null 且存在 to_other 项 → 全部降级 + 显著 warning（先补其它费 id）。
     返回的降级清单条目：{channel, code, money, reason}（report 用，含原名 note）。
     """
     price_map = load_price_map()
     has_other_items = any(fee.code == "other" for fee in fees)
-    other_price_id = (price_map.get("other") or {}).get("price_id")
+    other_price_id = resolve_price_id("other")
     dropped: list[dict] = []
     for fee in fees:
         entry = price_map.get(fee.code)
         if entry:
             fee.tms_name = entry.get("tms_name") or fee.tms_name
-            fee.price_id = entry.get("price_id")
+        fee.price_id = resolve_price_id(fee.code)
         if fee.excluded:
             continue  # import:false 项已不录入（税金等），无 price_id 也无需降级
         if fee.price_id is None:

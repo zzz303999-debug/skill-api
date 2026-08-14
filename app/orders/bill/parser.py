@@ -762,6 +762,12 @@ def _parse_with_template(
                 if not meta["code"]:
                     fee_skipped.append({"section": section, "name": name, "money": money})
                     continue
+                # T27a 负向扣减项：negative=true → 金额取负录入（两位小数字符串如 "-50.00"）；
+                # 账单语义：应付合计 = Σ正项 − 扣除费列值（列值本身带符号：+486 扣减、-25 加回），
+                # 故取 `-money`（相反数）而非 -abs：负值列取负后为 +（加回），恒等式自然成立；
+                # negative_policy=skip_report 已在 canonicalize_fee 降级 import=False（不录入仅对账）
+                if meta.get("negative"):
+                    money = -money
                 fee_items.append(
                     {
                         "section": section,
@@ -770,6 +776,7 @@ def _parse_with_template(
                         "code": meta["code"],
                         "import": meta["import"],
                         "reconcile": meta["reconcile"],
+                        "negative": bool(meta.get("negative")),
                         "money": money,
                     }
                 )

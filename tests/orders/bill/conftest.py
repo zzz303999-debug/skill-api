@@ -30,6 +30,68 @@ def _llm_unavailable_for_bill(monkeypatch):
     monkeypatch.setattr(ai_header_module, "chat_json", _unavailable)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_master_data_store(tmp_path, monkeypatch):
+    """基础资料计数存储隔离：每用例重建到临时目录。
+
+    防止 create 模式用例（service 编排）写入真实 storage/master_data.json
+    并在用例间泄漏计数。
+    """
+    from app.orders.bill import master_data_store
+
+    master_data_store.reload_store(tmp_path / "master_data.json")
+    yield
+    master_data_store.reload_store(tmp_path / "master_data.json")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fee_registry(tmp_path):
+    """费目自举注册表隔离：每用例重建到临时目录。
+
+    防止自举用例（apply_price_map 会读 registry）写入真实 storage/fee_registry.json
+    并在用例间泄漏登记结果（幂等命中会掩盖重试/懒创建断言）。
+    """
+    from app.orders.bill import fee_registry
+
+    fee_registry.reload_registry(tmp_path / "fee_registry.json")
+    yield
+    fee_registry.reload_registry(tmp_path / "fee_registry.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_archive_calls(monkeypatch):
+    """全局拦截建档族网络调用（零网络）：默认全部成功返回递增 archive_id。
+
+    费目自举/基础资料建档的编排用例可自行 monkeypatch 覆盖（如 test_master_data
+    的 fake_create）；未 mock 的用例（test_template/test_route 等 build_result
+    调用）不会向真实 s3.jxt56.com 发建档请求（建档失败本就不抛断）。
+    yield 真实 create_archives：需要验证建档内部调用链的用例（如
+    TestClientDirectURL）可显式依赖本 fixture 并恢复真实实现。
+    """
+    import itertools
+
+    import app.orders.bill.master_data_client as md_client_module
+
+    real_create = md_client_module.create_archives  # 真实函数（此刻未被 mock）
+    counter = itertools.count(9000)
+
+    def _fake(forms_by_kind: dict):
+        return {
+            kind: {
+                key: {
+                    "success": True,
+                    "archive_id": str(next(counter)),
+                    "error": None,
+                }
+                for key in forms
+            }
+            for kind, forms in forms_by_kind.items()
+        }
+
+    monkeypatch.setattr(md_client_module, "create_archives", _fake)
+    yield real_create
+
+
 @pytest.fixture()
 def bill_builder(tmp_path):
     """把内存构造的账单写入临时文件，返回路径（供 parse_bill 等按路径解析）。"""

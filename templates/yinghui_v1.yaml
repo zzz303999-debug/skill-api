@@ -37,6 +37,7 @@ columns:
   fleet: 车队
   plate_no: 车牌号
   driver_name: 司机
+  driver_phone: 司机手机
   io_type: 进出口
   biz_type: 业务类型
   load_point: 装卸地点
@@ -93,6 +94,7 @@ fees:
     应付.理货费: tally
     应付.打单费: amend
     应付.其他费用: other
+    应付.扣除费: { code: deduction, negative: true }  # T27a 负向扣减项（应付合计=Σ正−扣除费）
     成本.上下车费: lift
     成本.出车费: trip
     成本.油费: fuel

@@ -140,6 +140,12 @@ def _emit_fees(form: dict[str, str], order: CanonicalOrder) -> None:
         form["cost[0][supplier_hj_zj]"] = f"{cost:.2f}"
 
 
+def _archive_id(order: CanonicalOrder, kind: str) -> str:
+    """阶段三已建档档案的 TMS 主键（T20 回填）；未建档 → ""（维持文本提交）。"""
+    refs = getattr(order, "_archive_refs", {}) or {}
+    return str((refs.get(kind) or {}).get("archive_id") or "")
+
+
 def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     """CanonicalOrder → (form-data 字段字典, 警告清单)。
 
@@ -186,15 +192,21 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
         "b_note": note or "",
         # 客户：c_title=客户名称（2026-08-13 实测响应回显确认，TMS「客户」字段落点）；
         # c_name=客户联系人（实证渲染为 UI「联系人」，勿填客户名称）；
-        # c_id/c_phone/c_note 恒发：PHP 控制器硬读（c_title 非空即读 c_id，缺键 204 拒单）
+        # c_id：已建档客户回填档案 id（T20，EX26080031 实证键）；未建档恒发空串
+        # （PHP 控制器硬读：c_title 非空即读 c_id，缺键 204 拒单）
         "c_title": order.customer_name or "",
         "c_name": order.customer_contact or "",
         "c_phone": order.contact_phone or "",
         "c_sn": order.customer_no or "",
         "c_note": "",
-        "c_id": "",
-        # 门点
+        "c_id": _archive_id(order, "client"),
+        # 门点：已建档工厂回填 factory_id + b_factory_address_msg（T20；请求侧键位
+        # 未实证，先按同键发，验证单确认——多发键安全，缺键才 204）；未建档维持文本
         "factory_name": order.door_point or "",
+        "factory_id": _archive_id(order, "factory"),
+        "b_factory_address_msg": (
+            str(order.load_address).strip() if order.load_address else ""
+        ),
         # 箱信息（顶层单值）
         "b_num": b_num or "",
         "b_lock": (first_container.seal_no if first_container else None) or "",

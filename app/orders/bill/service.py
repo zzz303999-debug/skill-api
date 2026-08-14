@@ -38,7 +38,7 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _build_fee_reports(output, orders: list) -> dict:
+def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
     - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
@@ -55,6 +55,15 @@ def _build_fee_reports(output, orders: list) -> dict:
     mismatch: list[dict] = []
     to_other_counts: Counter[str] = Counter()
     channel_stats: dict[str, dict] = {}
+    # 费目自举（T25）：费用归一后、payload 构造前——本批缺失费目码自动建档 →
+    # registry 登记 → 下方 apply_price_map 经 registry 命中回填（当批正常录入）；
+    # **preview 零副作用**（与阶段三一致）：create_order=false 只输出 planned
+    # 计划清单不发请求；真实导入才建档。disabled/无缺失 → None（不产生报告段）
+    bootstrap_report = None
+    if orders:
+        from .fee_bootstrap import run_fee_bootstrap
+
+        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order)
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -156,6 +165,10 @@ def _build_fee_reports(output, orders: list) -> dict:
             "to_other_warning": to_other_warning,
         },
     }
+    # 费目自举报告（T25）：preview=planned 计划清单（零副作用）/ create=created 建档
+    # 成功清单（含新 price_id）+ failed 自举失败清单
+    if bootstrap_report is not None:
+        report["reports"]["fee_bootstrap"] = bootstrap_report
     return report
 
 
@@ -213,7 +226,18 @@ def build_result(
     fee_reconciliation = None
     if canonical_orders and output.canonical_rows is not None:
         # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
-        fee_reconciliation = _build_fee_reports(output, canonical_orders)
+        fee_reconciliation = _build_fee_reports(
+            output, canonical_orders, create_order=create_order
+        )
+
+    # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
+    # 当批回填 order._archive_refs（payload 构造在 create 分支内，先于下单执行）；
+    # preview 只读探测不计数；disabled → None（不产生报告段）
+    master_data_report = None
+    if canonical_orders:
+        from .master_data import run_master_data
+
+        master_data_report = run_master_data(canonical_orders, create_order=create_order)
 
     summary = None
     upstream = None
@@ -275,6 +299,9 @@ def build_result(
     # 标准字段路径：费用对账报告（与既有 reconciliation 同键）
     if fee_reconciliation is not None:
         meta["reconciliation"] = fee_reconciliation
+    # 阶段三：基础资料阈值报告（T21；只报告不拦截，建档异常不使订单丢失）
+    if master_data_report is not None:
+        meta["master_data"] = master_data_report
     # L3 候选模板配置（人工确认固化的载体）
     if output.new_template is not None:
         meta["l3_template"] = output.new_template

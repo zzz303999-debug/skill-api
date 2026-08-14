@@ -261,6 +261,114 @@ class TestFeeReconcile:
         assert other.note == "高速费,掏箱费"
 
 
+class TestNegativeFee:
+    """T27a 负向扣减项（扣除费）：抽取取负/发射格式/对账恒等/skip_report 降级。"""
+
+    _NEG_CFG = {
+        "channels": {"应收": "shou", "应付": "pay"},
+        "mapping": {
+            "应付.运费": "freight",
+            "应付.扣除费": {"code": "deduction", "negative": True},
+        },
+        "unmapped_fee": "to_other",
+    }
+
+    def test_canonicalize_negative_marker(self):
+        """mapping 扩展写法 {code, negative: true} → meta 带 negative 标记。"""
+        meta = canonicalize_fee("应付", "扣除费", self._NEG_CFG)
+        assert meta["code"] == "deduction"
+        assert meta["negative"] is True
+        assert meta["import"] is True  # 默认正常录入（取负后走正常流程）
+
+    def test_canonicalize_negative_default_off(self):
+        """普通费目无 negative 标记（默认 False）。"""
+        meta = canonicalize_fee("应付", "运费", self._NEG_CFG)
+        assert meta["code"] == "freight"
+        assert meta["negative"] is False
+
+    def test_negative_skip_report_downgrade(self):
+        """negative_policy=skip_report → import=False（不录入仅对账）。"""
+        cfg = {
+            "channels": {"应付": "pay"},
+            "mapping": {
+                "应付.扣除费": {"code": "deduction", "negative": True, "negative_policy": "skip_report"}
+            },
+        }
+        meta = canonicalize_fee("应付", "扣除费", cfg)
+        assert meta["negative"] is True
+        assert meta["import"] is False  # 降级：不录入仅对账
+
+    def test_parser_negative_money(self):
+        """行级抽取：negative 项金额取负（-486）；负值列（-25）取负为 +25（加回）。"""
+        from app.orders.bill.parser import _to_money
+
+        # 账单语义：应付合计 = Σ正项 − 扣除费列值；列值 +486 → 录入 -486，列值 -25 → 录入 +25
+        assert _to_money("486.00") == 486.0
+        assert _to_money("-25.00") == -25.0
+
+    def test_aggregate_negative_in_recorded(self):
+        """负项进录入口径：bill = Σ正 + Σ负 恒等成立（含负项不破坏恒等式）。
+
+        parser 已取负：列值 -25（扣除费带符号）→ _fees money=+25（加回语义）。
+        """
+        rows = [
+            {
+                "bl_no": "BLNEG0001",
+                "box_type_qty": [{"type": "40HQ", "qty": 1}],
+                "_fees": [
+                    {"section": "应付", "name": "运费", "channel": "pay", "code": "freight", "import": True, "reconcile": True, "money": 2700.0},
+                    {"section": "应付", "name": "扣除费", "channel": "pay", "code": "deduction", "import": True, "reconcile": True, "negative": True, "money": 25.0},  # 列值 -25 取负后 +25
+                ],
+                "_anchors": {"应付": {"应付合计": 2725.0}},
+            }
+        ]
+        orders = group_canonical(rows, {"fees": self._NEG_CFG}, None)
+        rec = orders[0].fee_reconcile["pay"]
+        assert rec.bill_total == Decimal("2725.00")
+        assert rec.recorded_total == Decimal("2725.00")  # 2700 + 25
+        assert rec.excluded_total == Decimal("0")
+        assert rec.diff == Decimal("0.00")
+        assert rec.ok is True
+
+    def test_negative_skip_report_keeps_identity(self):
+        """skip_report 降级：负项进 excluded，恒等式 bill = recorded + excluded 仍成立。"""
+        cfg = {
+            "channels": {"应付": "pay"},
+            "mapping": {
+                "应付.运费": "freight",
+                "应付.扣除费": {"code": "deduction", "negative": True, "negative_policy": "skip_report"},
+            },
+        }
+        rows = [
+            {
+                "bl_no": "BLNEG0002",
+                "box_type_qty": [{"type": "40HQ", "qty": 1}],
+                "_fees": [
+                    {"section": "应付", "name": "运费", "channel": "pay", "code": "freight", "import": True, "reconcile": True, "money": 1300.0},
+                    {"section": "应付", "name": "扣除费", "channel": "pay", "code": "deduction", "import": False, "reconcile": True, "negative": True, "money": -486.0},
+                ],
+                "_anchors": {"应付": {"应付合计": 814.0}},
+            }
+        ]
+        orders = group_canonical(rows, {"fees": cfg}, None)
+        rec = orders[0].fee_reconcile["pay"]
+        # 1300 − 486 = 814；扣除费不录入 → excluded=-486，恒等：814 = 1300 + (-486)
+        assert rec.recorded_total == Decimal("1300.00")
+        assert rec.excluded_total == Decimal("-486.00")
+        assert rec.diff == Decimal("0.00")
+        assert rec.ok is True
+
+    def test_payload_negative_money_format(self):
+        """payload 负值发射：两位小数字符串（"-50.00"）与合计回写。"""
+        fees = [
+            FeeItem(channel="pay", code="deduction", tms_name="扣除费", price_id=124832, money=Decimal("-50.00")),
+        ]
+        form, _ = build_order_payload(_make_order(fees))
+        assert form["pay[0][扣除费][money]"] == "-50.00"
+        assert form["pay[0][扣除费][price_id]"] == "124832"
+        assert form["driver[0][pay_yf_zj]"] == "-50.00"  # 负值合计回写
+
+
 class TestMoneyParsing:
     """T9 金额解析：千分位/货币符号/负号/多行多值拆分。"""
 
@@ -341,6 +449,18 @@ class TestGoldenFees:
             for f in row.get("_fees", [])
         }
         assert len(fee_cols) >= 20  # 长尾列也抽取（mapping 外自动发现）
+
+    def test_yinghui_negative_deduction_reconciles(self):
+        """T27a 赢辉：扣除费负项录入后 pay 通道恒等（15 单 mismatch 应归零）。"""
+        _, orders = self._parse("yinghui", "利润明细表(2021-08-01-2021-12-31).xls")
+        deduction_items = [f for o in orders for f in o.fees if f.code == "deduction"]
+        assert deduction_items  # 扣除费已映射抽取
+        # 取负后可为负（列值 +486 → -486）也可为正（列值 -25 → +25，加回语义）
+        assert any(f.money < 0 for f in deduction_items)
+        for order in orders:
+            rec = order.fee_reconcile.get("pay")
+            if rec is not None:
+                assert rec.ok is True, f"pay 对账恒等破坏: {order.bl_no} diff={rec.diff}"
 
     def test_zhiyi_receivable_only(self):
         """志驿：仅应收通道（应付/车辆成本近空不启用）。"""

@@ -69,28 +69,41 @@ def reload_fee_alias_dictionary() -> None:
 
 def _parse_mapping_entry(entry) -> dict:
     """模板 mapping 条目归一：`freight` → {code, import, reconcile}；
-    `{code, import, reconcile}` 扩展写法原样保留（默认 import/reconcile=True）。"""
+    `{code, import, reconcile, negative, negative_policy}` 扩展写法原样保留
+    （默认 import/reconcile=True）。
+
+    negative（T27a）：true → 金额取负录入（负向扣减项，如「扣除费」）；
+    negative_policy=skip_report → 负项不录入仅对账（TMS 拒收负值时切回）。
+    """
     if isinstance(entry, dict):
+        policy = str(entry.get("negative_policy") or "").strip()
+        negative = bool(entry.get("negative", False))
         return {
             "code": str(entry.get("code") or "").strip(),
             "import": bool(entry.get("import", True)),
             "reconcile": bool(entry.get("reconcile", True)),
+            "negative": negative,
+            "negative_policy": policy if policy in ("skip_report",) else "",
         }
     return {
         "code": str(entry or "").strip(),
         "import": True,
         "reconcile": True,
+        "negative": False,
+        "negative_policy": "",
     }
 
 
 def canonicalize_fee(
     section: str, name: str, fees_cfg: dict | None
 ) -> dict:
-    """三级解析：费目名（区块.费目）→ {code, import, reconcile}。
+    """三级解析：费目名（区块.费目）→ {code, import, reconcile, negative, negative_policy}。
 
     模板 fees.mapping（区块.费目 或 费目 键）→ 全局别名字典 → unmapped_fee 策略：
     - to_other：{code: other, import: True, note=原名}
     - skip_report：{code: "", import: False}（不生成记录）
+    - negative（T27a）：负向扣减项标记（扣除费）；negative_policy=skip_report
+      时负项不录入仅对账（import=False，金额仍参与对账恒等）。
     """
     key = f"{section}.{name}" if section else name
     mapping = (fees_cfg or {}).get("mapping") or {}
@@ -98,14 +111,17 @@ def canonicalize_fee(
     if entry:
         meta = _parse_mapping_entry(entry)
         if meta["code"]:
+            if meta["negative"] and meta["negative_policy"] == UNMAPPED_SKIP_REPORT:
+                # 降级兜底：负项不录入仅对账（金额进 excluded，恒等仍成立）
+                meta["import"] = False
             return meta
     code = fee_alias_dictionary().get(name)
     if code:
-        return {"code": code, "import": True, "reconcile": True}
+        return {"code": code, "import": True, "reconcile": True, "negative": False, "negative_policy": ""}
     strategy = (fees_cfg or {}).get("unmapped_fee", UNMAPPED_TO_OTHER)
     if strategy == UNMAPPED_SKIP_REPORT:
-        return {"code": "", "import": False, "reconcile": True}
-    return {"code": "other", "import": True, "reconcile": True}
+        return {"code": "", "import": False, "reconcile": True, "negative": False, "negative_policy": ""}
+    return {"code": "other", "import": True, "reconcile": True, "negative": False, "negative_policy": ""}
 
 
 def canonicalize_fee_name(name: str) -> tuple[str, str | None]:

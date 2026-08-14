@@ -22,6 +22,23 @@ def _ok_chain_post(url, **_kwargs):
     return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]})
 
 
+# 建档族 mock 响应（端点已配后 create 模式会触发建档调用；返回对应主键、
+# 不消耗下单响应序列/计数——与 test_master_data.TestGoldenIntegration 同口径）。
+# 建档族路径特征 /Car/Car*（CarClient/CarFactory/CarTruck/CarDriverGroup/CarPrice），
+# 注意下单 AddWork 也在 s3.jxt56.com/Car/WorkOut/AddWork，不能按 /Car/ 或 host 判断
+def _archive_post(url: str):
+    pk = (
+        "client_id"
+        if "CarClient" in url
+        else "factory_id"
+        if "CarFactory" in url
+        else "truck_id"
+        if "CarTruck" in url
+        else "id"  # 司机主键是 id（逆推规范 §14）
+    )
+    return FakeResponse({"code": "200", "msg": "添加成功", "data": {pk: "aid-mock"}})
+
+
 def upload(
     client, filename: str, content: bytes, data: dict | None = None, headers: dict | None = None
 ):
@@ -78,11 +95,16 @@ class TestPreview:
 )
 class TestCreateMode:
     def test_create_order_true_creates_all(self, monkeypatch):
-        """create_order=true → 200：逐单 create_result + summary（GetWebKey/login 各 1 次 + 每单一 AddWork）。"""
-        calls = {"n": 0}
+        """create_order=true → 200：逐单 create_result + summary（每单一 AddWork；
+        建档调用在端点已配后激活，不计入下单计数）。"""
+        calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            calls["n"] += 1
+            if "GetWebKey" in url or "login" in url:
+                return _ok_chain_post(url)
+            if "/Car/Car" in url:  # 建档族（/Car/Car* 路径，区别于下单 /Car/WorkOut/AddWork）
+                return _archive_post(url)
+            calls["addwork"] += 1
             return _ok_chain_post(url)
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
@@ -111,17 +133,18 @@ class TestCreateMode:
         }
         assert all(o["create_result"]["success"] for o in data["orders"])
         assert all(o["create_result"]["sn"] == "EX26080042" for o in data["orders"])
-        # 凭证获取一次 + 逐单串行：GetWebKey/login + 每单一 AddWork
-        assert calls["n"] == 2 + REAL_ORDER_COUNT
+        # 每单一次下单（建档调用不计入：端点已配后达阈值候选会建档）
+        assert calls["addwork"] == REAL_ORDER_COUNT
 
     def test_credential_failure_502_not_per_order(self, monkeypatch):
-        """GetWebKey 失败 → 全局 502 order_upstream_error，只调 1 次（不逐单）。"""
-        calls = {"n": 0}
+        """GetWebKey 失败 → 全局 502 order_upstream_error；下单 0 次（不逐单）。
+        建档路径（端点已配后激活）凭证失败仅结构化进报告，不抛断。"""
+        calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            calls["n"] += 1
             if "GetWebKey" in url:
                 return FakeResponse({"code": 500, "msg": "凭据无效"})
+            calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功"})
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
@@ -138,7 +161,7 @@ class TestCreateMode:
         assert error["code"] == "order_upstream_error"
         assert error["description"] == "订单系统拒绝了请求或不可达，请稍后重试"
         assert error["details"]["upstream_code"] == 500
-        assert calls["n"] == 1  # 凭证失败 → 不逐单执行
+        assert calls["addwork"] == 0  # 凭证失败 → 不逐单执行
 
     def test_partial_failure_summary(self, monkeypatch):
         """部分单失败 → 200 + summary.failed 计数，单失败不影响其他。"""
@@ -149,6 +172,8 @@ class TestCreateMode:
                 return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
             if "login" in url:
                 return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
+                return _archive_post(url)
             calls["addwork"] += 1
             if calls["addwork"] == 1:
                 return FakeResponse({"code": "204", "msg": "添加失败"})
