@@ -20,7 +20,9 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
 
 # 应收费用列名：按费用中文名建立 shou 条目（如 shou[0][运费][money]），
-# 同费用名多行金额累加；应付/双拖/成本费用线本期不发送
+# 同费用名多行金额累加。本常量仅服务旧 BillRow.fees 流程（jinxin_v1 语义）；
+# 标准通道（模板驱动）的费用列发现见 parser.py T9：fees.channels 已支持应付/
+# 成本/车辆成本区块，四通道发射见 payload.py _emit_fees（T13）
 RECEIVABLE_FEE_COLUMNS: tuple[str, ...] = (
     "运费",
     "待时费",

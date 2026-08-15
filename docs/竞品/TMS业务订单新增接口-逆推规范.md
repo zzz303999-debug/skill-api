@@ -86,7 +86,13 @@
 | `fore_time` / `driver_note` | 预提时间 / 司机备注 |
 | `get_ys_zj` / `pay_yf_zj` | 应收合计 / 应付合计（抓包均 0.00，费用留空时带默认） |
 
-### 2.7 费用四通道（本轮不填，结构留给后续三类）
+### 2.7 费用四通道（shou/pay/cost 已实证闭环；duo_get 设计上未启用）
+
+> **实证状态（2026-08-15）**：应收 shou[] 已实证（EX26081252/EX26080031）；
+> 应付 pay[] 已实证（EX26083664：运费 40.00，回显 pay 数组 + d_yf=40.00）；
+> 成本 cost[] 已实证（EX26083665：油费 25.50，回显 supplier 数组 + cb_ids + type=3）；
+> 多级应收 duo_get[] 设计上未启用（模板中公司成本通道已注释停用）。
+> 实测脚本：.tmp/verify_pay_live.py [pay|cost]（dry-run 默认零网络，JXT_LIVE_TEST=1 建单）
 
 | 通道 | 语义 | 费目结构（以抓包为例） |
 |---|---|---|
@@ -96,7 +102,8 @@
 | `cost[0][费目]` | **成本（供应商）** | 上同 + driver_name + `supplier_hj_zj` 合计、`cb_ids` |
 
 > **四类归集在接口层得到印证**：业务信息（顶层+data+box+driver）/ 应收 shou / 应付 pay / 成本 cost(+duo_get)。
-> 关键约束：**费用按「费目名 → price_id」引用 TMS 价格表**（抓包：运费=820、预提费=121744、油费=1134、打劫费=1135），后续三类接入前需先同步价格表做费目映射。
+> 关键约束：**费用按「费目名 → price_id」引用 TMS 价格表**（抓包：运费=820、预提费=121744、油费=1134、打劫费=1135）。
+> 发送侧统一发射见 payload.py _emit_fees（T13）：每通道每费目 `{channel}[0][{tms_name}]` 六属性键（money/price_id/price_type/is_profit/dai_dian）+ 通道级 note 恒发（缺键 204 拒单，2026-08-13 live 实证）；合计由我方计算回写（driver[0][get_ys_zj]=Σshou、driver[0][pay_yf_zj]=Σpay、cost[0][supplier_hj_zj]=Σcost）；cost 费目条目额外硬读 driver_name（缺键 204 拒单，2026-08-13 live 实证）。缺失费目码由 fee_bootstrap 自举建档（T25）后复用 price_id（单表跨通道通用）。
 
 ### 2.8 操作元字段
 

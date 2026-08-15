@@ -3,9 +3,9 @@
 对齐《竞品账单导入接口文档》v1.1 §2.2/§3.7/§5.3 与 2026-08-12 业务决策：
 - 凭证获取一次（GetWebKey → login 取 sk），逐单串行下单，不做缓存
 - 下单通道由 JXT_CREATE_CHANNEL 决定：
-  json=嵌套 JSON + sk 头（默认，POST publishCreateOrder 与 /orders 同一下游地址，
-  body 为 order_data 原样嵌套含 shou 费用，不带 roomId/userId）；
-  form=AddWork 表单（旧链路，a+b+c+顶层展平，降级备用不删除）
+  form=AddWork 表单（默认，2026-08-13 起：AddWork 端点 + sk 头 + create_order=true
+  实测可直连下单）；json=嵌套 JSON + sk 头（已弃用：publishCreateOrder 实测强制
+  要求有效 userId+roomId，204 拒单，TODO 删除，见 add_order_json）
 - 任何情况不自动重试（防重复下单）；单失败不影响后续订单
 - 凭证获取失败 → 抛 UpstreamError（502 order_upstream_error），不逐单执行
 - 超时/网络异常 → 该单 error（order_upstream_error），不中断整批（凭证阶段除外）
@@ -36,8 +36,9 @@ class UpstreamError(SkillAPIError):
 
 
 # AddWork 固定值字段（§2.2/§5.3 + 2026-08-11 抓包）：appendCost=true、o_id 新建为空、
-# 图片/多皮重数组为空、双拖/成本合计恒发 0.00（只发合计键，不构造费用条目，
-# 避免幻影费用行；若下轮报 Undefined index: pay 再补 pay 合计）
+# 图片/多皮重数组为空。duo_get/cost 合计恒发 0.00 仅服务本 json 降级通道的旧链路
+# （BillOrder.order_data 只归集应收，无 pay/duo_get/cost 条目；标准通道四通道
+# 发射见 payload.py _emit_fees/T13，此处不重复构造）
 _FIXED_FIELDS: dict[str, str] = {
     "appendCost": "true",
     "o_id": "",
@@ -118,8 +119,9 @@ _SHOU_KEYS: tuple[str, ...] = (
 )
 
 # 不发送字段（§5.3/§2.2 明确）：user_name/car_name/section_name（走 web key 登录身份）、
-# box_type_text/box_type/顶层 b_date/b_date_pick、pay[]/duo_get[]/cost[]（本期不发送
-# 应付/双拖/成本线）、audit_status/b_lock 等状态类键
+# box_type_text/box_type/顶层 b_date/b_date_pick、pay[]/duo_get[]/cost[] 费用条目
+# （本 json 降级通道的旧链路 order_data 只含 shou 费用；标准通道四通道发射见
+# payload.py _emit_fees/T13）、audit_status/b_lock 等状态类键
 # —— 实现上通过固定键集天然排除，无需额外过滤
 
 _ERROR_DESCRIPTION = "订单系统拒绝了请求或不可达，请稍后重试"
@@ -145,7 +147,8 @@ def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
     - 固定值：type=1 / appendCost=true / o_id="" / img_data=[] / img_data_id=[] /
       multiple_tare=[] / duo_get[0][duo_get_hj_zj]=0.00 / cost[0][supplier_hj_zj]=0.00
     - 不发送 user_name/car_name/section_name/box_type_text/box_type/顶层 b_date/
-      b_date_pick、pay[]/duo_get[]/cost[] 费用条目、audit_status/b_lock 等
+      b_date_pick、pay[]/duo_get[]/cost[] 费用条目（旧链路 order_data 仅含 shou；
+      标准通道四通道发射见 payload.py _emit_fees/T13）、audit_status/b_lock 等
     """
     flat: dict[str, str] = dict(_FIXED_FIELDS)
 
@@ -413,6 +416,12 @@ def add_order_json(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     body = order_data 嵌套 JSON 原样（含 shou 费用），不带 roomId/userId；鉴权靠
     header sk（web-key 登录身份，替代 /orders 的 userId/roomId 调用上下文）。
     响应口径与 add_work 一致（_parse_create_response）：code "200" → 取 data[0].sn。
+
+    TODO: 本通道已弃用（2026-08-13 实测 publishCreateOrder 无论 JSON/form-data/
+    multipart 均强制要求有效 userId+roomId，204 "no: userId no: roomId"；默认已切
+    form=AddWork 直连）。roomId 来源明确前无恢复可能，可删除本函数与
+    flatten_order/_FIXED_FIELDS/_SHOU_KEYS 等依赖链，并移除 config.jxt_create_channel
+    的 json 分支。
     """
     try:
         response = httpx.post(
@@ -437,9 +446,9 @@ def create_orders(orders: list[BillOrder]) -> None:
     """逐单串行下单并原地填充 create_result。
 
     先 GetWebKey → login 取 sk 一次；凭证失败抛 UpstreamError（不逐单执行）；
-    通道由 JXT_CREATE_CHANNEL 决定：json=嵌套 JSON + sk 头（默认）；form=AddWork
-    表单（旧链路，降级备用）。单失败不影响后续；任何情况不自动重试；
-    missing_fields 非空照常提交。
+    通道由 JXT_CREATE_CHANNEL 决定：json=嵌套 JSON + sk 头（已弃用，204 拒单，
+    见 add_order_json TODO）；form=AddWork 表单（默认，2026-08-13 起）。
+    单失败不影响后续；任何情况不自动重试；missing_fields 非空照常提交。
     """
     if not orders:
         return
