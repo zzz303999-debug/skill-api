@@ -121,6 +121,17 @@ class Settings(BaseSettings):
     # 响应体记录的最大字符数，超出截断并标记 response_truncated
     # （仅截断日志内容，客户端仍收到完整响应）
     access_log_response_max_chars: int = Field(default=64 * 1024, ge=0, le=1_000_000)
+    # 响应摘要化：路径子串匹配（逗号分隔）的 JSON 响应，日志只记录排查摘要
+    # （如 /orders/bill/import 丢弃 orders/canonical_orders 等大明细，保留
+    # 文件/区间/计数/建单统计/模板与建档计数），避免审计日志过大、logs 页面
+    # 难排查；置空则恢复完整记录。仅影响日志内容，客户端响应始终完整。
+    access_log_summarize_paths: str = "/orders/bill/import"
+    # 摘要化时完整响应体单独保留的最大字符数（response_full，导出/取证用，
+    # 超限截断并标记 response_full_truncated）；仅摘要命中路径写入，
+    # 不影响其他接口的日志体积。
+    access_log_response_full_max_chars: int = Field(
+        default=1024 * 1024, ge=0, le=5_000_000
+    )
     # 是否信任反向代理头（X-Forwarded-For / X-Real-IP）；
     # 云服务前面有 nginx/负载均衡时开启，才能拿到真实客户端 IP
     access_log_trust_proxy: bool = True

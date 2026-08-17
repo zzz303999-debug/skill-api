@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import math
 import time
 import uuid
@@ -265,6 +266,78 @@ async def _capture_json_response(response: Response) -> tuple[Response, str | No
     return rebuilt, text, False
 
 
+# 摘要中保留的最大未映射表头数与建档明细条数（其余只留计数，避免日志膨胀）
+_MAX_UNMATCHED_HEADERS_IN_SUMMARY = 20
+_MAX_ARCHIVE_ITEMS_IN_SUMMARY = 10
+
+
+def _summarize_import_response(text: str) -> str | None:
+    """把竞品录入（/orders/bill/import）完整响应压缩为排查摘要 JSON。
+
+    保留：文件/结算区间/行数/单数/create_order、建单统计 summary、meta 中
+    模板命中/引擎/未映射表头（截断）与基础资料计数；丢弃 orders /
+    canonical_orders 全量明细与 upstream 回显——排查定位用摘要足矣，
+    完整明细可从客户端响应重新获取。非 JSON 或非对象响应返回 None，
+    调用方保持原文（摘要失败不回退原始大 JSON 的兜底）。
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: dict[str, Any] = {
+        k: data.get(k)
+        for k in ("file", "bill_period", "total_rows", "order_count", "create_order")
+    }
+    if data.get("summary") is not None:
+        out["summary"] = data["summary"]
+    meta = data.get("meta") or {}
+    out["meta"] = {
+        "template": meta.get("template"),
+        "parser": meta.get("parser"),
+        "raw_rows": meta.get("raw_rows"),
+        "source_bytes": meta.get("source_bytes"),
+    }
+    unmatched = meta.get("unmatched_headers") or []
+    if unmatched:
+        out["meta"]["unmatched_headers"] = unmatched[:_MAX_UNMATCHED_HEADERS_IN_SUMMARY]
+        if len(unmatched) > _MAX_UNMATCHED_HEADERS_IN_SUMMARY:
+            out["meta"]["unmatched_truncated"] = (
+                len(unmatched) - _MAX_UNMATCHED_HEADERS_IN_SUMMARY
+            )
+    md = meta.get("master_data")
+    if isinstance(md, dict):
+        out["meta"]["master_data"] = {
+            k: md.get(k) for k in ("mode", "candidates", "degraded")
+        }
+        # 建档明细保留少量（含 archive_id），其余只留计数
+        for key in ("archived", "exists_external", "failed"):
+            items = md.get(key) or []
+            if items:
+                out["meta"]["master_data"][key] = items[:_MAX_ARCHIVE_ITEMS_IN_SUMMARY]
+                if len(items) > _MAX_ARCHIVE_ITEMS_IN_SUMMARY:
+                    out["meta"]["master_data"][f"{key}_truncated"] = (
+                        len(items) - _MAX_ARCHIVE_ITEMS_IN_SUMMARY
+                    )
+    return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+
+
+def _summarize_response_for_log(path: str, text: str) -> str | None:
+    """按 access_log_summarize_paths 配置对匹配路径的 JSON 响应做摘要。
+
+    非匹配路径或摘要失败返回 None，调用方保留原始响应文本（响应截断标记
+    语义不变）。仅作用于成功响应（status < 400）；错误响应本身较小且是
+    排查重点，不摘要。
+    """
+    needles = [
+        p.strip() for p in settings.access_log_summarize_paths.split(",") if p.strip()
+    ]
+    if not needles or not any(n in path for n in needles):
+        return None
+    return _summarize_import_response(text)
+
+
 @app.middleware("http")
 async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     """请求访问日志（审计）：记录时间、客户端 IP、UA、方法、路径、上传文件、
@@ -337,6 +410,23 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     except Exception:
         raise
     finally:
+        # 竞品录入等大响应：按配置只落排查摘要（客户端响应不受影响，截断
+        # 标记同步重置——摘要本身远小于截断上限）；完整响应体单独保留
+        # response_full 供导出/取证，受独立上限截断（response_full_truncated）
+        response_summarized = False
+        response_full = None
+        response_full_truncated = False
+        if response_text is not None and status_code < 400:
+            summarized = _summarize_response_for_log(request.url.path, response_text)
+            if summarized is not None:
+                response_full = response_text
+                max_full = settings.access_log_response_full_max_chars
+                if max_full > 0 and len(response_full) > max_full:
+                    response_full_truncated = True
+                    response_full = response_full[:max_full]
+                response_text = summarized
+                response_truncated = False
+                response_summarized = True
         error_detail = getattr(request.state, "error_detail", None)
         if error_detail is None and status_code >= 400:
             # 非业务异常（如 FastAPI 校验 422）也记录错误信息，保证审计完整
@@ -359,6 +449,9 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
                 "body_truncated": body_truncated,
                 "response": response_text,
                 "response_truncated": response_truncated,
+                "response_summarized": response_summarized,
+                "response_full": response_full,
+                "response_full_truncated": response_full_truncated,
                 "status": status_code,
                 "error_code": getattr(request.state, "error_code", None),
                 "error": error_detail,
@@ -479,8 +572,13 @@ def list_request_logs(
     status: int | None = Query(default=None, ge=100, le=599),
     request_id: str | None = Query(default=None),
     ip: str | None = Query(default=None),
+    include_full: bool = Query(default=False),
 ) -> dict:
-    """请求访问日志列表（时间倒序），支持分页与过滤。"""
+    """请求访问日志列表（时间倒序），支持分页与过滤。
+
+    include_full=true 时返回摘要化条目的完整响应体 response_full
+    （大字段，仅导出/取证场景使用；列表默认剥离以保持页面轻量）。
+    """
     return access_log.query(
         limit=limit,
         offset=offset,
@@ -489,6 +587,7 @@ def list_request_logs(
         status=status,
         request_id=request_id,
         ip=ip,
+        include_full=include_full,
     )
 
 
