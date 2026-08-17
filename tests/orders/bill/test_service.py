@@ -115,6 +115,8 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT,
             "failed": 0,
+            "skipped": 0,
+            "created": REAL_ORDER_COUNT,
             "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
             "failed_details": [],
         }
@@ -204,6 +206,8 @@ class TestCreateMode:
             "total": 1,
             "success": 1,
             "failed": 0,
+            "skipped": 0,
+            "created": 1,
             "success_sns": ["EX1"],
             "failed_details": [],
         }
@@ -222,6 +226,138 @@ class TestCreateMode:
         order = result.canonical_orders[0]
         assert order.customer_name == "客户甲"
         assert order.customer_contact is None
+
+    # ---- 重复上传去重（方案一：成功单注册表）----
+
+    @staticmethod
+    def _junyu_file() -> bytes:
+        """构造 junyu 家族账单（canonical 语义，2 单不同提单号）。"""
+        headers = {
+            "A": "序号",
+            "B": "客户名称",
+            "C": "门点",
+            "D": "箱型箱量",
+            "E": "提单号",
+            "F": "箱号",
+            "G": "做箱时间",
+            "H": "港区",
+            "I": "司机",
+            "J": "应收备注",
+        }
+        return build_bill_bytes(
+            headers,
+            [
+                {"A": 1, "B": "客户甲", "E": "OOLU10000001", "D": "40HQ", "F": "TCLU1"},
+                {"A": 2, "B": "客户甲", "E": "OOLU10000002", "D": "40HQ", "F": "TCLU2"},
+            ],
+        )
+
+    @staticmethod
+    def _fake_ok_chain(monkeypatch, calls: dict):
+        """GetWebKey/login 固定成功；下单按调用序计数并返回成功。"""
+
+        def fake_post(url, **_kwargs):
+            if "GetWebKey" in url:
+                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
+            if "login" in url:
+                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            calls["addwork"] += 1
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+
+    def test_dedup_second_upload_skipped(self, monkeypatch):
+        """同文件重导（create_order=True）：第二次全部 skipped（下游 0 次新增调用）。"""
+        calls = {"addwork": 0}
+        self._fake_ok_chain(monkeypatch, calls)
+        file_bytes = self._junyu_file()
+        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        assert first.summary == {
+            "total": 2,
+            "success": 2,
+            "failed": 0,
+            "skipped": 0,
+            "created": 2,
+            "success_sns": ["EX1", "EX1"],
+            "failed_details": [],
+        }
+        assert calls["addwork"] == 2
+        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        assert second.summary == {
+            "total": 2,
+            "success": 2,
+            "failed": 0,
+            "skipped": 2,
+            "created": 0,
+            "success_sns": ["EX1", "EX1"],
+            "failed_details": [],
+        }
+        assert calls["addwork"] == 2  # 不重复下单
+        assert all(o.create_result.get("skipped") for o in second.canonical_orders)
+
+    def test_dedup_failed_not_registered_retry_creates(self, monkeypatch):
+        """失败单不登记：重导时失败单正常创建（修正后重导不被误拦）。"""
+        calls = {"addwork": 0}
+
+        def fake_post(url, **_kwargs):
+            if "GetWebKey" in url:
+                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
+            if "login" in url:
+                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            calls["addwork"] += 1
+            if calls["addwork"] == 1:
+                return FakeResponse({"code": "204", "msg": "添加失败"})
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX2"}]})
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        file_bytes = self._junyu_file()
+        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        assert first.summary["failed"] == 1
+        assert first.summary["success"] == 1
+        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        assert second.summary == {
+            "total": 2,
+            "success": 2,
+            "failed": 0,
+            "skipped": 1,
+            "created": 1,
+            "success_sns": ["EX2", "EX2"],
+            "failed_details": [],
+        }
+
+    def test_preview_never_touches_imported_registry(self, monkeypatch):
+        """preview 模式零注册表读写（去重零副作用，锁死回归）。"""
+        from app.orders.bill import imported_registry
+
+        registry = imported_registry.get_imported_registry()
+        calls = {"lookup": 0, "register": 0}
+
+        def _counting(fn, key):
+            def wrapped(*a, **k):
+                calls[key] += 1
+                return fn(*a, **k)
+
+            return wrapped
+
+        monkeypatch.setattr(registry, "lookup", _counting(registry.lookup, "lookup"))
+        monkeypatch.setattr(registry, "register", _counting(registry.register, "register"))
+        result = build_result(filename="junyu.xlsx", file_bytes=self._junyu_file())
+        assert result.create_order is False
+        assert calls == {"lookup": 0, "register": 0}
+
+    def test_dedup_skipped_not_counted_in_master_data(self, monkeypatch):
+        """重导跳过单不再计数（建档阈值统计不被重复上传推高）。"""
+        from app.orders.bill import master_data_store
+
+        calls = {"addwork": 0}
+        self._fake_ok_chain(monkeypatch, calls)
+        file_bytes = self._junyu_file()
+        store = master_data_store.get_store()
+        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        after_first = dict(store.snapshot())
+        assert after_first  # 第一次导入产生计数
+        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        assert store.snapshot() == after_first  # 第二次（全 skipped）计数不变
 
 
 class TestConstructed:

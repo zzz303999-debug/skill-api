@@ -123,6 +123,8 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT,
             "failed": 0,
+            "skipped": 0,
+            "created": REAL_ORDER_COUNT,
             "success_sns": ["EX26080042"] * REAL_ORDER_COUNT,
             "failed_details": [],
         }
@@ -194,6 +196,8 @@ class TestCreateMode:
             "total": REAL_ORDER_COUNT,
             "success": REAL_ORDER_COUNT - 1,
             "failed": 1,
+            "skipped": 0,
+            "created": REAL_ORDER_COUNT - 1,
             "success_sns": ["EX1"] * (REAL_ORDER_COUNT - 1),
             "failed_details": [
                 {

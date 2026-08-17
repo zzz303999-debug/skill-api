@@ -180,9 +180,10 @@ def build_result(
 ) -> BillParseResult:
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
-    create_order=True 时先逐单创建，再填 summary {total, success, failed}；
-    凭证失败抛 UpstreamError（502，不逐单执行）。meta 含 source_sha256 /
-    source_bytes / parsed_at / parser / raw_rows / template / unmatched_headers。
+    create_order=True 时先逐单创建，再填 summary {total, success, failed,
+    skipped, created}；凭证失败抛 UpstreamError（502，不逐单执行）。meta 含
+    source_sha256 / source_bytes / parsed_at / parser / raw_rows / template /
+    unmatched_headers。
     """
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
@@ -223,32 +224,55 @@ def build_result(
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
+    # 重复上传去重预判（成功单注册表，方案一）：create 模式先查已成功提单号，
+    # 命中即标记 skipped（只查不登；登记在提交成功后由 client 完成）。计数/自举/
+    # 费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
+    if create_order:
+        from .imported_registry import get_imported_registry, normalize
+
+        _imported = get_imported_registry()
+        for order in (*canonical_orders, *orders):
+            bl = normalize(
+                getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
+            )
+            if bl and (rec := _imported.lookup(bl)):
+                order.create_result = {
+                    "success": True,
+                    "skipped": True,
+                    "sn": rec.get("sn"),
+                    "error": None,
+                }
+
+    # 未决单（去重后待处理）：preview 时未预判，即全量
+    pending = [o for o in canonical_orders if o.create_result is None]
+
     fee_reconciliation = None
-    if canonical_orders and output.canonical_rows is not None:
+    if pending and output.canonical_rows is not None:
         # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
         fee_reconciliation = _build_fee_reports(
-            output, canonical_orders, create_order=create_order
+            output, pending, create_order=create_order
         )
 
     # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
     # 当批回填 order._archive_refs（payload 构造在 create 分支内，先于下单执行）；
     # preview 只读探测不计数；disabled → None（不产生报告段）
     master_data_report = None
-    if canonical_orders:
+    if pending:
         from .master_data import run_master_data
 
-        master_data_report = run_master_data(canonical_orders, create_order=create_order)
+        master_data_report = run_master_data(pending, create_order=create_order)
 
     summary = None
     upstream = None
+    file_sha256 = _sha256(file_bytes)
     if create_order:
         if orders:
             # 既有语义：双通道下单（行为语义不变）
-            create_orders(orders)
+            create_orders(orders, source_sha256=file_sha256)
         elif canonical_orders:
             from .client import create_canonical_orders
 
-            create_canonical_orders(canonical_orders)
+            create_canonical_orders(canonical_orders, source_sha256=file_sha256)
         created = [
             o
             for o in (*canonical_orders, *orders)
@@ -258,6 +282,14 @@ def build_result(
             "total": len(canonical_orders) or len(orders),
             "success": sum(1 for o in created if o.create_result.get("success")),
             "failed": sum(1 for o in created if not o.create_result.get("success")),
+            # 重复上传去重（方案一）：本次跳过数（成功单注册表命中，不调下游）
+            "skipped": sum(1 for o in created if o.create_result.get("skipped")),
+            # 本次实际新建数（success 含 skipped 单，created = success − skipped）
+            "created": sum(
+                1
+                for o in created
+                if o.create_result.get("success") and not o.create_result.get("skipped")
+            ),
             # 下单成功回显（对齐 /orders 的 upstream 语义）：成功单 TMS 业务编号列表
             "success_sns": [
                 o.create_result.get("sn") for o in created if o.create_result.get("success")
@@ -285,7 +317,7 @@ def build_result(
         )
 
     meta: dict = {
-        "source_sha256": _sha256(file_bytes),
+        "source_sha256": file_sha256,
         "source_bytes": len(file_bytes),
         "parsed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "parser": output.engine,

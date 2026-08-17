@@ -10,6 +10,8 @@ create_orders 按 JXT_CREATE_CHANNEL 分发（json 默认 / form 降级）。
 from __future__ import annotations
 
 import json
+import threading
+import time
 from urllib.parse import urlencode
 
 import httpx
@@ -17,12 +19,13 @@ import pytest
 
 import app.orders.bill.client as client_module
 from app.errors import SkillAPIError
-from app.orders.bill import BillOrder
+from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
 from app.orders.bill.client import (
     UpstreamError,
     add_order_json,
     add_work,
     build_add_work_form,
+    create_canonical_orders,
     create_orders,
     flatten_order,
 )
@@ -698,7 +701,7 @@ class TestCreateOrders:
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080002"}]},
             ],
         )
-        orders = [make_order(), make_order()]
+        orders = [make_order(), make_order({**ORDER_DATA, "order_num1": "OOLU4044379501"})]
         create_orders(orders)
         assert calls["all"] == 4  # GetWebKey + login + 2×AddWork
         assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None, "upstream": {"sn": "EX26080001"}}
@@ -824,6 +827,205 @@ class TestCreateOrders:
         assert err.code == "order_upstream_error"
         assert err.description == "订单系统拒绝了请求或不可达，请稍后重试"
 
+    # ---- 重复上传去重（方案一：成功单注册表）----
+
+    def test_dedup_second_upload_skipped(self, urls, monkeypatch):
+        """成功单登记后重导：同提单号再次 create → skipped，下游 0 次新增调用。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [{"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080001"}]}],
+        )
+        first = [make_order()]
+        create_orders(first)
+        assert first[0].create_result["success"] is True
+        assert calls["addwork"] == 1
+        # 再次上传同一文件（同提单号）：跳过且 sn 回显首次创建
+        second = [make_order()]
+        create_orders(second)
+        assert calls["addwork"] == 1
+        assert second[0].create_result == {
+            "success": True,
+            "skipped": True,
+            "sn": "EX26080001",
+            "error": None,
+        }
+
+    def test_dedup_failed_not_registered_retry_submits(self, urls, monkeypatch):
+        """失败单不登记：修正后重导照常再次提交（不被误拦）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "204", "msg": "添加失败"},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080001"}]},
+            ],
+        )
+        first = [make_order()]
+        create_orders(first)
+        assert first[0].create_result["success"] is False
+        assert calls["addwork"] == 1
+        second = [make_order()]
+        create_orders(second)
+        assert second[0].create_result["success"] is True
+        assert calls["addwork"] == 2  # 失败单重导不受去重影响
+
+    def test_dedup_no_bl_not_registered(self, urls, monkeypatch):
+        """无提单号单：不查不登，照常提交（且不写入注册表）。"""
+        calls = self._patch_chain(
+            monkeypatch, [{"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]}]
+        )
+        order = make_order(
+            {
+                "order_num1": None,
+                "type": 1,
+                "c_title": "客户A",
+                "data": [{"b_order_num": None}],
+                "box": [],
+                "driver": [{"pay_yf_zj": 0.0}],
+            }
+        )
+        create_orders([order])
+        assert order.create_result["success"] is True
+        assert calls["addwork"] == 1
+        assert client_module.get_imported_registry().snapshot() == {}
+
+    def test_dedup_premarked_skipped_skips_downstream(self, urls, monkeypatch):
+        """service 层预判已标记 skipped（create_result 非 None）→ 编排直接跳过。"""
+        calls = self._patch_chain(monkeypatch, [{"code": "200", "msg": "ok"}])
+        order = make_order()
+        order.create_result = {"success": True, "skipped": True, "sn": "EX1", "error": None}
+        create_orders([order])
+        assert calls["addwork"] == 0
+
+    def test_dedup_register_failure_keeps_success(self, urls, monkeypatch):
+        """登记异常（磁盘满/权限）→ 仅日志不冒泡，响应仍成功（单已真实创建）。"""
+        calls = self._patch_chain(
+            monkeypatch, [{"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]}]
+        )
+        registry = client_module.get_imported_registry()
+
+        def _fail(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(registry, "register", _fail)
+        order = make_order()
+        create_orders([order])
+        assert order.create_result["success"] is True
+        assert calls["addwork"] == 1
+
+    def test_dedup_concurrent_same_bl_single_submit(self, urls, monkeypatch):
+        """并发同提单号：两个请求同时 create → 下游恰好 1 次（per-bl_no 锁原子化）。"""
+        calls = {"addwork": 0}
+        gate = threading.Event()
+
+        def fake_post(url, **kwargs):
+            if url == TEST_URLS["getwebkey"]:
+                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
+            if url == TEST_URLS["login"]:
+                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            calls["addwork"] += 1
+            gate.wait(timeout=5)  # 拉长临界区，放大竞态窗口
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        orders_box: list = []
+        errors: list = []
+
+        def worker():
+            orders = [make_order()]
+            orders_box.append(orders)
+            try:
+                create_orders(orders)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker)
+        t1.start()
+        while calls["addwork"] < 1:
+            time.sleep(0.01)  # 等第一单进入 AddWork（持有 per-bl_no 锁）
+        t2 = threading.Thread(target=worker)
+        t2.start()
+        time.sleep(0.1)
+        gate.set()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+        assert not errors
+        assert calls["addwork"] == 1  # 若无锁，第二请求会再次提交
+        results = [o.create_result for box in orders_box for o in box]
+        assert sum(1 for r in results if r["success"]) == 2  # 1 新建 + 1 skipped
+        assert sum(1 for r in results if r.get("skipped")) == 1
+
+
+class TestCreateCanonicalOrdersDedup:
+    """create_canonical_orders 去重（TMS 通道，bl_no 键）。"""
+
+    def _patch_chain(self, monkeypatch, payloads: list):
+        calls = {"submit": 0}
+
+        def fake_post(url, **kwargs):
+            if "GetWebKey" in url:
+                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
+            if "login" in url:
+                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            payload = payloads[calls["submit"]]
+            calls["submit"] += 1
+            return FakeResponse(payload)
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        return calls
+
+    def _make_canonical(self, bl_no: str) -> CanonicalOrder:
+        return CanonicalOrder(
+            bl_no=bl_no, box_groups=[BoxGroup(b_type="40HQ", box_num=1)]
+        )
+
+    def test_second_upload_skipped(self, urls, monkeypatch):
+        """TMS 通道：成功单登记后重导 → skipped（下游 0 次新增调用）。"""
+        calls = self._patch_chain(
+            monkeypatch, [{"code": "200", "data": [{"sn": "EX1", "o_id": "2101"}]}]
+        )
+        first = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(first)
+        assert first[0].create_result["success"] is True
+        assert calls["submit"] == 1
+        second = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(second)
+        assert calls["submit"] == 1
+        assert second[0].create_result == {
+            "success": True,
+            "skipped": True,
+            "sn": "EX1",
+            "error": None,
+        }
+
+    def test_failed_not_registered_retry_submits(self, urls, monkeypatch):
+        """TMS 通道：失败单不登记，重导照常提交。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "204", "msg": "添加失败"},
+                {"code": "200", "data": [{"sn": "EX2"}]},
+            ],
+        )
+        first = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(first)
+        assert first[0].create_result["success"] is False
+        assert calls["submit"] == 1
+        second = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(second)
+        assert second[0].create_result["success"] is True
+        assert calls["submit"] == 2
+
+    def test_no_bl_submitted_not_registered(self, urls, monkeypatch):
+        """TMS 通道：无提单号单照常提交，不查不登。"""
+        calls = self._patch_chain(
+            monkeypatch, [{"code": "200", "data": [{"sn": "EX1"}]}]
+        )
+        order = CanonicalOrder(bl_no=None, box_groups=[BoxGroup(b_type="40HQ", box_num=1)])
+        create_canonical_orders([order])
+        assert order.create_result["success"] is True
+        assert calls["submit"] == 1
+        assert client_module.get_imported_registry().snapshot() == {}
+
 
 class TestCreateOrdersJson:
     """create_orders 默认 json 通道：下单走 order_api_url + sk 头 + 嵌套 body（无包裹层）。"""
@@ -859,7 +1061,7 @@ class TestCreateOrdersJson:
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080002"}]},
             ],
         )
-        orders = [make_order(), make_order()]
+        orders = [make_order(), make_order({**ORDER_DATA, "order_num1": "OOLU4044379501"})]
         create_orders(orders)
         assert calls["all"] == 4  # GetWebKey + login + 2×下单
         assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None, "upstream": {"sn": "EX26080001"}}

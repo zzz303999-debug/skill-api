@@ -10,6 +10,10 @@
 - 凭证获取失败 → 抛 UpstreamError（502 order_upstream_error），不逐单执行
 - 超时/网络异常 → 该单 error（order_upstream_error），不中断整批（凭证阶段除外）
 - missing_fields 非空的单照常提交（本服务不拦截）
+- 重复上传去重（成功单注册表）：提交前查 imported_registry（per-bl_no 锁包住
+  「查重→提交→登记」临界区），命中 → skipped（不调下游，sn 回显首次创建）；
+  提交成功才登记（登记失败仅日志不冒泡）；无提单号单不查不登照常提交；
+  service 层预判已标记 skipped 的单直接跳过（create_result 非 None）
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from app.config import settings
 from app.errors import SkillAPIError
 from app.logging_conf import get_logger
 
+from .imported_registry import get_imported_registry, lock_for, normalize
 from .schema import BillOrder
 
 log = get_logger(__name__)
@@ -442,20 +447,54 @@ def add_order_json(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     return _parse_create_response(response, step="order API")
 
 
-def create_orders(orders: list[BillOrder]) -> None:
+def _register_imported(bl_no: str, sn, source_sha256: str | None) -> None:
+    """登记创建成功单（去重注册表）；登记失败仅记日志，不冒泡。
+
+    单已真实创建，登记失败（磁盘满/权限等）不应使响应变失败——丢失记录的
+    后果是重导可能重复下单（见 imported_registry 模块 docstring）。
+    """
+    try:
+        get_imported_registry().register(bl_no, sn=sn, source_sha256=source_sha256)
+    except Exception as exc:  # noqa: BLE001 - 防御：登记失败不使成功单变失败
+        log.warning(
+            "imported_register_failed",
+            extra={"bl_no": bl_no, "error_type": exc.__class__.__name__},
+        )
+
+
+def _skipped_result(sn: str | None) -> dict[str, Any]:
+    """去重命中（已成功创建过）的 create_result：success=True + skipped 标记。"""
+    return {"success": True, "skipped": True, "sn": sn, "error": None}
+
+
+def create_orders(orders: list[BillOrder], source_sha256: str | None = None) -> None:
     """逐单串行下单并原地填充 create_result。
 
     先 GetWebKey → login 取 sk 一次；凭证失败抛 UpstreamError（不逐单执行）；
     通道由 JXT_CREATE_CHANNEL 决定：json=嵌套 JSON + sk 头（已弃用，204 拒单，
     见 add_order_json TODO）；form=AddWork 表单（默认，2026-08-13 起）。
     单失败不影响后续；任何情况不自动重试；missing_fields 非空照常提交。
+    重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
     """
     if not orders:
         return
     sk = login(get_web_key())
     submit = add_order_json if settings.jxt_create_channel == "json" else add_work
     for order in orders:
-        order.create_result = submit(sk, order.order_data or {})
+        if order.create_result is not None:
+            continue  # service 层预判已标记 skipped → 直接跳过
+        bl = normalize(order.order_num1)
+        if not bl:
+            order.create_result = submit(sk, order.order_data or {})
+            continue
+        with lock_for(bl):
+            rec = get_imported_registry().lookup(bl)
+            if rec:
+                order.create_result = _skipped_result(rec.get("sn"))
+                continue
+            order.create_result = submit(sk, order.order_data or {})
+            if order.create_result.get("success"):
+                _register_imported(bl, order.create_result.get("sn"), source_sha256)
 
 
 def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
@@ -550,15 +589,29 @@ def submit_canonical(sk: str, order) -> dict[str, Any]:
     return _parse_canonical_response(response)
 
 
-def create_canonical_orders(orders) -> None:
+def create_canonical_orders(orders, source_sha256: str | None = None) -> None:
     """TMS 通道逐单串行下单（CanonicalOrder → form-data）并原地填充 create_result。
 
     先 GetWebKey → login 取 sk 一次（复用既有凭证链路）；凭证失败抛 UpstreamError
     （不逐单执行）；单失败隔离不中断；任何情况不自动重试（防重复下单）；
     missing_fields 非空照常提交。响应回取 data[0].sn（TMS 业务编号）与 o_id。
+    重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
     """
     if not orders:
         return
     sk = login(get_web_key())
     for order in orders:
-        order.create_result = submit_canonical(sk, order)
+        if order.create_result is not None:
+            continue  # service 层预判已标记 skipped → 直接跳过
+        bl = normalize(order.bl_no)
+        if not bl:
+            order.create_result = submit_canonical(sk, order)
+            continue
+        with lock_for(bl):
+            rec = get_imported_registry().lookup(bl)
+            if rec:
+                order.create_result = _skipped_result(rec.get("sn"))
+                continue
+            order.create_result = submit_canonical(sk, order)
+            if order.create_result.get("success"):
+                _register_imported(bl, order.create_result.get("sn"), source_sha256)

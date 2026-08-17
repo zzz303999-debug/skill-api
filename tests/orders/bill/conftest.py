@@ -59,6 +59,20 @@ def _isolate_fee_registry(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_imported_registry(tmp_path):
+    """成功单注册表隔离：每用例重建到临时目录。
+
+    防止 create 模式用例（client/service 编排）写入真实 storage/imported_orders.json
+    并在用例间泄漏成功记录（去重命中会掩盖重导/并发断言）。
+    """
+    from app.orders.bill import imported_registry
+
+    imported_registry.reload_registry(tmp_path / "imported_orders.json")
+    yield
+    imported_registry.reload_registry(tmp_path / "imported_orders.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_real_archive_calls(monkeypatch):
     """全局拦截建档族网络调用（零网络）：默认全部成功返回递增 archive_id。
 
@@ -90,6 +104,25 @@ def _no_real_archive_calls(monkeypatch):
 
     monkeypatch.setattr(md_client_module, "create_archives", _fake)
     yield real_create
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fee_mapping_caches():
+    """费用映射/自举/基础资料配置缓存重置（每用例后）：防止配置注入用例
+    （monkeypatch 临时文件路径）在 teardown 后残留缓存污染后续用例；
+    幂等无副作用（各模块配置重载即读回真实配置文件）。
+    """
+    yield
+    from app.orders.bill import fee_bootstrap, fee_map, fee_price_map, master_data, template_store
+
+    try:
+        fee_map.reload_fee_alias_dictionary()
+        fee_price_map.reload_price_map()
+        fee_bootstrap.reload_bootstrap_config()
+        master_data.reload_config()
+        template_store.reload_alias_dictionary()
+    except RuntimeError:
+        pass  # 真实配置文件缺失时容错跳过（与 test_fees._fee_caches 同口径）
 
 
 @pytest.fixture()
