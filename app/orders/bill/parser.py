@@ -409,15 +409,18 @@ def _header_column_index(
 
     双行表头：header_row-1 为区块行（section_fill: forward 即 merged_cell
     合并右填充），列名 = 区块非空时「区块.列名」；单行表头区块全空。
+
+    空单元格统一走 _header_text（openpyxl None 与 xlrd 空文本 '' 同为空），
+    否则 str(None) 得 "None" 会把业务区空区块列误标为「None.列名」导致失配。
     """
     section_row = header_row - 1 if two_row and header_row > 1 else 0
     sections: list[str] = []
     names: list[str] = []
     for col in range(1, view.ncols + 1):
         section = (
-            str(view.merged_cell(section_row, col)).strip() if section_row else ""
+            _header_text(view.merged_cell(section_row, col)) if section_row else ""
         )
-        name = str(view.merged_cell(header_row, col)).strip()
+        name = _header_text(view.merged_cell(header_row, col))
         sections.append(_normalize_header(section))
         if section:
             names.append(f"{_normalize_header(section)}.{_normalize_header(name)}")
@@ -667,7 +670,7 @@ def _parse_with_template(
         | set(anchor_cols)
     )
     unmatched_raw: dict[int, str] = {
-        col: str(view.merged_cell(header_row, col)).strip()
+        col: _header_text(view.merged_cell(header_row, col))
         for col, name in enumerate(names, start=1)
         if (
             col not in mapped_cols_flat
