@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from app.errors import BadRequestError
+
 from .aggregator import group_canonical, group_orders
 from .client import create_orders
 from .fee_price_map import apply_price_map
@@ -197,6 +199,29 @@ def build_result(
         if tmp_path:
             os.unlink(tmp_path)
 
+    # 单次导入行数上限（一柜一行）：preview/create 一致拦截，超限零副作用直接拒绝。
+    # 双管线同口径统计（与 meta.raw_rows 一致）：标准字段（canonical_rows）与
+    # 既有语义（rows）任一超限即拒绝（标准字段模板下 rows 恒空，只看 rows 会漏拦）
+    from app.config import settings
+
+    total_rows = len(output.rows) + len(output.canonical_rows or [])
+    if total_rows > settings.bill_import_max_rows:
+        raise BadRequestError(
+            f"bill has too many rows: {total_rows} > {settings.bill_import_max_rows}",
+            code="too_many_rows",
+            details={
+                "total_rows": total_rows,
+                "max_rows": settings.bill_import_max_rows,
+                # 对齐 create 模式 upstream 结构（code/msg/data），
+                # 保证对接方统一按 upstream.code 判断时错误码可达
+                "upstream": {
+                    "code": "400",
+                    "msg": "数据量过大，联系人工客服",
+                    "data": [],
+                },
+            },
+        )
+
     # 双管线分流：标准字段（canonical_rows）→ CanonicalOrder；既有语义 → BillOrder
     agg = group_orders(output.rows, output.period)
     orders = agg.orders
@@ -307,16 +332,26 @@ def build_result(
                 if not o.create_result.get("success")
             ],
         }
-        # 上游原始回显（对齐 /orders 的 upstream：code 200 + msg 添加成功 + 每单回显）；
-        # 全部失败时保持 null（失败原因见 summary.failed_details）
+        # 上游回显（对齐 TMS 通道格式，见《逆推规范》§3）：确有新建成功单 →
+        # code "200" + msg 添加成功 + data 成功单原始回显（含 sn/sns；成功但无
+        # 回显时 data 为空仍为 200）；新建全失败 → code "204" + msg 添加失败 +
+        # 空 data；全部 skipped（无新建动作）保持 null（与「无单可创建」同语义，
+        # 路由层转 409；失败原因见 summary.failed_details）
         upstream_data = [
             o.create_result.get("upstream")
             for o in created
             if o.create_result.get("success") and o.create_result.get("upstream")
         ]
-        upstream = (
-            {"code": 200, "msg": "添加成功", "data": upstream_data} if upstream_data else None
+        created_ok = any(
+            o.create_result.get("success") and not o.create_result.get("skipped")
+            for o in created
         )
+        if created and not all(o.create_result.get("skipped") for o in created):
+            upstream = (
+                {"code": "200", "msg": "添加成功", "data": upstream_data}
+                if created_ok
+                else {"code": "204", "msg": "添加失败", "data": []}
+            )
 
     meta: dict = {
         "source_sha256": file_sha256,

@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 9000
     api_max_upload_bytes: int = Field(default=20 * 1024 * 1024, gt=0)
+    # 竞品账单单次导入的最大数据行数（一柜一行），超出直接拒绝
+    bill_import_max_rows: int = Field(default=10000, ge=1)
     api_batch_max_files: int = Field(default=10, ge=1, le=100)
     skill_max_concurrency: int = Field(default=4, ge=1, le=64)
     # 在途任务满时新请求排队等待的最长秒数，超时返回 503 server_busy

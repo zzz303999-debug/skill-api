@@ -183,7 +183,12 @@ class BillParseResult(BaseModel):
     )
     upstream: dict[str, Any] | None = Field(
         None,
-        description="上游原始回显（create 模式；对齐 /orders 的 upstream：{code, msg, data:[每单回显]}），preview 模式为 null",
+        description=(
+            "上游回显（create 模式且本批确有新建成功单时填充，对齐 TMS 通道格式）："
+            "新建成功 → {code:\"200\", msg:\"添加成功\", data:[每单原始回显（含 sn/sns）]}；"
+            "新建全部失败 → {code:\"204\", msg:\"添加失败\", data:[]}；"
+            "preview 模式、无单可创建或全部 skipped 时为 null"
+        ),
     )
     meta: dict[str, Any] = Field(
         default_factory=dict, description="溯源信息（文件哈希、解析时间、引擎等）"

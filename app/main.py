@@ -819,11 +819,19 @@ async def import_bill(
     # 明细在 summary（skipped/created/success_sns）
     if create_order and result.summary:
         if result.summary["skipped"] > 0 and result.summary["created"] == 0:
+            success_sns = result.summary["success_sns"] or []
             raise DuplicateBillError(
                 "all bills already created; nothing new was created",
                 details={
                     "success_sns": result.summary["success_sns"],
                     "summary": result.summary,
+                    # 对齐 create 模式 upstream 结构（code/msg/data），
+                    # 便于调用方统一按 upstream.code 判断业务结果
+                    "upstream": {
+                        "code": "409",
+                        "msg": "账单已全部创建过",
+                        "data": [{"sn": sn} for sn in success_sns],
+                    },
                 },
             )
     return result

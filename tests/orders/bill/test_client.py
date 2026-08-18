@@ -378,7 +378,7 @@ class TestCredentials:
             text = "<html>gateway</html>"
             headers = {}
 
-            def json(self):
+            def json(self, **kwargs):
                 raise ValueError("not JSON")
 
         monkeypatch.setattr(client_module.httpx, "post", lambda *_a, **_k: NonJson())
@@ -551,7 +551,7 @@ class TestAddWork:
             text = "not json"
             headers = {}
 
-            def json(self):
+            def json(self, **kwargs):
                 raise ValueError("not JSON")
 
         monkeypatch.setattr(client_module.httpx, "post", lambda *_a, **_k: NonJson())
@@ -644,7 +644,7 @@ class TestAddOrderJson:
             text = "not json"
             headers = {}
 
-            def json(self):
+            def json(self, **kwargs):
                 raise ValueError("not JSON")
 
         monkeypatch.setattr(client_module.httpx, "post", lambda *_a, **_k: NonJson())

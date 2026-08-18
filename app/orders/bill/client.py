@@ -40,6 +40,16 @@ class UpstreamError(SkillAPIError):
     code = "order_upstream_error"
 
 
+def _nan_to_none(_token: str) -> None:
+    """json.loads parse_constant：下游 NaN/Infinity 字面量 → None（JSON null）。
+
+    避免透传进响应体后序列化失败（starlette JSONResponse allow_nan=False
+    遇 float nan 抛 ValueError → 500），也避免调用方收到非法 JSON 数值。
+    """
+
+    return None
+
+
 # AddWork 固定值字段（§2.2/§5.3 + 2026-08-11 抓包）：appendCost=true、o_id 新建为空、
 # 图片/多皮重数组为空。duo_get/cost 合计恒发 0.00 仅服务本 json 降级通道的旧链路
 # （BillOrder.order_data 只归集应收，无 pay/duo_get/cost 条目；标准通道四通道
@@ -233,7 +243,7 @@ def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
             },
         )
     try:
-        raw = response.json()
+        raw = response.json(parse_constant=_nan_to_none)
     except ValueError as exc:
         raise UpstreamError(
             "credential API returned a non-JSON response",
@@ -353,7 +363,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             },
         )
     try:
-        raw = response.json()
+        raw = response.json(parse_constant=_nan_to_none)
     except ValueError:
         return _error_result(
             f"{step} returned a non-JSON response",
@@ -511,7 +521,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             },
         )
     try:
-        raw = response.json()
+        raw = response.json(parse_constant=_nan_to_none)
     except ValueError:
         return _error_result(
             "order API returned a non-JSON response",

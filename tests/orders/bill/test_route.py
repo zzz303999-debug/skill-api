@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.orders.bill.client as client_module
+import app.orders.bill.service as service_module
 from app.config import settings
 from app.main import app
 from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
@@ -129,7 +130,7 @@ class TestCreateMode:
             "failed_details": [],
         }
         assert data["upstream"] == {
-            "code": 200,
+            "code": "200",
             "msg": "添加成功",
             "data": [{"sn": "EX26080042"}] * REAL_ORDER_COUNT,
         }
@@ -209,13 +210,45 @@ class TestCreateMode:
         }
         # 部分失败：upstream 只含成功单回显（与 /orders 的 upstream 同构）
         assert data["upstream"] == {
-            "code": 200,
+            "code": "200",
             "msg": "添加成功",
             "data": [{"sn": "EX1"}] * (REAL_ORDER_COUNT - 1),
         }
         assert data["orders"][0]["create_result"]["success"] is False
         assert data["orders"][0]["create_result"]["error"]["details"]["upstream_code"] == "204"
         assert all(o["create_result"]["success"] for o in data["orders"][1:])
+
+    def test_all_failed_upstream_204(self, monkeypatch):
+        """全部单失败 → 200 + summary.failed 全量；upstream 返回 204 结构。"""
+        calls = {"addwork": 0}
+
+        def fake_post(url, **_kwargs):
+            if "GetWebKey" in url:
+                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
+            if "login" in url:
+                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
+            if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
+                return _archive_post(url)
+            calls["addwork"] += 1
+            return FakeResponse({"code": "204", "msg": "添加失败"})
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "b.xls",
+                REAL_XLS.read_bytes(),
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["summary"]["total"] == REAL_ORDER_COUNT
+        assert data["summary"]["success"] == 0 and data["summary"]["failed"] == REAL_ORDER_COUNT
+        # 全部失败：upstream 对齐 TMS 错误格式（code "204" + 空 data）
+        assert data["upstream"] == {"code": "204", "msg": "添加失败", "data": []}
+        assert all(not o["create_result"]["success"] for o in data["orders"])
+        assert calls["addwork"] == REAL_ORDER_COUNT
 
 
 class TestFileErrors:
@@ -242,11 +275,176 @@ class TestFileErrors:
             r = self._upload(client, "big.xls", big)
             assert r.status_code == 400 and r.json()["error"]["code"] == "file_too_large"
 
+    def test_too_many_rows(self, monkeypatch):
+        """数据行数超单次导入上限 → 400 too_many_rows（BillRow 管线口径）。"""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(settings, "bill_import_max_rows", 2)
+        monkeypatch.setattr(
+            service_module,
+            "parse_bill",
+            lambda _path: SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None),
+        )
+        with TestClient(app) as client:
+            r = self._upload(client, "many.xlsx", b"x")
+            assert r.status_code == 400
+            error = r.json()["error"]
+            assert error["code"] == "too_many_rows"
+            assert error["description"] == "数据量过大，联系人工客服"
+            assert error["details"] == {
+                "total_rows": 3,
+                "max_rows": 2,
+                # 对齐 create 模式 upstream 结构，保证错误码可达对接方
+                "upstream": {"code": "400", "msg": "数据量过大，联系人工客服", "data": []},
+            }
+
+    def test_too_many_rows_canonical(self, monkeypatch):
+        """canonical（标准字段/TMS）管线行数超限同样拦截（rows 恒空时也不漏拦）。"""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(settings, "bill_import_max_rows", 2)
+        monkeypatch.setattr(
+            service_module,
+            "parse_bill",
+            lambda _path: SimpleNamespace(rows=[], canonical_rows=[None] * 3, period=None),
+        )
+        with TestClient(app) as client:
+            r = self._upload(client, "many.xlsx", b"x")
+            assert r.status_code == 400
+            assert r.json()["error"]["code"] == "too_many_rows"
+            assert r.json()["error"]["details"]["total_rows"] == 3
+
+    def test_too_many_rows_create_mode_zero_side_effect(self, monkeypatch):
+        """create_order=true 超限 → 400 且零副作用（不触达下游/去重注册表）。"""
+        from types import SimpleNamespace
+
+        from app.orders.bill import imported_registry
+
+        monkeypatch.setattr(settings, "bill_import_max_rows", 2)
+        monkeypatch.setattr(
+            service_module,
+            "parse_bill",
+            lambda _path: SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None),
+        )
+        calls = {"addwork": 0, "lookup": 0, "register": 0}
+        registry = imported_registry.get_imported_registry()
+
+        def fake_post(url, **_kwargs):
+            calls["addwork"] += 1
+            return _ok_chain_post(url)
+
+        def counting(fn, key):
+            def wrapped(*a, **k):
+                calls[key] += 1
+                return fn(*a, **k)
+
+            return wrapped
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(registry, "lookup", counting(registry.lookup, "lookup"))
+        monkeypatch.setattr(registry, "register", counting(registry.register, "register"))
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "many.xlsx",
+                b"x",
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "too_many_rows"
+        assert calls["addwork"] == 0  # 拦截先于一切下单调用
+        assert calls["lookup"] == 0 and calls["register"] == 0  # 去重注册表零触达
+
+    def test_max_rows_boundary_ok(self, monkeypatch):
+        """行数 == 上限不拦截（canonical 管线 1 行、上限 1 → 200 放行）。"""
+        from helpers import build_bill_bytes
+
+        headers = {
+            "A": "序号",
+            "B": "客户名称",
+            "C": "门点",
+            "D": "箱型箱量",
+            "E": "提单号",
+            "F": "箱号",
+            "G": "做箱时间",
+            "H": "港区",
+            "I": "司机",
+            "J": "应收备注",
+        }
+        monkeypatch.setattr(settings, "bill_import_max_rows", 1)
+        with TestClient(app) as client:
+            r = self._upload(
+                client,
+                "junyu.xlsx",
+                build_bill_bytes(
+                    headers,
+                    [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "F": "TCLU1"}],
+                ),
+            )
+        assert r.status_code == 200
+        assert r.json()["create_order"] is False
+
     def test_error_structure(self):
         """错误响应统一四字段结构。"""
         with TestClient(app) as client:
             r = self._upload(client, "fake.xlsx", REAL_XLS.read_bytes())
             assert set(r.json()["error"]) == {"code", "message", "description", "details"}
+
+
+class TestNanEcho:
+    """下游回显含 NaN/Infinity 字面量 → 归一为 null：响应完整可序列化（不 500）。"""
+
+    @staticmethod
+    def _junyu_file() -> bytes:
+        from helpers import build_bill_bytes
+
+        headers = {
+            "A": "序号",
+            "B": "客户名称",
+            "C": "门点",
+            "D": "箱型箱量",
+            "E": "提单号",
+            "F": "箱号",
+            "G": "做箱时间",
+            "H": "港区",
+            "I": "司机",
+            "J": "应收备注",
+        }
+        return build_bill_bytes(
+            headers,
+            [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "F": "TCLU1"}],
+        )
+
+    def test_nan_upstream_returns_200(self, monkeypatch):
+        """AddWork 回显 data[0] 含 NaN → 200 + upstream 中为 null（序列化不炸）。"""
+
+        def fake_post(url, **_kwargs):
+            if "GetWebKey" in url or "login" in url:
+                return _ok_chain_post(url)
+            if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
+                return _archive_post(url)
+            return FakeResponse(
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1", "fee": float("nan")}]}
+            )
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "junyu.xlsx",
+                self._junyu_file(),
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["upstream"] == {
+            "code": "200",
+            "msg": "添加成功",
+            "data": [{"sn": "EX1", "fee": None}],
+        }
+        assert data["canonical_orders"][0]["create_result"]["upstream"]["fee"] is None
 
 
 class TestAuth:
@@ -333,6 +531,12 @@ class TestDedupConflict:
         assert body["error"]["details"]["success_sns"] == ["EX26080042", "EX26080042"]
         assert body["error"]["details"]["summary"]["skipped"] == 2
         assert body["error"]["details"]["summary"]["created"] == 0
+        # 对齐 create 模式 upstream 结构（code/msg/data），调用方可统一按 upstream.code 判断
+        assert body["error"]["details"]["upstream"] == {
+            "code": "409",
+            "msg": "账单已全部创建过",
+            "data": [{"sn": "EX26080042"}, {"sn": "EX26080042"}],
+        }
         assert body["error"]["description"]  # 中文说明可展示
 
     def test_partial_skipped_still_200(self, monkeypatch):

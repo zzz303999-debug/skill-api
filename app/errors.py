@@ -30,6 +30,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "too_many_files": "批量上传文件数量超过限制，请分批处理",
     "unsupported_image_content": "图片内容不是支持的格式（jpg/png/bmp/tiff/gif/webp），请转换后重试",
     "file_format_mismatch": "文件扩展名与实际内容格式不符，请检查文件是否正确",
+    "too_many_rows": "数据量过大，联系人工客服处理",
     "header_mapping_rejected": "账单表头 AI 映射未通过校验（必映射字段缺失/重复映射/抽样不达标），请人工确认表头或补充模板",
     "skill_not_found": "请求的技能不存在，请检查接口路径",
     # ---- 文档转换 ----
