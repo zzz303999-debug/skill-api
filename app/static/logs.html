@@ -512,30 +512,13 @@ function downloadJson(payload, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-// 导出前把 response/body 中的 JSON 字符串解析为对象，避免导出文件里出现整行转义串
-function parseJsonField(value) {
-  if (typeof value !== "string" || !value) return value;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value; // 截断或非 JSON 内容保持原样
-  }
-}
-
-function normalizeForExport(item) {
-  const out = { ...item };
-  if (out.body) out.body = parseJsonField(out.body);
-  if (out.response) out.response = parseJsonField(out.response);
-  return out;
-}
-
 // 导出单条请求：请求详情 + 错误信息 + 请求体
 function exportOne(item) {
   const stamp = (item.ts || "").slice(0, 19).replace(/[:T]/g, "-");
   downloadJson(
     {
       exported_at: new Date().toISOString(),
-      request: normalizeForExport(item),
+      request: item,
       error: item.error || null,
     },
     "request-" + (item.request_id || stamp || "unknown") + ".json"
@@ -567,7 +550,7 @@ async function exportAll() {
       if (!data.items.length || off >= data.total) break;
     }
     downloadJson(
-      { exported_at: new Date().toISOString(), total: items.length, items: items.map(normalizeForExport) },
+      { exported_at: new Date().toISOString(), total: items.length, items },
       "skill-api-logs-" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + ".json"
     );
   } catch (e) {
