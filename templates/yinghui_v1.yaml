@@ -1,0 +1,114 @@
+# 费用区无区块表头，以「应收合计/应付合计/成本合计」列分界；业务列右边界 = 应收合计列。
+template_id: yinghui_v1
+family: yinghui
+name: 利润明细表·赢辉家族
+match:
+  fingerprints:
+  - cc7c8158
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: false
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: total_columns
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  order_date: 做箱日期
+  biz_no: 运单编号
+  customer_name: 客户名称
+  bl_no: 提单号
+  box_type_qty: 箱型
+  pickup_point: 提箱堆场
+  door_point: 装卸工厂
+  port_area: 港区
+  fleet: 车队
+  plate_no: 车牌号
+  driver_name: 司机
+  driver_phone: 司机手机
+  io_type: 进出口
+  biz_type: 业务类型
+  load_point: 装卸地点
+  vessel: 船名
+  voyage: 航次
+  container_no: 箱号
+  seal_no: 封条号
+normalizers:
+  order_date: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse
+# 费用段（T15）：赢辉单行表头无区块行，以合计列分界（ranges：区块 → 末尾合计列名）；
+# 应收=应收合计前、应付=应付合计前、成本=成本合计前；范围内列全抽取（长尾 → to_other）；
+# 无标准码费目（提箱费/进港费/疏港费/编号费/放单费/服务费等）走字典 → to_other
+fees:
+  channels:
+    应收: shou
+    应付: pay
+    成本: cost
+  ranges:
+    应收: 应收合计
+    应付: 应付合计
+    成本: 成本合计
+  mapping:
+    应收.运费: freight
+    应收.待时费: waiting
+    应收.洋山费: yangshan
+    应收.预提费: pre_pick
+    应收.落箱费: drop_box
+    应收.搬移费: move
+    应收.港杂费: port_misc
+    应收.理货费: tally
+    应收.打单费: amend
+    应收.超期费: overdue
+    应收.超期用箱费: overdue
+    应收.预进港: pre_inport
+    应收.洋山提: yangshan
+    应收.坏污箱: damage_box
+    应收.上下车费: lift
+    应收.其他费用: other
+    应付.运费: freight
+    应付.上下车费: lift
+    应付.出车费: trip
+    应付.油费: fuel
+    应付.待时费: waiting
+    应付.超期费: overdue
+    应付.落箱费: drop_box
+    应付.搬移费: move
+    应付.预提费: pre_pick
+    应付.洋山费: yangshan
+    应付.港杂费: port_misc
+    应付.理货费: tally
+    应付.打单费: amend
+    应付.其他费用: other
+    应付.扣除费: { code: deduction, negative: true }  # T27a 负向扣减项（应付合计=Σ正−扣除费）
+    成本.上下车费: lift
+    成本.出车费: trip
+    成本.油费: fuel
+    成本.超期费: overdue
+    成本.落箱费: drop_box
+    成本.搬移费: move
+    成本.预提费: pre_pick
+    成本.洋山费: yangshan
+    成本.港杂费: port_misc
+    成本.理货费: tally
+    成本.打单费: amend
+    成本.其他费用: other
+  unmapped_fee: to_other
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"

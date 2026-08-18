@@ -270,3 +270,208 @@ def test_extract_records_file_size(monkeypatch):
     # 文件上传是 multipart，不记录请求体
     assert entry["body"] is None
     assert entry["body_truncated"] is False
+
+
+def _build_yinghui_bill_bytes() -> bytes:
+    """构造最小竞品账单（赢辉家族表头，L2 命中）：1 行数据 = 1 票。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    headers = [
+        "做箱日期", "运单编号", "客户名称", "提单号", "箱型", "提箱堆场", "装卸工厂",
+        "港区", "车队", "车牌号", "司机", "司机手机", "进出口", "业务类型",
+        "装卸地点", "船名", "航次", "箱号", "封条号",
+        "运费", "待时费", "洋山费", "预提费", "落箱费", "应收合计",
+        "油费", "出车费", "应付合计", "上下车费", "成本合计",
+    ]
+    values = [
+        "2026-08-10", "LOG260001-1", "审计客户", "BL2026081001", "40HQ*1",
+        "测试堆场", "测试门点", "外港", "测试车队", "沪A12345", "王师傅", "13800000000",
+        "出口", "出口整箱", "测试门点", "COSCO TEST", "001E", "TCLU1000001", "SEAL000001",
+        100.0, None, None, None, None, None, None, None, None, None, None,
+    ]
+    wb = Workbook()
+    ws = wb.active
+    for col, name in enumerate(headers, start=1):
+        ws.cell(row=2, column=col, value=name)
+    for col, value in enumerate(values, start=1):
+        ws.cell(row=3, column=col, value=value)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_bill_import_response_summarized_for_log():
+    """竞品录入大响应：日志只落排查摘要，客户端仍收到完整响应。"""
+    import json
+
+    client = TestClient(app)
+    resp = client.post(
+        "/orders/bill/import",
+        files={
+            "file": (
+                "audit-bill.xlsx",
+                _build_yinghui_bill_bytes(),
+                "application/octet-stream",
+            )
+        },
+        data={"create_order": "false"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["order_count"] == 1  # 客户端响应完整（明细不受摘要影响）
+    assert "canonical_orders" in body
+    entry = _items(
+        client.get("/api/logs", params={"path": "/orders/bill/import"}).json()
+    )[0]
+    assert entry["response_summarized"] is True
+    assert entry["response_truncated"] is False
+    summary = json.loads(entry["response"])
+    # 摘要保留排查关键字段，丢弃大明细
+    assert summary["file"] == "audit-bill.xlsx"
+    assert summary["order_count"] == 1
+    assert summary["total_rows"] == 1
+    assert summary["create_order"] is False
+    assert summary.get("summary") is None  # preview 无建单统计
+    assert summary["meta"]["template"]  # 模板命中回显
+    assert "canonical_orders" not in summary
+    assert "orders" not in summary
+    assert "upstream" not in summary
+
+
+def test_bill_import_summarize_disabled_when_paths_empty(monkeypatch):
+    """access_log_summarize_paths 置空时恢复完整响应记录。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "access_log_summarize_paths", "")
+    client = TestClient(app)
+    resp = client.post(
+        "/orders/bill/import",
+        files={
+            "file": (
+                "audit-bill.xlsx",
+                _build_yinghui_bill_bytes(),
+                "application/octet-stream",
+            )
+        },
+        data={"create_order": "false"},
+    )
+    assert resp.status_code == 200
+    entry = _items(
+        client.get("/api/logs", params={"path": "/orders/bill/import"}).json()
+    )[0]
+    assert entry["response_summarized"] is False
+    assert "canonical_orders" in entry["response"]
+
+
+def test_summarize_import_response_fallback_on_unparseable():
+    """摘要函数对非 JSON / 非对象响应回退 None（调用方保持原文）。"""
+    from app.main import _summarize_import_response
+
+    assert _summarize_import_response("not json") is None
+    assert _summarize_import_response("[1, 2]") is None
+    summary = _summarize_import_response(
+        '{"file": "a.xlsx", "order_count": 2, "meta": {"master_data": null}}'
+    )
+    assert summary is not None
+    assert '"order_count":2' in summary
+
+
+def test_summarize_import_response_truncates_large_meta():
+    """未映射表头与建档明细超限时只留前 N 条 + 截断计数。"""
+    import json
+
+    from app.main import _summarize_import_response
+
+    payload = {
+        "file": "a.xlsx",
+        "order_count": 3,
+        "meta": {
+            "unmatched_headers": [f"h{i}" for i in range(50)],
+            "master_data": {
+                "mode": "preview",
+                "candidates": {"client": 5},
+                "degraded": [],
+                "archived": [{"kind": "client", "key": f"k{i}"} for i in range(15)],
+                "failed": [],
+            },
+        },
+    }
+    summary = json.loads(_summarize_import_response(json.dumps(payload)))
+    assert len(summary["meta"]["unmatched_headers"]) == 20
+    assert summary["meta"]["unmatched_truncated"] == 30
+    md = summary["meta"]["master_data"]
+    assert md["candidates"] == {"client": 5}
+    assert len(md["archived"]) == 10
+    assert md["archived_truncated"] == 5
+    assert "failed" not in md  # 空明细不占位
+
+
+def _import_audit_bill(client) -> dict:
+    """上传最小竞品账单（preview），返回最新一条 /orders/bill/import 日志条目。"""
+    resp = client.post(
+        "/orders/bill/import",
+        files={
+            "file": (
+                "audit-bill.xlsx",
+                _build_yinghui_bill_bytes(),
+                "application/octet-stream",
+            )
+        },
+        data={"create_order": "false"},
+    )
+    assert resp.status_code == 200
+    return _items(
+        client.get("/api/logs", params={"path": "/orders/bill/import"}).json()
+    )[0]
+
+
+def test_bill_import_response_full_kept_for_export():
+    """摘要化时完整响应体单独保留：列表默认剥离，include_full=1 可取回。"""
+    import json
+
+    client = TestClient(app)
+    entry = _import_audit_bill(client)
+    assert entry["response_summarized"] is True
+    # 默认列表剥离大字段，页面轻量
+    assert "response_full" not in entry
+    # 导出场景：include_full=1 返回完整响应体（含明细）
+    full_entry = _items(
+        client.get(
+            "/api/logs",
+            params={"path": "/orders/bill/import", "include_full": "1"},
+        ).json()
+    )[0]
+    assert full_entry["response_full"] is not None
+    assert "canonical_orders" in full_entry["response_full"]
+    assert full_entry["response_full_truncated"] is False
+    # 摘要字段与完整字段同源一致
+    assert json.loads(full_entry["response"])["order_count"] == 1
+
+
+def test_response_full_truncated_when_over_limit(monkeypatch):
+    """response_full 超过独立上限时截断并标记（导出仍可拿可用信息）。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "access_log_response_full_max_chars", 64)
+    client = TestClient(app)
+    entry = _import_audit_bill(client)
+    full_entry = _items(
+        client.get(
+            "/api/logs",
+            params={"path": "/orders/bill/import", "include_full": "1"},
+        ).json()
+    )[0]
+    assert full_entry["response_full_truncated"] is True
+    assert len(full_entry["response_full"]) <= 64
+    # 摘要不受 response_full 上限影响
+    assert entry["response_summarized"] is True
+
+
+def test_query_include_full_false_strips_other_paths_too():
+    """非摘要路径无 response_full 字段，剥离逻辑对普通条目无副作用。"""
+    client = TestClient(app)
+    assert client.get("/healthz").status_code == 200
+    entry = _items(client.get("/api/logs").json())[0]
+    assert "response_full" not in entry

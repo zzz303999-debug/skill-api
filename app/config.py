@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,7 +13,13 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_PROJECT_ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    # 运行环境（test/prod）：决定 config/fee_price_map.{env}.yaml 等按环境隔离的
+    # 配置文件名；环境切换只换文件，代码零环境名/if
+    env: str = "test"
 
     # API
     api_host: str = "0.0.0.0"
@@ -28,6 +35,28 @@ class Settings(BaseSettings):
     # 订单创建接口
     order_api_url: str = "https://s3.jxt56.com/Car/publishCreateOrder"
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
+
+    # 竞品账单导入下游（GetWebKey → login → AddWork；凭据为服务端静态配置，不随请求传入）
+    jxt_ext_app_id: str = ""
+    jxt_ext_user_id: str = ""
+    jxt_jxt_open_id: str = ""
+    jxt_getwebkey_url: str = "https://a3.jxt56.com/Api/Account/GetWebKey"
+    jxt_login_url: str = "https://a3.jxt56.com/Api/login"
+    jxt_addwork_url: str = "https://s3.jxt56.com/Car/WorkOut/AddWork"
+    jxt_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    # 竞品账单下单通道：form=AddWork 表单（默认，AddWork 端点 + sk 头实测可用
+    # 2026-08-13；publishCreateOrder 现强制要求 userId+roomId，204 拒单）；
+    # json=嵌套 JSON（旧默认，暂不可用，保留代码供 roomId 来源明确后恢复）
+    jxt_create_channel: Literal["json", "form"] = "form"
+    # to_other 长尾监控阈值（T14）：某原费目名归并次数 ≥ 该值 → 对账报告 warning
+    # 提示升级为显式映射（补映射 = 改模板 fees.mapping，零代码）
+    fee_to_other_warning_threshold: int = Field(default=50, ge=1, le=10000)
+
+    @field_validator("jxt_create_channel", mode="before")
+    @classmethod
+    def _normalize_create_channel(cls, value: str) -> str:
+        """环境变量大小写宽容（JSON/Form → json/form）；before 模式在 Literal 校验前执行。"""
+        return value.strip().lower()
 
     # OpenAI-compatible LLM
     llm_base_url: str = "https://api.openai.com/v1"
@@ -49,9 +78,7 @@ class Settings(BaseSettings):
     image_vision_skip_when_confident: bool = True
     # 原图 base64 直传 LLM 的字节数上限；超过则跳过 vision 并标记人工复核
     # （base64 会膨胀约 1/3，避免超网关请求体限制）
-    vision_max_image_bytes: int = Field(
-        default=8 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024
-    )
+    vision_max_image_bytes: int = Field(default=8 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
 
     # PDF 文本层页级质量探测
     parser_text_min_chars: int = Field(default=50, ge=1, le=1000)
@@ -94,6 +121,17 @@ class Settings(BaseSettings):
     # 响应体记录的最大字符数，超出截断并标记 response_truncated
     # （仅截断日志内容，客户端仍收到完整响应）
     access_log_response_max_chars: int = Field(default=64 * 1024, ge=0, le=1_000_000)
+    # 响应摘要化：路径子串匹配（逗号分隔）的 JSON 响应，日志只记录排查摘要
+    # （如 /orders/bill/import 丢弃 orders/canonical_orders 等大明细，保留
+    # 文件/区间/计数/建单统计/模板与建档计数），避免审计日志过大、logs 页面
+    # 难排查；置空则恢复完整记录。仅影响日志内容，客户端响应始终完整。
+    access_log_summarize_paths: str = "/orders/bill/import"
+    # 摘要化时完整响应体单独保留的最大字符数（response_full，导出/取证用，
+    # 超限截断并标记 response_full_truncated）；仅摘要命中路径写入，
+    # 不影响其他接口的日志体积。
+    access_log_response_full_max_chars: int = Field(
+        default=1024 * 1024, ge=0, le=5_000_000
+    )
     # 是否信任反向代理头（X-Forwarded-For / X-Real-IP）；
     # 云服务前面有 nginx/负载均衡时开启，才能拿到真实客户端 IP
     access_log_trust_proxy: bool = True

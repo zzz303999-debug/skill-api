@@ -1,0 +1,90 @@
+# 双行表头：上一行为区块名（应收/应付/车辆成本/公司成本），列名行在下一行；区块.列名消歧见设计文档 §3。
+template_id: zhiyi_v1
+family: zhiyi
+name: 利润明细表·志驿家族
+match:
+  fingerprints:
+  - 35b248ad
+  - 9a2f481f
+  - ae4f992b
+  - d17b458f
+  - f3a90ff1
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: true
+  section_fill: forward
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: section_header
+required:
+- bl_no
+- box_type_qty
+# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
+# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
+group_key:
+  primary: bl_no
+  fallback: biz_no
+year_source:
+- filename
+- settlement_row
+columns:
+  order_date: 日期
+  biz_no: 业务编号
+  customer_name: 客户名称
+  customer_contact: 客户联系人
+  customer_no: 客户编号
+  biz_type: 业务类型
+  door_point: 门点
+  contact_person: 联系人
+  contact_phone: 联系电话
+  load_address: 装卸货地址
+  vessel: 船名
+  voyage: 航次
+  ship_date: 船期
+  discharge_port: 卸货港
+  delivery_place: 交货地
+  box_type_qty: 箱型箱量
+  bl_no: 提单号
+  container_no: 箱号
+  seal_no: 封条号
+  work_date: 做箱时间
+  port_area: 港区
+  pickup_point: 提箱点
+  pieces: 件数
+  gross_weight: 毛重
+  load_point: 装卸点
+  return_point: 还箱点
+  plate_no: 车牌号
+  driver_name: 司机
+  fleet: 车队
+  driver_phone: 司机手机
+  remark: 大表备注
+normalizers:
+  order_date: date_flex
+  work_date: date_flex
+  ship_date: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse
+  pieces: to_int
+  gross_weight: to_number
+# 费用段（T15）：志驿仅应收（应付/车辆成本/公司成本实测近空，启用即噪声）；
+# 公司成本→duo_get 一律不启用（待 duo_get 语义验证后配置开启）
+fees:
+  channels:
+    应收: shou
+  mapping:
+    应收.运费: freight
+    应收.待时费: waiting
+    应收.预提费: pre_pick
+    应收.洋山费: yangshan
+    应收.其它费: other
+  unmapped_fee: to_other
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"

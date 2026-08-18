@@ -437,7 +437,9 @@ function renderRow(item) {
     if (item.response) {
       const respTitle = document.createElement("div");
       respTitle.className = "body-title";
-      respTitle.textContent = "响应输出 JSON";
+      respTitle.textContent = item.response_summarized
+        ? "响应输出 JSON（已摘要：仅排查关键字段，完整响应见导出）"
+        : "响应输出 JSON";
       td.appendChild(respTitle);
       const respPre = document.createElement("pre");
       respPre.textContent = fmtBody(item.response, item.response_truncated, "响应");
@@ -512,14 +514,48 @@ function downloadJson(payload, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-// 导出单条请求：请求详情 + 错误信息 + 请求体
-function exportOne(item) {
+// 导出时把 JSON 字符串字段还原为对象（多行缩进），方便人工排查；
+// 截断/非 JSON 内容解析失败则保持原文
+function normalizeExportItem(item) {
+  const out = { ...item };
+  for (const key of ["body", "response", "response_full"]) {
+    const v = out[key];
+    if (typeof v === "string") {
+      try {
+        out[key] = JSON.parse(v);
+      } catch (e) {
+        // 非 JSON（如截断内容）保持原字符串
+      }
+    }
+  }
+  return out;
+}
+
+// 导出单条请求：请求详情 + 错误信息 + 请求体 + 完整响应体（摘要化时单独保留）
+async function exportOne(item) {
   const stamp = (item.ts || "").slice(0, 19).replace(/[:T]/g, "-");
+  let full = item;
+  try {
+    // 列表条目默认剥离 response_full，导出时按 request_id 拉取完整条目
+    const params = new URLSearchParams({
+      request_id: item.request_id,
+      include_full: "1",
+      limit: "1",
+    });
+    const resp = await apiFetch("/api/logs?" + params.toString());
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.items.length) full = data.items[0];
+    }
+  } catch (e) {
+    // 拉取失败时回退当前条目（仅摘要）导出
+  }
+  full = normalizeExportItem(full);
   downloadJson(
     {
       exported_at: new Date().toISOString(),
-      request: item,
-      error: item.error || null,
+      request: full,
+      error: full.error || null,
     },
     "request-" + (item.request_id || stamp || "unknown") + ".json"
   );
@@ -536,6 +572,7 @@ async function exportAll() {
     if (f.file) params.set("file", f.file);
     if (f.path) params.set("path", f.path);
     if (f.status) params.set("status", f.status);
+    params.set("include_full", "1"); // 导出需完整响应体（摘要化条目）
     const items = [];
     const page = 500;
     let off = 0;
@@ -545,7 +582,7 @@ async function exportAll() {
       const resp = await apiFetch("/api/logs?" + params.toString());
       if (!resp.ok) throw new Error("HTTP " + resp.status);
       const data = await resp.json();
-      items.push(...data.items);
+      items.push(...data.items.map(normalizeExportItem));
       off += data.items.length;
       if (!data.items.length || off >= data.total) break;
     }

@@ -1,0 +1,44 @@
+# 阶段三：基础资料阈值建档配置（口径 2026-08-14 用户拍板，见 docs/竞品/阶段三-基础资料阈值录入设计.md）
+# 客户/工厂/司机+车辆累计出现次数 > threshold 才建档（订单与费用照常录入，不阻塞）；
+# 计数键：客户=归一名；工厂=「名+地址」复合键；司机+车辆=「司机名+车牌」组合键；
+# 计数范围：跨全部模板家族全局累计；达阈值当批建档、当批回填。
+# 任何档案类 endpoint 为 TODO/空 → 该档案类自动降级为只计数不建档（端点是运维补给，不 fail fast）。
+# 代码零竞品名零 TMS 值硬编码：分组/部门/业务员等默认值全部在本文件配置。
+master_data:
+  enabled: true
+  threshold: 5
+  # T27b 建档重复语义：TMS 按 client_name 等唯一约束拒单时，msg 命中任一标记
+  # → 视为「外部已存在」（exists_external），登记后不再重试建档（无查询接口，
+  # 无法取 id，订单继续文本提交）；配置化匹配串，不写死单串。
+  duplicate_markers:
+  - 已存在
+  - Duplicate entry
+  - 重复
+  # 建档编码前缀（sn 规则：{prefix}{5 位序号}，序号取该键累计计数；防存量撞名避让位）
+  sn_prefix:
+    client: CLT
+    factory: FAC
+    bailor: BAL
+    truck: TRK
+    driver: DRV
+  # 建档端点（逆推规范 §14 端点表，2026-08-14 补齐 6/6）：建档族在 s3.jxt56.com，
+  # 与订单 tms.jxt56.com 不同宿主——client 按全量 URL 直发（不拼 base、不写死 host）。
+  # bailor_create 保持 TODO：委托人为本阶段只计数不建档。
+  # driver_create 2026-08-14 实证启用：正确端点是 /Car/CarDriver/AddCarDriver
+  # （与客户/工厂/车辆同族），抓包实测 bailor_title/bailor_id 可空（提交成功），
+  # 响应带主键 data.id（294329）——推翻早前 AddDriverGroup 端点方案 A 的三条缺陷
+  # （bailor_title 必填 / bailor_id 主键唯一 / 响应无主键），司机恢复正常建档。
+  endpoints:
+    client_create: "https://s3.jxt56.com/Car/CarClient/AddCarClient"
+    factory_create: "https://s3.jxt56.com/Car/CarFactory/AddCarFactory"
+    bailor_create: "TODO"
+    truck_create: "https://s3.jxt56.com/Car/CarTruck/AddCarTruck"
+    driver_create: "https://s3.jxt56.com/Car/CarDriver/AddCarDriver"
+    price_create: "https://s3.jxt56.com/Car/CarPrice/AddCarPrice"
+  # 建档默认值（逆推规范 §14 最小字段集之外的必要值；未配键不发送）
+  defaults:
+    client:  { cg_id: "4", cg_name: 同行, sys_type: "1", su_id: "15478" }
+    truck:   { section_id: "6987", remind_id: "15478", sys_type: "1", type: bill }
+    driver:  { sinout: 自做, sys_type: "1" }
+    factory: { sys_type: "1" }
+    bailor:  { sys_type: "1", is_involve: "1", is_quoted: "0" }

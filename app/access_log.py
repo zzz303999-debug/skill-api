@@ -143,10 +143,13 @@ def query(
     status: int | None = None,
     request_id: str | None = None,
     ip: str | None = None,
+    include_full: bool = False,
 ) -> dict[str, Any]:
     """查询请求日志，按时间倒序（最新在前）。
 
     支持按路径、文件名（子串）、状态码、请求 ID、客户端 IP 过滤，返回分页结果。
+    include_full=False（默认）时剥离 response_full 大字段，页面列表/内存
+    占用最小；导出等需要完整响应体的场景传 include_full=True。
     """
     _ensure_loaded()
     needle_path = path.strip().lower() if path else None
@@ -166,6 +169,10 @@ def query(
         items = [e for e in items if needle_ip in str(e.get("ip", "")).lower()]
     total = len(items)
     page = items[offset : offset + limit]
+    if not include_full:
+        page = [
+            {k: v for k, v in e.items() if k != "response_full"} for e in page
+        ]
     return {
         "total": total,
         "limit": limit,

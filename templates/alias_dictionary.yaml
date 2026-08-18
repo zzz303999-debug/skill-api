@@ -1,0 +1,97 @@
+# 字段别名字典（全局共享）：标准字段 → 源列名别名列表。
+# 用途：L3 AI 映射前先查此表（命中率越高越省 token、越稳定）；
+# 由 37 个样本实测表头提炼，随模板接入持续累积。
+bl_no:
+- 提单号
+biz_no:
+- 业务编号
+- 运单编号
+order_date:
+- 日期
+- 时间
+- 到厂时间
+- 做箱日期
+- 做柜日期(年-月-日)
+customer_name:
+- 客户名称
+- 客户简称
+customer_no:
+- 客户编号
+customer_contact:
+- 客户联系人
+contact_person:
+- 联系人
+contact_phone:
+- 联系电话
+biz_type:
+- 业务类型
+io_type:
+- 进出口
+door_point:
+- 门点
+- 装卸工厂
+- 装货地点
+box_type_qty:
+- 箱型
+- 箱型箱量
+container_no:
+- 箱号
+seal_no:
+- 封条号
+vessel:
+- 船名
+- 船名/航次
+voyage:
+- 航次
+- 船名/航次
+ship_date:
+- 船期
+discharge_port:
+- 卸货港
+delivery_place:
+- 交货地
+work_date:
+- 做箱时间
+- 做柜日期(年-月-日)
+port_area:
+- 港区
+pickup_point:
+- 提箱点
+- 提箱堆场
+- 提箱场站
+load_point:
+- 装卸点
+- 装卸货地点
+- 装卸地点
+- 装货地点
+load_address:
+- 装卸货地址
+return_point:
+- 还箱点
+- 还箱堆场
+pieces:
+- 件数
+gross_weight:
+- 毛重
+plate_no:
+- 车牌号
+driver_name:
+- 司机
+driver_phone:
+- 司机手机
+fleet:
+- 车队
+remark:
+- 备注
+- 应收备注
+- 大表备注
+port_open_time:
+- 开港时间
+port_cut_time:
+- 截港时间
+port_in_time:
+- 进港时间
+shipping_company:
+- 船公司
+cargo_name:
+- 货名

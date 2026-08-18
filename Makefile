@@ -31,4 +31,4 @@ test-mineru-golden:
 	RUN_MINERU_GOLDEN=1 uv run pytest -q -m mineru_golden
 
 lint:
-	uv run ruff check app
+	uv run ruff check app tests
