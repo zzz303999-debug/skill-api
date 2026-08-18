@@ -13,7 +13,7 @@ from app.config import settings
 @pytest.fixture(autouse=True)
 def _isolate_request_log(tmp_path, monkeypatch):
     """所有测试的请求日志重定向到临时目录并重置内存缓冲。"""
-    monkeypatch.setattr(access_log, "_request_log_path", tmp_path / "requests.jsonl")
+    monkeypatch.setattr(access_log, "_request_log_dir", tmp_path / "logs")
     monkeypatch.setattr(
         access_log, "_entries", deque(maxlen=access_log._MAX_MEMORY_ENTRIES)
     )
