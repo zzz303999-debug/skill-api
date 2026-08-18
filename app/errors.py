@@ -41,6 +41,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "order_not_ready": "订单必填信息不完整，无法下单，请补充字段后重试",
     "order_text_parse_failed": "文本订单解析结果校验失败，请检查输入文本格式",
     "order_upstream_error": "订单系统拒绝了请求或不可达，请稍后重试",
+    "duplicate_bill": "账单已全部创建过，本次未录入",
     # ---- 限流 ----
     "rate_limited": "请求过于频繁，已被限流，请稍后重试",
     "server_busy": "服务繁忙（并发处理任务已满），请稍后重试",
@@ -120,3 +121,13 @@ class ParseError(SkillAPIError):
 
     http_status = 502
     code = "parse_error"
+
+
+class DuplicateBillError(SkillAPIError):
+    """409：竞品账单 create 模式重复上传且全部命中成功单注册表（无新建）。
+
+    details 携带 success_sns（已创建的业务编号）与 summary，供调用方直接排查。
+    """
+
+    http_status = 409
+    code = "duplicate_bill"
