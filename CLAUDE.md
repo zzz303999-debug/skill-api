@@ -250,7 +250,7 @@ messages = [
 分支模型与命名遵循 `docs/分支管理规范.md`（简化版 GitFlow）：
 
 - 主干：`dev`（开发）、`main`（生产）
-- 功能分支：`feature/<kebab-case>`，从 `dev` 拉取，合入后删除远程分支
+- 功能分支：`feature/<kebab-case>`，从 `dev` 拉取，合入 `dev` 后**保留分支不删除**（供追溯与回滚）
 - 其他类型：`fix/` `hotfix/` `release/` `refactor/` `docs/` `test/`
 - 分支要短命，避免长期分叉；提交前缀（Conventional Commits）与分支前缀对齐
 
