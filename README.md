@@ -112,9 +112,9 @@ chmod +x scripts/deploy.sh
 请求的**时间、客户端 IP、方法、路径、上传文件名与大小、耗时、状态码、错误码
 和请求 ID**，IP 单元格悬停可看 UA 与 `X-Forwarded-For`；**点击带 ▼ 的行可
 展开查看完整请求体 JSON**（JSON 请求自动美化格式化，截断会标注）。支持按
-IP/文件名/路径/状态码筛选、自动刷新（10s）与分页加载。日志写入
-`storage/logs/requests.jsonl`，服务重启后仍可查询历史；`/logs` 与
-`/api/logs` 自身的请求不记录。
+IP/文件名/路径/状态码筛选、自动刷新（10s）与分页加载。日志按天写入
+`storage/logs/requests-YYYY-MM-DD.jsonl`（服务重启后仍可查询近期历史），
+过期文件按日志时间自动整文件清理；`/logs` 与 `/api/logs` 自身的请求不记录。
 
 ### `GET /api/logs`
 请求访问日志查询接口，返回 JSON（时间倒序）：
@@ -242,7 +242,7 @@ curl -X POST http://localhost:9000/skills/tuoshu/extract \
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败时是否回退原有解析流程，默认 `true` |
 | `MINERU_OCR_CONCURRENCY` | MinerU OCR 并发数，默认 4 |
 | `STORAGE_DIR` | 存储目录，默认 `./storage` |
-| `STORAGE_KEEP_HOURS` | 存储文件保留小时数，默认 24；审计场景建议调大（如 720 = 30 天） |
+| `STORAGE_KEEP_HOURS` | 日志/文件保留小时数，默认 24；审计场景建议调大（如 720 = 30 天）。按天日志文件按日志时间整文件清理（粒度天，实际保留约 ceil(小时/24)+1 天） |
 | `ACCESS_LOG_RECORD_BODY` | 是否记录 JSON 请求体，默认 `true` |
 | `ACCESS_LOG_BODY_MAX_CHARS` | 请求体记录最大字符数，默认 4096，超出截断 |
 | `ACCESS_LOG_TRUST_PROXY` | 是否信任 `X-Forwarded-For`/`X-Real-IP` 记录真实客户端 IP，默认 `true` |

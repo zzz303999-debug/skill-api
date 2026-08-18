@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.core import registry
@@ -475,3 +477,204 @@ def test_query_include_full_false_strips_other_paths_too():
     assert client.get("/healthz").status_code == 200
     entry = _items(client.get("/api/logs").json())[0]
     assert "response_full" not in entry
+
+
+# ---------- 存储层：按天分文件 / 轮转 / 过期清理 / 回填 ----------
+
+
+def _log_dir() -> Path:
+    import app.access_log as access_log
+
+    log_dir = access_log._log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def test_record_writes_daily_files_by_ts():
+    """按日志时间戳写入当日文件 requests-YYYY-MM-DD.jsonl。"""
+    from datetime import UTC, datetime, timedelta
+
+    import app.access_log as access_log
+
+    today = datetime.now(UTC).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    access_log.record({"path": "/a", "ts": f"{yesterday}T10:00:00+00:00"})
+    access_log.record({"path": "/b", "ts": f"{today.isoformat()}T10:00:00+00:00"})
+    log_dir = _log_dir()
+    assert (log_dir / f"requests-{yesterday}.jsonl").exists()
+    assert (log_dir / f"requests-{today.isoformat()}.jsonl").exists()
+    lines = (log_dir / f"requests-{yesterday}.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert len(lines) == 1
+    assert '"path": "/a"' in lines[0]
+
+
+def test_record_without_ts_uses_today_file():
+    """无 ts 时补当前时间并写入当日文件。"""
+    from datetime import UTC, datetime
+
+    import app.access_log as access_log
+
+    access_log.record({"path": "/c"})
+    today = datetime.now(UTC).date().isoformat()
+    assert (_log_dir() / f"requests-{today}.jsonl").exists()
+
+
+def test_query_covers_multiple_daily_files():
+    """跨日写入的日志都能在内存缓冲查到（最新在前）。"""
+    from datetime import UTC, datetime, timedelta
+
+    import app.access_log as access_log
+
+    today = datetime.now(UTC).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    access_log.record({"path": "/a", "ts": f"{yesterday}T10:00:00+00:00"})
+    access_log.record({"path": "/b", "ts": f"{today.isoformat()}T10:00:00+00:00"})
+    payload = access_log.query(limit=10)
+    assert payload["total"] == 2
+    assert [e["path"] for e in payload["items"]] == ["/b", "/a"]
+
+
+def test_rotate_archives_daily_file_with_increment():
+    """单日文件超限轮转归档为 .N，编号递增不覆盖旧归档。"""
+    from datetime import UTC, datetime
+
+    import app.access_log as access_log
+
+    today = datetime.now(UTC).date().isoformat()
+    log_dir = _log_dir()
+    access_log.record({"path": "/x", "ts": f"{today}T10:00:00+00:00"})
+    daily = log_dir / f"requests-{today}.jsonl"
+    access_log._rotate_log_file(daily)
+    assert (log_dir / f"requests-{today}.jsonl.1").exists()
+    # 主文件重新生成后再次轮转 → .2，.1 保留不覆盖
+    access_log.record({"path": "/y", "ts": f"{today}T11:00:00+00:00"})
+    access_log._rotate_log_file(daily)
+    assert (log_dir / f"requests-{today}.jsonl.1").exists()
+    assert (log_dir / f"requests-{today}.jsonl.2").exists()
+
+
+def test_cleanup_expired_removes_files_by_ts(monkeypatch):
+    """过期按天文件按日志 ts（文件名日期）删除，归档同日删除，不依赖 mtime。"""
+    from datetime import UTC, datetime, timedelta
+
+    import app.access_log as access_log
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "storage_keep_hours", 48)  # keep_days=2
+    today = datetime.now(UTC).date()
+    for delta in (3, 2, 0):
+        day = (today - timedelta(days=delta)).isoformat()
+        (_log_dir() / f"requests-{day}.jsonl").write_text(
+            '{"path": "/x"}\n', encoding="utf-8"
+        )
+    expired_day = (today - timedelta(days=3)).isoformat()
+    (_log_dir() / f"requests-{expired_day}.jsonl.1").write_text(
+        '{"path": "/old"}\n', encoding="utf-8"
+    )
+    access_log._cleanup_expired(_log_dir())
+    assert not (_log_dir() / f"requests-{expired_day}.jsonl").exists()
+    assert not (_log_dir() / f"requests-{expired_day}.jsonl.1").exists()
+    assert (_log_dir() / f"requests-{(today - timedelta(days=2)).isoformat()}.jsonl").exists()
+    assert (_log_dir() / f"requests-{today.isoformat()}.jsonl").exists()
+
+
+def test_cleanup_removes_legacy_file_by_mtime(monkeypatch):
+    """旧版单文件格式（文件名无日期）按 mtime 兜底清理，新归档保留。"""
+    import os
+    import time
+
+    import app.access_log as access_log
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "storage_keep_hours", 24)
+    log_dir = _log_dir()
+    legacy = log_dir / "requests.jsonl"
+    legacy.write_text('{"path": "/old"}\n', encoding="utf-8")
+    old = time.time() - 25 * 3600  # 25 小时前 → 过期
+    os.utime(legacy, (old, old))
+    fresh = log_dir / "requests.jsonl.1"
+    fresh.write_text('{"path": "/new"}\n', encoding="utf-8")  # mtime 新 → 保留
+    access_log._cleanup_expired(log_dir)
+    assert not legacy.exists()
+    assert fresh.exists()
+
+
+def test_cleanup_ignores_unrelated_files():
+    """日期非法/无关文件不按 ts 删除（mtime 新则保留）。"""
+    import app.access_log as access_log
+
+    log_dir = _log_dir()
+    unrelated = log_dir / "requests-abc.jsonl"  # 日期非法 → mtime 兜底
+    unrelated.write_text('{"path": "/x"}\n', encoding="utf-8")
+    other = log_dir / "other.txt"
+    other.write_text("not a log\n", encoding="utf-8")
+    access_log._cleanup_expired(log_dir)
+    assert unrelated.exists()
+    assert other.exists()
+
+
+def test_backfill_loads_multiple_daily_files():
+    """重启后 query 触发回填：多个按天文件尾部进内存，最新在前。"""
+    from datetime import UTC, datetime, timedelta
+
+    import app.access_log as access_log
+
+    today = datetime.now(UTC).date()
+    yesterday = (today - timedelta(days=1)).isoformat()
+    log_dir = _log_dir()
+    (log_dir / f"requests-{yesterday}.jsonl").write_text(
+        f'{{"path": "/old", "ts": "{yesterday}T10:00:00+00:00"}}\n',
+        encoding="utf-8",
+    )
+    (log_dir / f"requests-{today.isoformat()}.jsonl").write_text(
+        f'{{"path": "/new", "ts": "{today.isoformat()}T10:00:00+00:00"}}\n',
+        encoding="utf-8",
+    )
+    payload = access_log.query(limit=10)
+    assert payload["total"] == 2
+    assert [e["path"] for e in payload["items"]] == ["/new", "/old"]
+
+
+def test_backfill_orders_archive_before_main_file():
+    """回填时同日归档（.N）早于主文件，时间顺序正确。"""
+    from datetime import UTC, datetime
+
+    import app.access_log as access_log
+
+    today = datetime.now(UTC).date().isoformat()
+    log_dir = _log_dir()
+    (log_dir / f"requests-{today}.jsonl.1").write_text(
+        f'{{"path": "/archived", "ts": "{today}T10:00:00+00:00"}}\n',
+        encoding="utf-8",
+    )
+    (log_dir / f"requests-{today}.jsonl").write_text(
+        f'{{"path": "/current", "ts": "{today}T11:00:00+00:00"}}\n',
+        encoding="utf-8",
+    )
+    payload = access_log.query(limit=10)
+    assert [e["path"] for e in payload["items"]] == ["/current", "/archived"]
+
+
+def test_maybe_maintain_rotates_and_cleans(monkeypatch):
+    """写入达到检查点：单日文件超限自动轮转，过期文件按 ts 清理。"""
+    from datetime import UTC, datetime, timedelta
+
+    import app.access_log as access_log
+    from app.config import settings
+
+    monkeypatch.setattr(access_log, "_ROTATE_CHECK_INTERVAL", 1)
+    monkeypatch.setattr(access_log, "_MAX_LOG_FILE_BYTES", 1)  # 非空文件即超限
+    monkeypatch.setattr(settings, "storage_keep_hours", 1)  # keep_days=1
+    log_dir = _log_dir()
+    today = datetime.now(UTC).date()
+    access_log.record({"path": "/big"})  # 写入即触发维护
+    assert (log_dir / f"requests-{today.isoformat()}.jsonl.1").exists()
+    # 清理同时执行：保留窗口外的文件被删
+    expired = (today - timedelta(days=2)).isoformat()
+    (log_dir / f"requests-{expired}.jsonl").write_text(
+        '{"path": "/old"}\n', encoding="utf-8"
+    )
+    access_log.record({"path": "/big2"})  # 再次触发维护
+    assert not (log_dir / f"requests-{expired}.jsonl").exists()
