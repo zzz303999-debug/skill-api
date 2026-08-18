@@ -174,11 +174,47 @@ def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     return report
 
 
+def _reject_unknown_box_types(orders: list, force: bool) -> None:
+    """箱型白名单校验（2026-08-18）：标准代码形态箱型必须命中 TMS 箱型白名单，
+    未命中 → 该单 create_result 置失败（unknown_box_type，不调下游；force 跳过）。
+    既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交；
+    已标记 skipped 的单不重复校验（历史成功单必然合法）。
+    """
+    if force:
+        return
+    from .box_whitelist import check_unknown_box_types
+
+    for order in orders:
+        if order.create_result is not None:
+            continue
+        if isinstance(getattr(order, "box_groups", None), list):
+            types = [g.b_type for g in order.box_groups if getattr(g, "b_type", None)]
+        else:
+            types = [
+                box.get("b_type")
+                for box in (order.order_data or {}).get("box", []) or []
+                if isinstance(box, dict) and box.get("b_type")
+            ]
+        unknown = check_unknown_box_types(types)
+        if unknown:
+            order.create_result = {
+                "success": False,
+                "sn": None,
+                "error": {
+                    "code": "unknown_box_type",
+                    "message": f"系统没有此箱型：{'、'.join(unknown)}，请联系客服",
+                    "description": "箱型不在 TMS 支持清单中，请联系客服或改用支持的箱型",
+                    "details": {"unknown_box_types": unknown},
+                },
+            }
+
+
 def build_result(
     *,
     filename: str,
     file_bytes: bytes,
     create_order: bool = False,
+    force_unknown_box_types: bool = False,
 ) -> BillParseResult:
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
@@ -186,6 +222,9 @@ def build_result(
     skipped, created}；凭证失败抛 UpstreamError（502，不逐单执行）。meta 含
     source_sha256 / source_bytes / parsed_at / parser / raw_rows / template /
     unmatched_headers。
+    箱型白名单（2026-08-18）：create 模式提交前校验标准代码形态箱型是否命中
+    TMS 箱型白名单，未命中单拒绝（unknown_box_type，不调下游）；非标表述
+    不校验（既有规则不变）；force_unknown_box_types=true 跳过校验强制提交。
     """
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
@@ -291,6 +330,11 @@ def build_result(
     upstream = None
     file_sha256 = _sha256(file_bytes)
     if create_order:
+        # 箱型白名单校验（2026-08-18）：标准代码形态箱型必须命中 TMS 箱型白名单，
+        # 未命中 → 该单拒绝（unknown_box_type，不调下游；调用方可 force 强制提交）。
+        # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
+        _reject_unknown_box_types((*canonical_orders, *orders), force_unknown_box_types)
+
         if orders:
             # 既有语义：双通道下单（行为语义不变）
             create_orders(orders, source_sha256=file_sha256)

@@ -792,6 +792,7 @@ async def import_bill(
     file: Annotated[UploadFile, File()],
     request: Request,
     create_order: bool = Form(default=False),
+    force_unknown_box_types: bool = Form(default=False),
 ) -> BillParseResult:
     """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
 
@@ -802,6 +803,8 @@ async def import_bill(
     请求自动记录访问日志（文件名/大小/耗时/状态码）。
     create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
     避免调用方把「已创建过」误判为成功（details 携带已创建业务编号）。
+    force_unknown_box_types=true（默认 false）：跳过箱型白名单校验，TMS 字典外
+    的标准代码箱型（如 40GOH）也照常提交（默认拦截返回「系统没有此箱型，请联系客服」）。
     """
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
@@ -812,6 +815,7 @@ async def import_bill(
             filename=file.filename or "unnamed",
             file_bytes=content,
             create_order=create_order,
+            force_unknown_box_types=force_unknown_box_types,
         )
     )
     # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
