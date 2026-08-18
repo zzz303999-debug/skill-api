@@ -266,14 +266,14 @@ def get_web_key() -> str:
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     web_key = raw.get("web_key")
     if not web_key:
         raise UpstreamError(
             "GetWebKey response has no web_key field",
-            details={"upstream_response": json.dumps(raw, ensure_ascii=False)[:2000]},
+            details={"upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000]},
         )
     log.info("jxt_get_web_key_ok")
     return str(web_key)
@@ -308,7 +308,7 @@ def login(web_key: str) -> str:
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     token = _pick_login_token(raw)
@@ -316,7 +316,7 @@ def login(web_key: str) -> str:
         raise UpstreamError(
             "login response has no token field",
             details={
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
                 "response_keys": sorted(raw),
             },
         )
@@ -374,7 +374,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data_list = raw.get("data")
@@ -534,7 +534,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data_list = raw.get("data")

@@ -98,7 +98,7 @@ def publish_create_order(
                 "upstream_code": parsed.code,
                 "upstream_message": parsed.msg,
                 "upstream_response": (
-                    json.dumps(raw, ensure_ascii=False)[:2000]
+                    json.dumps(raw, ensure_ascii=False, indent=2)[:2000]
                     if not isinstance(raw, str)
                     else raw[:2000]
                 ),

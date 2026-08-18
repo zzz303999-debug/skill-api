@@ -69,12 +69,25 @@ _skill_executor = ThreadPoolExecutor(
 _inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 # 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
-_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
+_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico", "/bill-import", "/bill-import-help"}
 
-# 鉴权豁免路径：健康检查、OpenAPI 文档与日志页面本身（页面无数据）；
+# 鉴权豁免路径：健康检查、OpenAPI 文档与日志/账单上传页面本身（页面无数据）；
 # /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
+# /orders/bill/import 为内网免 key 使用场景豁免（与页面配套，见 /bill-import），
+# 仅限可信内网部署；对外开放部署时应移出豁免并恢复页面 Key 输入。
 _AUTH_FREE_PATHS = frozenset(
-    {"/healthz", "/skills", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/logs"}
+    {
+        "/healthz",
+        "/skills",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/favicon.ico",
+        "/logs",
+        "/bill-import",
+        "/bill-import-help",
+        "/orders/bill/import",
+    }
 )
 
 
@@ -597,6 +610,20 @@ def request_logs_page() -> FileResponse:
     """内置的请求日志查看页面。"""
     static_dir = Path(__file__).resolve().parent / "static"
     return FileResponse(static_dir / "logs.html")
+
+
+@app.get("/bill-import", include_in_schema=False)
+def bill_import_page() -> FileResponse:
+    """竞品账单上传页面（静态页，无数据；上传接口鉴权豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import.html")
+
+
+@app.get("/bill-import-help", include_in_schema=False)
+def bill_import_help_page() -> FileResponse:
+    """竞品账单导入操作手册页面（静态页，无数据；豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import_help.html")
 
 
 def _typed_response_model(skill: SkillBase) -> type[BaseModel]:

@@ -230,7 +230,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                     "details": {
                         "upstream_code": raw.get("code"),
                         "upstream_message": msg,
-                        "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                        "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
                     },
                 },
             }
@@ -239,7 +239,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data = raw.get("data")
@@ -265,7 +265,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                 "message": "已添加但响应未返回主键",
                 "details": {
                     "primary_key": _PRIMARY_KEY_MAP[kind],
-                    "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                    "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
                 },
             },
         }

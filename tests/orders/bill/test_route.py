@@ -250,21 +250,28 @@ class TestFileErrors:
 
 
 class TestAuth:
-    def test_unauthorized(self, monkeypatch):
-        """配置 api_key 后：无凭证/错凭证 401，正确凭证 200。"""
+    def test_import_exempt_from_auth(self, monkeypatch):
+        """配置 api_key 后：/orders/bill/import 鉴权豁免（内网免 key 场景），
+        无凭证/错凭证均放行；其他接口（/api/logs）仍需鉴权。"""
         monkeypatch.setattr(settings, "api_key", "test-secret-key")
         with TestClient(app) as client:
+            # 上传接口豁免：无凭证、错凭证、正确凭证均 200
             r = upload(client, "b.xls", REAL_XLS.read_bytes())
-            assert r.status_code == 401
-            assert r.json()["error"]["code"] == "unauthorized"
+            assert r.status_code == 200
             r = upload(
                 client,
                 "b.xls",
                 REAL_XLS.read_bytes(),
                 headers={"X-API-Key": "wrong-key"},
             )
-            assert r.status_code == 401
+            assert r.status_code == 200
             r = upload(client, "b.xls", REAL_XLS.read_bytes(), headers=AUTH_HEADERS)
+            assert r.status_code == 200
+            # 非豁免接口仍强制鉴权
+            r = client.get("/api/logs")
+            assert r.status_code == 401
+            assert r.json()["error"]["code"] == "unauthorized"
+            r = client.get("/api/logs", headers=AUTH_HEADERS)
             assert r.status_code == 200
 
     def test_missing_file_field_422(self):
