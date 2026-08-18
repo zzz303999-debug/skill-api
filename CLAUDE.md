@@ -245,6 +245,15 @@ messages = [
 - **不打包独立 OCR 引擎**：图片和扫描 PDF 直接走 vision 模型；如需专门 OCR skill，另建子包
 - **不在同步接口里扩展超长任务**：现有 LLM 请求由有界线程池承载；需要多阶段、长批次处理时另建异步任务方案
 
+## 分支管理
+
+分支模型与命名遵循 `docs/分支管理规范.md`（简化版 GitFlow）：
+
+- 主干：`dev`（开发）、`main`（生产）
+- 功能分支：`feature/<kebab-case>`，从 `dev` 拉取，合入后删除远程分支
+- 其他类型：`fix/` `hotfix/` `release/` `refactor/` `docs/` `test/`
+- 分支要短命，避免长期分叉；提交前缀（Conventional Commits）与分支前缀对齐
+
 ## 后续路线
 
 - [ ] 异步任务队列（Redis + RQ 或 SQLite + BackgroundTasks）
