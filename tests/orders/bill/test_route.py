@@ -273,3 +273,109 @@ class TestAuth:
             r = client.post("/orders/bill/import", headers=AUTH_HEADERS)
             assert r.status_code == 422
             assert "detail" in r.json()
+
+
+def _dedup_summary(skipped: int, created: int) -> dict:
+    """构造去重语义的 summary（success 含 skipped 单）。"""
+    total = skipped + created
+    return {
+        "total": total,
+        "success": total,
+        "failed": 0,
+        "skipped": skipped,
+        "created": created,
+        "success_sns": ["EX26080042"] * total,
+        "failed_details": [],
+    }
+
+
+class TestDedupConflict:
+    """去重 409 语义（HTTP 层）：create 模式全部命中 → 409；部分命中 → 200。"""
+
+    @staticmethod
+    def _fake_build_result(monkeypatch, summary: dict):
+        import app.main as main_module
+        from app.orders.bill import BillParseResult
+
+        def fake_build_result(**kwargs):
+            return BillParseResult(
+                file=kwargs["filename"],
+                total_rows=2,
+                order_count=2,
+                create_order=True,
+                summary=summary,
+                meta={},
+            )
+
+        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+
+    def test_all_skipped_returns_409(self, monkeypatch):
+        """全部命中成功单注册表（无新建）→ 409 duplicate_bill + 已存在单号。"""
+        self._fake_build_result(monkeypatch, _dedup_summary(skipped=2, created=0))
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "b.xlsx",
+                b"x",
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert r.status_code == 409
+        body = r.json()
+        assert body["error"]["code"] == "duplicate_bill"
+        assert body["error"]["details"]["success_sns"] == ["EX26080042", "EX26080042"]
+        assert body["error"]["details"]["summary"]["skipped"] == 2
+        assert body["error"]["details"]["summary"]["created"] == 0
+        assert body["error"]["description"]  # 中文说明可展示
+
+    def test_partial_skipped_still_200(self, monkeypatch):
+        """部分命中（有新建）→ 200，明细在 summary（不误报错误）。"""
+        self._fake_build_result(monkeypatch, _dedup_summary(skipped=1, created=1))
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "b.xlsx",
+                b"x",
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["summary"]["skipped"] == 1
+        assert data["summary"]["created"] == 1
+
+    def test_duplicate_upload_full_chain_409(self, monkeypatch, real_xls_bytes):
+        """真实链路：首次创建并登记 → 同文件重导全部命中 → 409（下游 0 次新增）。"""
+        calls = {"addwork": 0}
+
+        def fake_post(url, **_kwargs):
+            if "GetWebKey" in url or "login" in url:
+                return _ok_chain_post(url)
+            if "/Car/Car" in url:  # 建档族（区别于下单 /Car/WorkOut/AddWork）
+                return _archive_post(url)
+            calls["addwork"] += 1
+            return _ok_chain_post(url)
+
+        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        with TestClient(app) as client:
+            first = upload(
+                client,
+                "b.xls",
+                real_xls_bytes,
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+            assert first.status_code == 200
+            second = upload(
+                client,
+                "b.xls",
+                real_xls_bytes,
+                data={"create_order": "true"},
+                headers=AUTH_HEADERS,
+            )
+        assert second.status_code == 409
+        body = second.json()
+        assert body["error"]["code"] == "duplicate_bill"
+        assert body["error"]["details"]["summary"]["created"] == 0
+        assert body["error"]["details"]["summary"]["skipped"] == REAL_ORDER_COUNT
+        assert calls["addwork"] == REAL_ORDER_COUNT  # 重导不再调用下游

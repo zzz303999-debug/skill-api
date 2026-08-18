@@ -33,6 +33,7 @@ from app.core.skill_base import SkillBase, SkillMeta
 from app.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
+    DuplicateBillError,
     ServiceBusyError,
     SkillAPIError,
 )
@@ -772,11 +773,13 @@ async def import_bill(
     响应附 orders[].create_result 与 summary；凭证获取失败返回 502。
     表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
     请求自动记录访问日志（文件名/大小/耗时/状态码）。
+    create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
+    避免调用方把「已创建过」误判为成功（details 携带已创建业务编号）。
     """
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
-    return await _run_in_executor(
+    result = await _run_in_executor(
         partial(
             build_result,
             filename=file.filename or "unnamed",
@@ -784,6 +787,19 @@ async def import_bill(
             create_order=create_order,
         )
     )
+    # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
+    # 便于调用方/监控区分「已存在」与「成功创建」；部分跳过（有新建）仍 200，
+    # 明细在 summary（skipped/created/success_sns）
+    if create_order and result.summary:
+        if result.summary["skipped"] > 0 and result.summary["created"] == 0:
+            raise DuplicateBillError(
+                "all bills already created; nothing new was created",
+                details={
+                    "success_sns": result.summary["success_sns"],
+                    "summary": result.summary,
+                },
+            )
+    return result
 
 
 def _make_extract_route(skill: SkillBase):

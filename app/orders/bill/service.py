@@ -273,10 +273,12 @@ def build_result(
             from .client import create_canonical_orders
 
             create_canonical_orders(canonical_orders, source_sha256=file_sha256)
+        # 与创建分支同管线口径（orders 优先，elif canonical_orders）：双管线并存
+        # 时（同一批数据的两种表示）只统计实际创建管线，避免 summary 计数翻倍
+        # （去重预判标记了两边，created 统计不再合并计数）
+        pipeline = orders if orders else canonical_orders
         created = [
-            o
-            for o in (*canonical_orders, *orders)
-            if getattr(o, "create_result", None)
+            o for o in pipeline if getattr(o, "create_result", None)
         ]
         summary = {
             "total": len(canonical_orders) or len(orders),

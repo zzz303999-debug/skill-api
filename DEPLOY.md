@@ -216,7 +216,7 @@ sudo journalctl -u skill-api -n 200 --no-pager
 | `MINERU_SHM_SIZE` | `8g` | MinerU 容器共享内存 |
 | `MINERU_COMMAND` | `mineru-api --host 0.0.0.0 --port 8888` | MinerU 容器启动命令 |
 | `STORAGE_DIR` | `./storage` | 本地存储目录（容器内为 `/app/storage`） |
-| `STORAGE_KEEP_HOURS` | `24` | 临时文件保留小时数 |
+| `STORAGE_KEEP_HOURS` | `24` | 日志/临时文件保留小时数；按天日志文件按日志时间整文件清理（粒度天） |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
 | `SKILL_API_IMAGE` | 无默认 | 镜像部署时指定 API 镜像版本（见 4.2），**禁止 latest** |
 
@@ -333,7 +333,7 @@ HTTP 200 且 `status=ok` 表示进程可响应。`dependencies` 反映核心依�
 
 - Docker 镜像自带 HEALTHCHECK，K8s liveness/readiness probe 也用它
 - 建议从另一台机器或云拨测每分钟请求 `/healthz`，连续失败发告警（企业微信等）
-- 请求日志：写入 `storage/logs/requests.jsonl`（服务重启仍可查），浏览器访问 `http://<host>:9000/logs` 查看，接口为 `GET /api/logs`
+- 请求日志：按天写入 `storage/logs/requests-YYYY-MM-DD.jsonl`（服务重启仍可查近期历史，过期文件按日志时间自动清理），浏览器访问 `http://<host>:9000/logs` 查看，接口为 `GET /api/logs`
 
 ## 11. 接口调用示例（含鉴权）
 
@@ -400,7 +400,7 @@ curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
 ## 12. 持久化与数据
 
 - 当前版本**无强持久化需求**：存储目录 `/app/storage`（compose 已挂载 `./storage`），用于临时文件与请求日志
-- `STORAGE_KEEP_HOURS=24` 自动清理过期临时文件
+- `STORAGE_KEEP_HOURS=24` 自动清理过期临时文件；请求日志按天分文件（`requests-YYYY-MM-DD.jsonl`），过期文件按日志时间整文件清理
 - 建议定期备份：`./storage` 目录 + `.env` 文件
 
 ## 13. 上线验收
