@@ -299,7 +299,7 @@ certbot renew --dry-run
 
 签发后 certbot 会自动写入证书路径（`/etc/letsencrypt/live/<域名>/`）、启用 443 并把 80 改为 301 跳转；
 模板内已放行 `/.well-known/acme-challenge/` 验证路径，代理参数（X-Forwarded-For 追加语义、
-`client_max_body_size 20m` 与 `API_MAX_UPLOAD_BYTES` 配套、`proxy_read_timeout 210s` 等）在注释中给出参考。
+`client_max_body_size 20m` 与 `API_MAX_UPLOAD_BYTES` 配套、`proxy_read_timeout 3600s` 等）在注释中给出参考。
 
 **安全组对公网只开放 `80/443`，不开放 `9000`。**
 
@@ -440,7 +440,8 @@ curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
 
 ### 调用超时
 - LLM 抽取本身耗时 10-60s 属正常
-- 反向代理 / Ingress 的超时时间要 >= 210s，否则会被截断（见第 9 节）
+- 反向代理 / Ingress 的超时时间要 >= 3600s，否则会被截断（见第 9 节）——竞品账单 create
+  模式逐单串行创建，实测 1850 单 ≈ 54 分钟；更大账单请调用方分批导入或按需再调大
 
 ### `.doc` 文件转换失败（返回 `SCAN_OR_IMAGE_HINT`）
 - 镜像内置 LibreOffice，确认容器内 `soffice` 可用；非 Docker 部署需安装 LibreOffice + `fonts-noto-cjk`

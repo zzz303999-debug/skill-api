@@ -21,6 +21,20 @@ def test_logs_page_returns_html():
     assert "请求日志" in resp.text
 
 
+def test_bill_import_page_returns_html():
+    resp = TestClient(app).get("/bill-import")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "竞品账单导入" in resp.text
+
+
+def test_bill_import_help_page_returns_html():
+    resp = TestClient(app).get("/bill-import-help")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "用户操作手册" in resp.text
+
+
 def test_request_recorded_with_fields():
     client = TestClient(app)
     assert client.get("/healthz").status_code == 200

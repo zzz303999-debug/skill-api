@@ -157,8 +157,8 @@
 
 ### 5.8 创建模式（create_order=true）
 
-- 下游链路：`GetWebKey`（取 web_key）→ `login`（取 token，作 sk 头）→ `AddWork × N`（逐单串行）
-- 凭证获取一次、按需获取不做缓存；凭证获取失败 → 整请求 502 `order_upstream_error`，不逐单执行
+- 下游链路（v1.4，2026-08-19）：调用方登录 TMS 获取 token → 请求头 `sk` 透传 → `AddWork × N`（逐单串行；建档/费目自举同用）；服务端不再换取凭据
+- create 模式缺 `sk` 头 → 400 `bad_request`（不进入解析/下单流程）；sk 无效由下游判定 → 该单 error 透传；preview 零下游调用不要求
 - **下单通道**：AddWork 端点 + `sk` 头 + `create_order=true` + form-data 展平字段（2026-08-13 实测可直连下单）；嵌套 JSON 通道（publishCreateOrder）已弃用（强制要求 userId+roomId，204 拒单）
 - payload 规则：`o_id` 空 = 新增；`type` 固定 1（仅确认出口枚举）；`b` 字段 JSON 双写实测非必需，不再发送；客户 `c_title`=客户名称、`c_name`=客户联系人；`c_id` 恒发（缺键 204 拒单）；箱号 `b_num` 只写首箱（多箱号落点未定，warning 提示）；费用有值的通道整段发射、通道级 note 恒发、合计由我方计算回写
 - 单失败隔离：某单失败不影响后续订单，失败原因完整透传 `create_result.error`（含 code/msg/响应原文）
@@ -257,8 +257,7 @@
 | 费目别名字典 | `config/fee_alias_dictionary.yaml` | 费目名 → 标准费目码 |
 | price_id 映射 | `config/fee_price_map.{env}.yaml` | 按环境隔离；缺文件 fail fast；含 fee_bootstrap 段 |
 | 基础资料 | `config/master_data.yaml` | threshold / sn_prefix / endpoints（6 建档接口）/ defaults / duplicate_markers |
-| 下游凭证 | 环境变量 | ext_app_id / ext_user_id / jxt_open_id |
-| 下单通道 | `JXT_CREATE_CHANNEL` | form（默认）；json 已弃用 |
+| 下游凭证 | 无（v1.4：服务端不再配置/换取，调用方登录 TMS 后经请求头 `sk` 透传） | — |
 
 ## 9. 错误码
 

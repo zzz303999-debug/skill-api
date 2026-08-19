@@ -1,14 +1,13 @@
-"""竞品账单导入下游客户端：GetWebKey → login 取 sk → 逐单下单（双通道）。
+"""竞品账单导入下游客户端：调用方登录 TMS 取 sk → AddWork 表单逐单下单。
 
-对齐《竞品账单导入接口文档》v1.1 §2.2/§3.7/§5.3 与 2026-08-12 业务决策：
-- 凭证获取一次（GetWebKey → login 取 sk），逐单串行下单，不做缓存
-- 下单通道由 JXT_CREATE_CHANNEL 决定：
-  form=AddWork 表单（默认，2026-08-13 起：AddWork 端点 + sk 头 + create_order=true
-  实测可直连下单）；json=嵌套 JSON + sk 头（已弃用：publishCreateOrder 实测强制
-  要求有效 userId+roomId，204 拒单，TODO 删除，见 add_order_json）
+对齐《竞品账单导入接口文档》v1.4 §2.2/§3.7/§5.3 与 2026-08-12 业务决策：
+- 鉴权：sk 由调用方登录 TMS 后经 /orders/bill/import 请求头透传（2026-08-19 起，
+  移除服务端 GetWebKey → login 换取链路），逐单串行下单，不做缓存
+- 下单通道固定 AddWork 表单（2026-08-13 起实测：AddWork 端点 + sk 头 +
+  create_order=true 可直连下单；publishCreateOrder 强制要求 userId+roomId，204
+  拒单，json 通道已移除）
 - 任何情况不自动重试（防重复下单）；单失败不影响后续订单
-- 凭证获取失败 → 抛 UpstreamError（502 order_upstream_error），不逐单执行
-- 超时/网络异常 → 该单 error（order_upstream_error），不中断整批（凭证阶段除外）
+- 超时/网络异常 → 该单 error（order_upstream_error），不中断整批
 - missing_fields 非空的单照常提交（本服务不拦截）
 - 重复上传去重（成功单注册表）：提交前查 imported_registry（per-bl_no 锁包住
   「查重→提交→登记」临界区），命中 → skipped（不调下游，sn 回显首次创建）；
@@ -24,7 +23,6 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.errors import SkillAPIError
 from app.logging_conf import get_logger
 
 from .imported_registry import get_imported_registry, lock_for, normalize
@@ -33,17 +31,20 @@ from .schema import BillOrder
 log = get_logger(__name__)
 
 
-class UpstreamError(SkillAPIError):
-    """下游凭证/系统级失败：502 order_upstream_error（全局异常处理器统一转换）。"""
+def _nan_to_none(_token: str) -> None:
+    """json.loads parse_constant：下游 NaN/Infinity 字面量 → None（JSON null）。
 
-    http_status = 502
-    code = "order_upstream_error"
+    避免透传进响应体后序列化失败（starlette JSONResponse allow_nan=False
+    遇 float nan 抛 ValueError → 500），也避免调用方收到非法 JSON 数值。
+    """
+
+    return None
 
 
 # AddWork 固定值字段（§2.2/§5.3 + 2026-08-11 抓包）：appendCost=true、o_id 新建为空、
-# 图片/多皮重数组为空。duo_get/cost 合计恒发 0.00 仅服务本 json 降级通道的旧链路
-# （BillOrder.order_data 只归集应收，无 pay/duo_get/cost 条目；标准通道四通道
-# 发射见 payload.py _emit_fees/T13，此处不重复构造）
+# 图片/多皮重数组为空。duo_get/cost 合计恒发 0.00（BillOrder.order_data 只归集应收，
+# 无 pay/duo_get/cost 条目；标准通道四通道发射见 payload.py _emit_fees/T13，
+# 此处不重复构造）
 _FIXED_FIELDS: dict[str, str] = {
     "appendCost": "true",
     "o_id": "",
@@ -125,8 +126,8 @@ _SHOU_KEYS: tuple[str, ...] = (
 
 # 不发送字段（§5.3/§2.2 明确）：user_name/car_name/section_name（走 web key 登录身份）、
 # box_type_text/box_type/顶层 b_date/b_date_pick、pay[]/duo_get[]/cost[] 费用条目
-# （本 json 降级通道的旧链路 order_data 只含 shou 费用；标准通道四通道发射见
-# payload.py _emit_fees/T13）、audit_status/b_lock 等状态类键
+# （order_data 只含 shou 费用；标准通道四通道发射见 payload.py _emit_fees/T13）、
+# audit_status/b_lock 等状态类键
 # —— 实现上通过固定键集天然排除，无需额外过滤
 
 _ERROR_DESCRIPTION = "订单系统拒绝了请求或不可达，请稍后重试"
@@ -210,120 +211,6 @@ def _error_result(message: str, *, details: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
-    """POST JSON → dict；网络/HTTP/非 JSON 失败抛 UpstreamError（凭证阶段，全局 502）。"""
-    try:
-        response = httpx.post(url, json=payload, timeout=settings.jxt_timeout_seconds)
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        log.warning(
-            "jxt_credential_network_error",
-            extra={"url": url, "error_type": exc.__class__.__name__},
-        )
-        raise UpstreamError(
-            f"credential API network error: {exc.__class__.__name__}",
-            details={"url": url, "error_type": exc.__class__.__name__},
-        ) from exc
-    if response.status_code >= 400:
-        raise UpstreamError(
-            f"credential API returned an HTTP error: {response.status_code}",
-            details={
-                "url": url,
-                "status_code": response.status_code,
-                "upstream_response": response.text[:2000],
-            },
-        )
-    try:
-        raw = response.json()
-    except ValueError as exc:
-        raise UpstreamError(
-            "credential API returned a non-JSON response",
-            details={"url": url, "body_preview": response.text[:500]},
-        ) from exc
-    if not isinstance(raw, dict):
-        raise UpstreamError(
-            "credential API response is not a JSON object",
-            details={
-                "url": url,
-                "response_type": type(raw).__name__,
-                "body_preview": response.text[:500],
-            },
-        )
-    return raw
-
-
-def get_web_key() -> str:
-    """POST GetWebKey → web_key；code 为数字 200 才取，否则抛 UpstreamError（含上游原文）。"""
-    payload = {
-        "ext_app_id": settings.jxt_ext_app_id,
-        "ext_user_id": settings.jxt_ext_user_id,
-        "jxt_open_id": settings.jxt_jxt_open_id,
-        "order_info": [{}],
-    }
-    raw = _post_json(settings.jxt_getwebkey_url, payload)
-    if raw.get("code") != 200:
-        raise UpstreamError(
-            f"GetWebKey rejected the request: {raw.get('msg', '')}",
-            details={
-                "upstream_code": raw.get("code"),
-                "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
-            },
-        )
-    web_key = raw.get("web_key")
-    if not web_key:
-        raise UpstreamError(
-            "GetWebKey response has no web_key field",
-            details={"upstream_response": json.dumps(raw, ensure_ascii=False)[:2000]},
-        )
-    log.info("jxt_get_web_key_ok")
-    return str(web_key)
-
-
-def _pick_login_token(raw: dict[str, Any]) -> str | None:
-    """从 login 响应中探测 token（#2 实测定论，2026-08-12）。
-
-    实测响应结构：{"code": 200, "data": {"token": "..."}, "msg": "..."}，
-    即实际取值路径 = data.token。候选顺序：data.token → sk → data.sk → token，
-    取第一个非空；字段名再次变化时按此顺序扩展即可（单点维护）。
-    """
-    data = raw.get("data")
-    for value in (
-        data.get("token") if isinstance(data, dict) else None,
-        raw.get("sk"),
-        data.get("sk") if isinstance(data, dict) else None,
-        raw.get("token"),
-    ):
-        if value:
-            return str(value)
-    return None
-
-
-def login(web_key: str) -> str:
-    """POST login → token（AddWork 请求头 sk 值）；候选路径见 _pick_login_token。"""
-    payload = {"port": "tmsWebKey", "web_key": web_key}
-    raw = _post_json(settings.jxt_login_url, payload)
-    if raw.get("code") != 200:
-        raise UpstreamError(
-            f"login rejected the request: {raw.get('msg', '')}",
-            details={
-                "upstream_code": raw.get("code"),
-                "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
-            },
-        )
-    token = _pick_login_token(raw)
-    if not token:
-        raise UpstreamError(
-            "login response has no token field",
-            details={
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
-                "response_keys": sorted(raw),
-            },
-        )
-    log.info("jxt_login_ok")
-    return token
-
-
 def build_add_work_form(order_data: dict[str, Any]) -> dict[str, str]:
     """组装 AddWork 表单（§5.3）：a="{}"、c="{}"、b=URL 编码 JSON（键为展平
     写法、与顶层同内容）、顶层超集展平字段。纯函数，add_work 与联调脚本共用
@@ -338,7 +225,7 @@ def build_add_work_form(order_data: dict[str, Any]) -> dict[str, str]:
 
 
 def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, Any]:
-    """下游下单响应 → create_result（add_work 与 add_order_json 共用同一口径）。
+    """下游下单响应 → create_result（add_work 响应口径）。
 
     code "200"（字符串/数字皆可）→ 成功取 data[0].sn（缺 sn 仍成功，sn=None）；
     成功时原样保留 data[0] 回显（upstream 键，对齐 /orders 的 upstream.data[0]）；
@@ -353,7 +240,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             },
         )
     try:
-        raw = response.json()
+        raw = response.json(parse_constant=_nan_to_none)
     except ValueError:
         return _error_result(
             f"{step} returned a non-JSON response",
@@ -374,7 +261,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data_list = raw.get("data")
@@ -415,38 +302,6 @@ def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     return _parse_create_response(response, step="AddWork")
 
 
-def add_order_json(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
-    """POST 嵌套 JSON 创建一单（与 /orders 同一下游地址）→ create_result。
-
-    body = order_data 嵌套 JSON 原样（含 shou 费用），不带 roomId/userId；鉴权靠
-    header sk（web-key 登录身份，替代 /orders 的 userId/roomId 调用上下文）。
-    响应口径与 add_work 一致（_parse_create_response）：code "200" → 取 data[0].sn。
-
-    TODO: 本通道已弃用（2026-08-13 实测 publishCreateOrder 无论 JSON/form-data/
-    multipart 均强制要求有效 userId+roomId，204 "no: userId no: roomId"；默认已切
-    form=AddWork 直连）。roomId 来源明确前无恢复可能，可删除本函数与
-    flatten_order/_FIXED_FIELDS/_SHOU_KEYS 等依赖链，并移除 config.jxt_create_channel
-    的 json 分支。
-    """
-    try:
-        response = httpx.post(
-            settings.order_api_url,
-            json=order_data,
-            headers={"sk": sk},
-            timeout=settings.jxt_timeout_seconds,
-        )
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        log.warning(
-            "jxt_order_network_error",
-            extra={"error_type": exc.__class__.__name__},
-        )
-        return _error_result(
-            f"order API network error: {exc.__class__.__name__}",
-            details={"error_type": exc.__class__.__name__},
-        )
-    return _parse_create_response(response, step="order API")
-
-
 def _register_imported(bl_no: str, sn, source_sha256: str | None) -> None:
     """登记创建成功单（去重注册表）；登记失败仅记日志，不冒泡。
 
@@ -467,19 +322,17 @@ def _skipped_result(sn: str | None) -> dict[str, Any]:
     return {"success": True, "skipped": True, "sn": sn, "error": None}
 
 
-def create_orders(orders: list[BillOrder], source_sha256: str | None = None) -> None:
+def create_orders(orders: list[BillOrder], sk: str, source_sha256: str | None = None) -> None:
     """逐单串行下单并原地填充 create_result。
 
-    先 GetWebKey → login 取 sk 一次；凭证失败抛 UpstreamError（不逐单执行）；
-    通道由 JXT_CREATE_CHANNEL 决定：json=嵌套 JSON + sk 头（已弃用，204 拒单，
-    见 add_order_json TODO）；form=AddWork 表单（默认，2026-08-13 起）。
+    sk 由调用方登录 TMS 后透传（2026-08-19 起，不再服务端换取）；
+    通道固定 AddWork 表单（2026-08-13 起：AddWork 端点 + sk 头 + create_order=true）。
     单失败不影响后续；任何情况不自动重试；missing_fields 非空照常提交。
     重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
     """
     if not orders:
         return
-    sk = login(get_web_key())
-    submit = add_order_json if settings.jxt_create_channel == "json" else add_work
+    submit = add_work
     for order in orders:
         if order.create_result is not None:
             continue  # service 层预判已标记 skipped → 直接跳过
@@ -511,7 +364,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             },
         )
     try:
-        raw = response.json()
+        raw = response.json(parse_constant=_nan_to_none)
     except ValueError:
         return _error_result(
             "order API returned a non-JSON response",
@@ -534,7 +387,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data_list = raw.get("data")
@@ -589,17 +442,16 @@ def submit_canonical(sk: str, order) -> dict[str, Any]:
     return _parse_canonical_response(response)
 
 
-def create_canonical_orders(orders, source_sha256: str | None = None) -> None:
+def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -> None:
     """TMS 通道逐单串行下单（CanonicalOrder → form-data）并原地填充 create_result。
 
-    先 GetWebKey → login 取 sk 一次（复用既有凭证链路）；凭证失败抛 UpstreamError
-    （不逐单执行）；单失败隔离不中断；任何情况不自动重试（防重复下单）；
-    missing_fields 非空照常提交。响应回取 data[0].sn（TMS 业务编号）与 o_id。
+    sk 由调用方登录 TMS 后透传（2026-08-19 起，不再服务端换取）；单失败隔离
+    不中断；任何情况不自动重试（防重复下单）；missing_fields 非空照常提交。
+    响应回取 data[0].sn（TMS 业务编号）与 o_id。
     重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
     """
     if not orders:
         return
-    sk = login(get_web_key())
     for order in orders:
         if order.create_result is not None:
             continue  # service 层预判已标记 skipped → 直接跳过

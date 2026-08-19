@@ -155,14 +155,10 @@ class TestDedupWithFeeOrders:
 
     @staticmethod
     def _fake_chain(monkeypatch, calls: dict, responses: list):
-        """GetWebKey/login 固定成功；AddWork 按 responses 队列返回。"""
+        """AddWork 按 responses 队列返回（sk 由调用方透传，无凭证链路）。"""
         queue = iter(responses)
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return next(queue)
 
@@ -177,13 +173,13 @@ class TestDedupWithFeeOrders:
             [FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1", "o_id": "2101"}]})],
         )
         first = _fee_order()
-        create_canonical_orders([first])
+        create_canonical_orders([first], "sk")
         assert first.create_result["success"] is True
         assert first.create_result["sn"] == "EX1"
         assert calls["addwork"] == 1
 
         second = _fee_order()  # 同提单号不同对象
-        create_canonical_orders([second])
+        create_canonical_orders([second], "sk")
         assert second.create_result["skipped"] is True
         assert second.create_result["sn"] == "EX1"  # 回显首次创建 sn
         assert calls["addwork"] == 1  # 不重复下单
@@ -200,13 +196,13 @@ class TestDedupWithFeeOrders:
             ],
         )
         first = _fee_order()
-        create_canonical_orders([first])
+        create_canonical_orders([first], "sk")
         assert first.create_result["success"] is False
         assert first.create_result.get("skipped") is None  # 失败非 skipped
         assert calls["addwork"] == 1
 
         retry = _fee_order()
-        create_canonical_orders([retry])
+        create_canonical_orders([retry], "sk")
         assert retry.create_result["success"] is True
         assert retry.create_result.get("skipped") is None  # 未被误拦
         assert retry.create_result["sn"] == "EX2"

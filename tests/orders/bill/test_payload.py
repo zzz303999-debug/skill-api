@@ -206,29 +206,28 @@ class TestSubmitCanonical:
         assert result["error"]["code"] == "order_upstream_error"
         assert result["error"]["details"]["upstream_message"] == "箱型不存在"
 
-    def test_create_canonical_orders_uses_credentials_once(self, monkeypatch):
-        """凭证一次 + 逐单提交；单失败隔离不中断。"""
+    def test_create_canonical_orders_sk_passthrough(self, monkeypatch):
+        """sk 由调用方透传 + 逐单提交；单失败隔离不中断（2026-08-19 起无凭证链路）。"""
         responses = iter(
             [
-                FakeResponse({"code": 200, "web_key": "wk"}),
-                FakeResponse({"code": 200, "data": {"token": "sk"}}),
                 FakeResponse({"code": "200", "data": [{"sn": "EX1"}]}),
                 FakeResponse({"code": "500", "msg": "拒单"}),
                 FakeResponse({"code": "200", "data": [{"sn": "EX3"}]}),
             ]
         )
         posts: list[str] = []
+        sk_seen: list[str | None] = []
 
         def fake_post(url, **_kwargs):
             posts.append(url)
+            sk_seen.append((_kwargs.get("headers") or {}).get("sk"))
             return next(responses)
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         orders = [_sample_order(), _sample_order(bl_no="B2"), _sample_order(bl_no="B3")]
-        create_canonical_orders(orders)
-        assert ["GetWebKey" in u for u in posts].count(True) == 1  # 凭证只取一次
-        assert ["login" in u for u in posts].count(True) == 1
+        create_canonical_orders(orders, "tk-caller")
         assert sum(1 for u in posts if "CreateOrder" in u or "AddWork" in u) == 3
+        assert sk_seen and all(s == "tk-caller" for s in sk_seen)  # sk 原样透传
         assert orders[0].create_result["success"] and orders[0].create_result["sn"] == "EX1"
         assert orders[1].create_result["success"] is False  # 单失败隔离
         assert orders[2].create_result["sn"] == "EX3"  # 后续单不受影响

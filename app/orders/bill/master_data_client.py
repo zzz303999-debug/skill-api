@@ -1,4 +1,4 @@
-"""建档调用器（T18）：复用 /orders 凭证链路（GetWebKey → login 取 sk）+ 六档案 builder。
+"""建档调用器（T18）：sk 由调用方登录 TMS 后透传 + 六档案 builder。
 
 - 端点 URL 从配置取（config/master_data.yaml `endpoints`）；TODO/空 → endpoint_for
   返回 None，编排侧降级为只计数不建档（端点是运维补给，不 fail fast）；
@@ -21,10 +21,8 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.errors import SkillAPIError
 from app.logging_conf import get_logger
 
-from .client import get_web_key, login
 from .master_data import (
     KIND_BAILOR,
     KIND_CLIENT,
@@ -173,7 +171,7 @@ def build_driver_form(
     return form
 
 
-# ---- 建档调用（凭证一次 + 逐条串行；失败结构化，不抛断） ----
+# ---- 建档调用（sk 透传 + 逐条串行；失败结构化，不抛断） ----
 
 
 def _failure_result(message: str, *, details: dict[str, Any]) -> dict[str, Any]:
@@ -230,7 +228,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                     "details": {
                         "upstream_code": raw.get("code"),
                         "upstream_message": msg,
-                        "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                        "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
                     },
                 },
             }
@@ -239,7 +237,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
             },
         )
     data = raw.get("data")
@@ -265,7 +263,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                 "message": "已添加但响应未返回主键",
                 "details": {
                     "primary_key": _PRIMARY_KEY_MAP[kind],
-                    "upstream_response": json.dumps(raw, ensure_ascii=False)[:2000],
+                    "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
                 },
             },
         }
@@ -274,30 +272,14 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
 
 
 def create_archives(
-    forms_by_kind: dict[str, dict[str, dict[str, str]]]
+    forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    """逐档案类逐条串行建档（凭证一次）；返回 {kind: {key: result}}。
+    """逐档案类逐条串行建档（sk 由调用方透传）；返回 {kind: {key: result}}。
 
-    凭证失败（UpstreamError）→ 全部条目结构化失败（不抛断订单流程）；
     单条失败不影响后续；任何情况不自动重试（防重复建档）。
     """
     if not forms_by_kind:
         return {}
-    try:
-        sk = login(get_web_key())
-    except SkillAPIError as exc:
-        # 凭证失败 → 全部条目结构化失败（不抛断订单流程，建档异常不使订单丢失）
-        log.warning("master_data_credential_failed", extra={"error_message": str(exc)})
-        return {
-            kind: {
-                key: _failure_result(
-                    f"credential failed: {exc.message}",
-                    details={"error_type": exc.__class__.__name__},
-                )
-                for key in forms
-            }
-            for kind, forms in forms_by_kind.items()
-        }
 
     results: dict[str, dict[str, dict[str, Any]]] = {}
     for kind, forms in forms_by_kind.items():

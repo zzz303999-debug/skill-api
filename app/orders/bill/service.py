@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from app.errors import BadRequestError
+
 from .aggregator import group_canonical, group_orders
 from .client import create_orders
 from .fee_price_map import apply_price_map
@@ -38,7 +40,7 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
+def _build_fee_reports(output, orders: list, create_order: bool, sk: str = "") -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
     - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
@@ -63,7 +65,7 @@ def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     if orders:
         from .fee_bootstrap import run_fee_bootstrap
 
-        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order)
+        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order, sk=sk)
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -172,19 +174,98 @@ def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     return report
 
 
+def _reject_unknown_box_types(orders: list) -> bool:
+    """文件级箱型白名单校验（2026-08-18 用户拍板）：任一单含标准代码形态且不在
+    白名单的箱型 → 全部未决单拒绝（unknown_box_type，不调下游），返回 True。
+
+    preview 与 create 统一执行（preview 也拒）；已标记 skipped 的单不动
+    （历史成功单必然合法）。单级 message 报该单自己的非法箱型，无非法箱型的
+    单报文件级清单；details.unknown_box_types 同 message 口径。
+    """
+    from .box_whitelist import check_unknown_box_types
+
+    def _types(order) -> list[str]:
+        if isinstance(getattr(order, "box_groups", None), list):
+            return [g.b_type for g in order.box_groups if getattr(g, "b_type", None)]
+        return [
+            box.get("b_type")
+            for box in (order.order_data or {}).get("box", []) or []
+            if isinstance(box, dict) and box.get("b_type")
+        ]
+
+    file_unknown: list[str] = []
+    per_order: dict[int, list[str]] = {}
+    for idx, order in enumerate(orders):
+        if order.create_result is not None:
+            continue  # 已标记（skipped/预判）的单不动
+        unknown = check_unknown_box_types(_types(order))
+        if unknown:
+            per_order[idx] = unknown
+            for t in unknown:
+                if t not in file_unknown:
+                    file_unknown.append(t)
+    if not file_unknown:
+        return False
+    for idx, order in enumerate(orders):
+        if order.create_result is not None:
+            continue
+        order_unknown = per_order.get(idx, [])
+        order.create_result = {
+            "success": False,
+            "sn": None,
+            "error": {
+                "code": "unknown_box_type",
+                "message": (
+                    f"系统没有此箱型：{'、'.join(order_unknown)}，请联系客服"
+                    if order_unknown
+                    else f"文件含非法箱型：{'、'.join(file_unknown)}，请联系客服"
+                ),
+                "description": "箱型不在 TMS 支持清单中，请联系客服",
+                "details": {
+                    "unknown_box_types": order_unknown or file_unknown,
+                    # 全场景业务码统一可达（§3.7/既有规范）：本地拦截等价于该单
+                    # 添加失败，对齐 TMS「新建全部失败 → 204」口径
+                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
+                },
+            },
+        }
+    return True
+
+
 def build_result(
     *,
     filename: str,
     file_bytes: bytes,
     create_order: bool = False,
+    sk: str = "",
 ) -> BillParseResult:
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
     create_order=True 时先逐单创建，再填 summary {total, success, failed,
-    skipped, created}；凭证失败抛 UpstreamError（502，不逐单执行）。meta 含
-    source_sha256 / source_bytes / parsed_at / parser / raw_rows / template /
-    unmatched_headers。
+    skipped, created}；sk 由调用方登录 TMS 后透传（2026-08-19 起；create 模式
+    sk 缺失/空白由本层防御性拒绝 400，与路由层同语义——build_result 为公开
+    函数，防第二入口漏传 sk 时以空 token 逐单静默失败而返 200）。
+    meta 含 source_sha256 / source_bytes / parsed_at /
+    parser / raw_rows / template / unmatched_headers。
+    箱型白名单（2026-08-18 用户拍板）：**文件级校验**——preview 与 create 统一
+    执行，任一单含标准代码形态且不在白名单的箱型（如 40GOH）→ 全部未决单拒绝
+    （unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），不调下游；
+    无强制提交通道；非标表述（大冷/拼箱/17M飞翼车等）不校验（既有规则不变）。
     """
+    # 防御性校验（置于解析前，零 IO 快速失败）：路由层已拦截，此处为公开函数
+    # 兑底——未来第二入口漏传 sk 时同样返 400，而非空 token 逐单失败返 200
+    if create_order and not (sk or "").strip():
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
     try:
@@ -196,6 +277,29 @@ def build_result(
     finally:
         if tmp_path:
             os.unlink(tmp_path)
+
+    # 单次导入行数上限（一柜一行）：preview/create 一致拦截，超限零副作用直接拒绝。
+    # 双管线同口径统计（与 meta.raw_rows 一致）：标准字段（canonical_rows）与
+    # 既有语义（rows）任一超限即拒绝（标准字段模板下 rows 恒空，只看 rows 会漏拦）
+    from app.config import settings
+
+    total_rows = len(output.rows) + len(output.canonical_rows or [])
+    if total_rows > settings.bill_import_max_rows:
+        raise BadRequestError(
+            f"bill has too many rows: {total_rows} > {settings.bill_import_max_rows}",
+            code="too_many_rows",
+            details={
+                "total_rows": total_rows,
+                "max_rows": settings.bill_import_max_rows,
+                # 对齐 create 模式 upstream 结构（code/msg/data），
+                # 保证对接方统一按 upstream.code 判断时错误码可达
+                "upstream": {
+                    "code": "400",
+                    "msg": "数据量过大，联系人工客服",
+                    "data": [],
+                },
+            },
+        )
 
     # 双管线分流：标准字段（canonical_rows）→ CanonicalOrder；既有语义 → BillOrder
     agg = group_orders(output.rows, output.period)
@@ -246,11 +350,18 @@ def build_result(
     # 未决单（去重后待处理）：preview 时未预判，即全量
     pending = [o for o in canonical_orders if o.create_result is None]
 
+    # 文件级箱型白名单校验（2026-08-18 用户拍板）：preview 与 create 统一执行，
+    # 任一单含非法箱型（标准代码形态不在白名单，如 40GOH）→ 全部未决单拒绝，
+    # 不调下游（置于费目自举/建档之前，被拒文件零副作用）；无强制提交通道。
+    # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
+    all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
+    _reject_unknown_box_types(all_pending)
+
     fee_reconciliation = None
     if pending and output.canonical_rows is not None:
         # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
         fee_reconciliation = _build_fee_reports(
-            output, pending, create_order=create_order
+            output, pending, create_order=create_order, sk=sk
         )
 
     # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
@@ -260,7 +371,7 @@ def build_result(
     if pending:
         from .master_data import run_master_data
 
-        master_data_report = run_master_data(pending, create_order=create_order)
+        master_data_report = run_master_data(pending, create_order=create_order, sk=sk)
 
     summary = None
     upstream = None
@@ -268,11 +379,11 @@ def build_result(
     if create_order:
         if orders:
             # 既有语义：双通道下单（行为语义不变）
-            create_orders(orders, source_sha256=file_sha256)
+            create_orders(orders, sk, source_sha256=file_sha256)
         elif canonical_orders:
             from .client import create_canonical_orders
 
-            create_canonical_orders(canonical_orders, source_sha256=file_sha256)
+            create_canonical_orders(canonical_orders, sk, source_sha256=file_sha256)
         # 与创建分支同管线口径（orders 优先，elif canonical_orders）：双管线并存
         # 时（同一批数据的两种表示）只统计实际创建管线，避免 summary 计数翻倍
         # （去重预判标记了两边，created 统计不再合并计数）
@@ -296,27 +407,45 @@ def build_result(
             "success_sns": [
                 o.create_result.get("sn") for o in created if o.create_result.get("success")
             ],
-            # 失败单明细（单号 + 错误码/消息），人工可查
+            # 失败单明细（单号 + 错误码/消息/上游业务码），人工可查；本地拦截
+            # （unknown_box_type）额外带 error_upstream（对齐 TMS 204 失败口径）
             "failed_details": [
                 {
-                    "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-                    "error_code": (o.create_result.get("error") or {}).get("code"),
-                    "error_message": (o.create_result.get("error") or {}).get("message"),
+                    **{
+                        "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
+                        "error_code": (o.create_result.get("error") or {}).get("code"),
+                        "error_message": (o.create_result.get("error") or {}).get("message"),
+                    },
+                    **(
+                        {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
+                        if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
+                        else {}
+                    ),
                 }
                 for o in created
                 if not o.create_result.get("success")
             ],
         }
-        # 上游原始回显（对齐 /orders 的 upstream：code 200 + msg 添加成功 + 每单回显）；
-        # 全部失败时保持 null（失败原因见 summary.failed_details）
+        # 上游回显（对齐 TMS 通道格式，见《逆推规范》§3）：确有新建成功单 →
+        # code "200" + msg 添加成功 + data 成功单原始回显（含 sn/sns；成功但无
+        # 回显时 data 为空仍为 200）；新建全失败 → code "204" + msg 添加失败 +
+        # 空 data；全部 skipped（无新建动作）保持 null（与「无单可创建」同语义，
+        # 路由层转 409；失败原因见 summary.failed_details）
         upstream_data = [
             o.create_result.get("upstream")
             for o in created
             if o.create_result.get("success") and o.create_result.get("upstream")
         ]
-        upstream = (
-            {"code": 200, "msg": "添加成功", "data": upstream_data} if upstream_data else None
+        created_ok = any(
+            o.create_result.get("success") and not o.create_result.get("skipped")
+            for o in created
         )
+        if created and not all(o.create_result.get("skipped") for o in created):
+            upstream = (
+                {"code": "200", "msg": "添加成功", "data": upstream_data}
+                if created_ok
+                else {"code": "204", "msg": "添加失败", "data": []}
+            )
 
     meta: dict = {
         "source_sha256": file_sha256,

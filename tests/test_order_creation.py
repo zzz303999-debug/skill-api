@@ -264,7 +264,10 @@ def test_publish_passes_through_full_upstream_error(monkeypatch):
     assert caught.value.details == {
         "upstream_code": "204",
         "upstream_message": "no: userId",
-        "upstream_response": '{"code": "204", "msg": "no: userId", "data": [{"sn": "EX26040001"}]}',
+        "upstream_response": (
+            '{\n  "code": "204",\n  "msg": "no: userId",\n  "data": [\n'
+            '    {\n      "sn": "EX26040001"\n    }\n  ]\n}'
+        ),
     }
 
 

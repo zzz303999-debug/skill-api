@@ -6,7 +6,7 @@
 拒单/无主键/已存在）+ 四接口并行失败隔离 + service 集成不阻断。
 
 - 建档调用一律 mock（零网络）；端点/默认值全走注入配置（测试值）；
-- 凭证 mock：get_web_key/login 直接返回（聚焦建档端点，不重复测凭证链）。
+- sk 由调用方透传（run_master_data 显式传 sk，聚焦建档端点）。
 """
 
 from __future__ import annotations
@@ -96,8 +96,6 @@ def fake_http(monkeypatch):
             return responder(url, data=data)
 
         monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
-        monkeypatch.setattr(md_client_module, "get_web_key", lambda: "wk")
-        monkeypatch.setattr(md_client_module, "login", lambda web_key: "sk-token")
 
     _install.captured = captured
     return _install
@@ -144,7 +142,7 @@ class TestClientCreate:
     def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse(_success(KIND_CLIENT)))
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert report["archived"][0] == {
             "kind": KIND_CLIENT,
             "key": client_key("锦煦"),
@@ -168,7 +166,7 @@ class TestClientCreate:
         fake_http(lambda url, **kw: FakeResponse(_success(KIND_CLIENT)))
         run_master_data(
             [_make_order(customer="客户甲", customer_contact=None, contact_phone=None)],
-            create_order=True,
+            create_order=True, sk="sk-token",
         )
         form = fake_http.captured[0]["data"]
         assert "data[0][n]" not in form and "data[0][p]" not in form  # 非必填空值省略键
@@ -177,7 +175,7 @@ class TestClientCreate:
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"msg": "boom"}, status_code=500))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True)
+        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "HTTP error: 500" in failed[0]["reason"]
         assert report["archived"] == []
@@ -187,7 +185,7 @@ class TestClientCreate:
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True)
+        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "not a JSON object" in failed[0]["reason"]
 
@@ -195,7 +193,7 @@ class TestClientCreate:
         """code 非 "200"（拒单）→ failed；msg 不命中 duplicate 标记。"""
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"code": "500", "msg": "分组不存在"}))
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "分组不存在" in failed[0]["reason"]
 
@@ -208,7 +206,7 @@ class TestClientCreate:
 
         fake_http(responder)
         # 仅客户候选（无门点无司机，避免工厂依赖/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True)
+        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         assert report["failed"] == []
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "已存在" in ext[0]["message"]
@@ -220,7 +218,7 @@ class TestClientCreate:
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": []}))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True)
+        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "未返回主键" in ext[0]["message"]
         assert report["failed"] == []
@@ -236,7 +234,7 @@ class TestFactoryCreate:
                 _success(KIND_CLIENT) if "Client" in url else _success(KIND_FACTORY)
             )
         )
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_FACTORY for a in report["archived"])
         factory_req = next(r for r in fake_http.captured if "Factory" in r["url"])
         form = factory_req["data"]
@@ -262,7 +260,7 @@ class TestTruckCreate:
                 else _success(KIND_DRIVER) if "Driver" in url else _success(KIND_CLIENT)
             )
         )
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_TRUCK for a in report["archived"])
         truck_req = next(r for r in fake_http.captured if "Truck" in r["url"])
         form = truck_req["data"]
@@ -284,7 +282,7 @@ class TestDriverCreate:
                 else _success(KIND_DRIVER) if "Driver" in url else _success(KIND_CLIENT)
             )
         )
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_DRIVER for a in report["archived"])
         driver_req = next(r for r in fake_http.captured if "Driver" in r["url"])
         form = driver_req["data"]
@@ -320,7 +318,7 @@ class TestParallelIsolation:
     def test_all_four_succeed_in_one_run(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(None))
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert [a["kind"] for a in report["archived"]] == [
             KIND_CLIENT,
             KIND_FACTORY,
@@ -332,7 +330,7 @@ class TestParallelIsolation:
     def test_client_failure_blocks_factory_but_not_truck_driver(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(KIND_CLIENT))
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         # 客户失败 → 工厂因依赖前置跳过（failed 原因）；车辆/司机链路不受影响
         assert any(f["kind"] == KIND_CLIENT for f in report["failed"])
         assert any(f["kind"] == KIND_FACTORY and "所属客户未建档" in f["reason"] for f in report["failed"])
@@ -344,7 +342,7 @@ class TestParallelIsolation:
     def test_driver_failure_does_not_break_others(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(KIND_DRIVER))
-        report = run_master_data([_make_order()], create_order=True)
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
         assert any(f["kind"] == KIND_DRIVER for f in report["failed"])
         assert [a["kind"] for a in report["archived"]] == [
             KIND_CLIENT,
@@ -355,6 +353,46 @@ class TestParallelIsolation:
         assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 1
 
 
+class TestSkPassthroughAllKinds:
+    """sk 透传防回归：客户/工厂/车辆/司机四类建档请求头一律携带调用方 sk。
+
+    既有用例仅客户类断言过 headers（TestClientCreate），工厂/车辆/司机只断言
+    请求体字段（2026-08-19 review 发现的覆盖缺口）；漏传 sk 时下游 203 拒单，
+    且 create_archives 不校验 sk 非空——靠本断言守住透传链不回归。
+    """
+
+    def test_all_four_kinds_carry_sk_header(self, md_config, fake_http, real_archives):
+        md_config(_md_cfg(threshold=1))
+        fake_http(
+            lambda url, **kw: FakeResponse(
+                _success(KIND_TRUCK)
+                if "Truck" in url
+                else _success(KIND_DRIVER)
+                if "Driver" in url
+                else _success(KIND_FACTORY)
+                if "Factory" in url
+                else _success(KIND_CLIENT)
+            )
+        )
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        assert [a["kind"] for a in report["archived"]] == [
+            KIND_CLIENT,
+            KIND_FACTORY,
+            KIND_TRUCK,
+            KIND_DRIVER,
+        ]
+        # 四类建档端点各命中一次（依赖序：客户→工厂、车辆→司机）
+        assert {r["url"] for r in fake_http.captured} == {
+            TEST_ENDPOINTS["client_create"],
+            TEST_ENDPOINTS["factory_create"],
+            TEST_ENDPOINTS["truck_create"],
+            TEST_ENDPOINTS["driver_create"],
+        }
+        # 每一笔建档请求头逐一断言：sk 原样透传（不重写/不丢失）
+        for req in fake_http.captured:
+            assert req["headers"] == {"sk": "sk-token"}, f"{req['url']} 未携带 sk"
+
+
 class TestServiceIntegration:
     """service 层集成：建档失败进 meta.master_data.failed，订单照常创建（不阻断）。"""
 
@@ -363,10 +401,6 @@ class TestServiceIntegration:
         import app.orders.bill.client as client_module
 
         def fake_post(url, data=None, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             if "Client" in url:
                 return FakeResponse({"code": "500", "msg": "客户建档失败"})
             if "Factory" in url or "Truck" in url or "Driver" in url:
@@ -394,7 +428,7 @@ class TestServiceIntegration:
             file_bytes=build_bill_bytes(
                 headers, [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "I": "王师傅"}]
             ),
-            create_order=True,
+            create_order=True, sk="sk-token",
         )
         # 订单照常创建（建档失败不使订单丢失）
         assert result.summary["success"] == 1 and result.summary["failed"] == 0

@@ -144,10 +144,10 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
     return master_failure_reason(outcome)
 
 
-def run_fee_bootstrap(orders, *, create_order: bool) -> dict[str, Any] | None:
-    """自举编排：本批缺失费目码逐码建档（凭证一次）→ 成功 registry 登记（当批回填
-    由后续 apply_price_map 经 registry 命中完成）；失败进报告（当批降级 skip_report
-    语义不变）。
+def run_fee_bootstrap(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:
+    """自举编排：本批缺失费目码逐码建档（sk 由调用方登录 TMS 后透传）→ 成功
+    registry 登记（当批回填由后续 apply_price_map 经 registry 命中完成）；失败进
+    报告（当批降级 skip_report 语义不变）。
 
     **preview 零副作用**：create_order=false 只输出「计划创建清单」（planned）
     不发请求；真实导入（create_order=true）才建档。disabled / 本批无缺失 → None
@@ -190,7 +190,7 @@ def run_fee_bootstrap(orders, *, create_order: bool) -> dict[str, Any] | None:
         }
     }
     try:
-        results = create_archives(forms)
+        results = create_archives(forms, sk)
     except Exception as exc:  # 防御：建档层意外异常也不使订单丢失（降级语义）
         log.warning(
             "fee_bootstrap_create_unexpected",

@@ -69,12 +69,25 @@ _skill_executor = ThreadPoolExecutor(
 _inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 # 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
-_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
+_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico", "/bill-import", "/bill-import-help"}
 
-# 鉴权豁免路径：健康检查、OpenAPI 文档与日志页面本身（页面无数据）；
+# 鉴权豁免路径：健康检查、OpenAPI 文档与日志/账单上传页面本身（页面无数据）；
 # /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
+# /orders/bill/import 为内网免 key 使用场景豁免（与页面配套，见 /bill-import），
+# 仅限可信内网部署；对外开放部署时应移出豁免并恢复页面 Key 输入。
 _AUTH_FREE_PATHS = frozenset(
-    {"/healthz", "/skills", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/logs"}
+    {
+        "/healthz",
+        "/skills",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/favicon.ico",
+        "/logs",
+        "/bill-import",
+        "/bill-import-help",
+        "/orders/bill/import",
+    }
 )
 
 
@@ -599,6 +612,20 @@ def request_logs_page() -> FileResponse:
     return FileResponse(static_dir / "logs.html")
 
 
+@app.get("/bill-import", include_in_schema=False)
+def bill_import_page() -> FileResponse:
+    """竞品账单上传页面（静态页，无数据；上传接口鉴权豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import.html")
+
+
+@app.get("/bill-import-help", include_in_schema=False)
+def bill_import_help_page() -> FileResponse:
+    """竞品账单导入操作手册页面（静态页，无数据；豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import_help.html")
+
+
 def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
     """为每个 skill 动态生成一个精确类型的响应模型：
     data 字段的类型 = skill.output_model，这样 OpenAPI 就能显示精确 schema。
@@ -769,13 +796,32 @@ async def import_bill(
     """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
 
     create_order 缺省 false（只预览不下单）；显式传 true 时逐单创建订单
-    （GetWebKey → login → AddWork 链路，见 app/orders/bill/client.py），
-    响应附 orders[].create_result 与 summary；凭证获取失败返回 502。
+    （sk 由调用方登录 TMS 后经请求头透传，AddWork/建档共用，见
+    app/orders/bill/client.py；2026-08-19 起移除服务端 GetWebKey → login 换取），
+    响应附 orders[].create_result 与 summary；create 模式缺 sk → 400 bad_request。
     表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
     请求自动记录访问日志（文件名/大小/耗时/状态码）。
     create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
     避免调用方把「已创建过」误判为成功（details 携带已创建业务编号）。
+    箱型白名单（v1.3）：preview 与 create 统一执行文件级校验——任一单含 TMS
+    白名单外标准代码箱型（如 40GOH）→ 全部未决单拒绝（unknown_box_type，
+    返回「系统没有此箱型，请联系客服」），不调下游；无强制提交通道。
     """
+    sk = (request.headers.get("sk") or "").strip()
+    if create_order and not sk:
+        # TMS 全部下游接口（AddWork/建档）均以 sk 头鉴权：create 模式缺 token
+        # 直接拒绝（不进入解析/下单流程）；preview 零下游调用不要求
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
@@ -785,6 +831,7 @@ async def import_bill(
             filename=file.filename or "unnamed",
             file_bytes=content,
             create_order=create_order,
+            sk=sk,
         )
     )
     # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
@@ -792,11 +839,19 @@ async def import_bill(
     # 明细在 summary（skipped/created/success_sns）
     if create_order and result.summary:
         if result.summary["skipped"] > 0 and result.summary["created"] == 0:
+            success_sns = result.summary["success_sns"] or []
             raise DuplicateBillError(
                 "all bills already created; nothing new was created",
                 details={
                     "success_sns": result.summary["success_sns"],
                     "summary": result.summary,
+                    # 对齐 create 模式 upstream 结构（code/msg/data），
+                    # 便于调用方统一按 upstream.code 判断业务结果
+                    "upstream": {
+                        "code": "409",
+                        "msg": "账单已全部创建过",
+                        "data": [{"sn": sn} for sn in success_sns],
+                    },
                 },
             )
     return result

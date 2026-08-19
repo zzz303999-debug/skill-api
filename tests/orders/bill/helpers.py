@@ -35,7 +35,11 @@ class FakeResponse:
         )
         self.headers = {"content-type": "application/json"}
 
-    def json(self):
+    def json(self, **kwargs):
+        # 真实 httpx 行为：参数透传 json.loads（如 parse_constant）；
+        # 无参数时直接返回预置 payload（既有测试零变化）
+        if kwargs:
+            return json.loads(self.text, **kwargs)
         return self._payload
 
 
