@@ -17,10 +17,8 @@ import httpx
 import pytest
 
 import app.orders.bill.client as client_module
-from app.errors import SkillAPIError
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
 from app.orders.bill.client import (
-    UpstreamError,
     add_work,
     build_add_work_form,
     create_canonical_orders,
@@ -545,14 +543,6 @@ class TestCreateOrders:
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         create_orders([], "sk")
         assert calls["n"] == 0
-
-    def test_upstream_error_is_skill_api_error(self):
-        """UpstreamError 走既有错误体系（SkillAPIError 子类）。"""
-        assert issubclass(UpstreamError, SkillAPIError)
-        err = UpstreamError("boom")
-        assert err.http_status == 502
-        assert err.code == "order_upstream_error"
-        assert err.description == "订单系统拒绝了请求或不可达，请稍后重试"
 
     # ---- 重复上传去重（方案一：成功单注册表）----
 

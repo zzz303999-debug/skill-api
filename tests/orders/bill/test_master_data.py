@@ -718,7 +718,7 @@ class TestGoldenIntegration:
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         result = build_result(
-            filename=path.name, file_bytes=path.read_bytes(), create_order=True
+            filename=path.name, file_bytes=path.read_bytes(), create_order=True, sk="sk"
         )
         report = result.meta.get("master_data")
         assert report is not None

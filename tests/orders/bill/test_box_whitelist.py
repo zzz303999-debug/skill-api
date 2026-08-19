@@ -280,6 +280,7 @@ class TestBuildResultIntegration:
                 ]
             ),
             create_order=True,
+            sk="sk",
         )
         assert result.summary["total"] == 2
         assert result.summary["success"] == 0
@@ -322,6 +323,7 @@ class TestBuildResultIntegration:
                 ]
             ),
             create_order=True,
+            sk="sk",
         )
         assert result.summary["success"] == 2
         assert result.summary["failed"] == 0
@@ -336,6 +338,7 @@ class TestBuildResultIntegration:
                 [{"A": 1, "B": "客户甲", "E": "OOLU12345682", "D": "大冷"}]
             ),
             create_order=True,
+            sk="sk",
         )
         assert result.summary["success"] == 1
         assert result.summary["failed"] == 0

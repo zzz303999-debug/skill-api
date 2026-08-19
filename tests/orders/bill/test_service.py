@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 import app.orders.bill.client as client_module
-from app.errors import ConvertError
+from app.errors import BadRequestError, ConvertError
 from app.orders.bill import BillParseResult, build_result
 from helpers import (
     REAL_ORDER_COUNT,
@@ -21,6 +21,52 @@ from helpers import (
 
 def build_real_result() -> BillParseResult:
     return build_result(filename=REAL_XLS.name, file_bytes=REAL_XLS.read_bytes())
+
+
+class TestSkGuard:
+    """create 模式 sk 防御性校验（build_result 公开函数，防第二入口漏传）。"""
+
+    def test_create_without_sk_raises_bad_request(self):
+        """create_order=True 且 sk 缺失 → 400 bad_request（与路由层同语义）；
+        守卫在解析前触发，坏文件内容不触发 IO/解析。"""
+        with pytest.raises(BadRequestError) as caught:
+            build_result(filename="x.xlsx", file_bytes=b"x", create_order=True)
+        assert caught.value.http_status == 400
+        assert caught.value.code == "bad_request"
+        assert caught.value.details["upstream"] == {
+            "code": "400",
+            "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+            "data": [],
+        }
+
+    def test_create_with_blank_sk_raises(self):
+        """空白 sk（纯空格）同样拒绝——与路由层 strip 后判空同口径。"""
+        with pytest.raises(BadRequestError):
+            build_result(filename="x.xlsx", file_bytes=b"x", create_order=True, sk="   ")
+
+    def test_preview_without_sk_not_guarded(self):
+        """preview 不要求 sk：守卫只拦 create 模式，预览路径不受影响。"""
+        headers = {
+            "A": "序号",
+            "B": "客户名称",
+            "C": "门点",
+            "D": "箱型箱量",
+            "E": "提单号",
+            "F": "箱号",
+            "G": "做箱时间",
+            "H": "港区",
+            "I": "司机",
+            "J": "应收备注",
+        }
+        result = build_result(
+            filename="junyu.xlsx",
+            file_bytes=build_bill_bytes(
+                headers, [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "I": "王师傅"}]
+            ),
+            create_order=False,
+        )
+        assert result.create_order is False
+        assert result.summary is None
 
 
 @pytest.mark.skipif(

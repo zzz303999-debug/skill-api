@@ -653,7 +653,7 @@ class TestGoldenBootstrap:
         from app.orders.bill import build_result
 
         result = build_result(
-            filename=path.name, file_bytes=path.read_bytes(), create_order=True
+            filename=path.name, file_bytes=path.read_bytes(), create_order=True, sk="sk"
         )
         reports = result.meta["reconciliation"]["reports"]
         bootstrap = reports.get("fee_bootstrap")

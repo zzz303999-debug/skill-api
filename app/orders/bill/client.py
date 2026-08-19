@@ -23,20 +23,12 @@ from typing import Any
 import httpx
 
 from app.config import settings
-from app.errors import SkillAPIError
 from app.logging_conf import get_logger
 
 from .imported_registry import get_imported_registry, lock_for, normalize
 from .schema import BillOrder
 
 log = get_logger(__name__)
-
-
-class UpstreamError(SkillAPIError):
-    """下游系统级失败：502 order_upstream_error（全局异常处理器统一转换）。"""
-
-    http_status = 502
-    code = "order_upstream_error"
 
 
 def _nan_to_none(_token: str) -> None:

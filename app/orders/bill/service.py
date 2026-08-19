@@ -242,14 +242,30 @@ def build_result(
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
     create_order=True 时先逐单创建，再填 summary {total, success, failed,
-    skipped, created}；sk 由调用方登录 TMS 后透传（2026-08-19 起，缺失由路由层
-    拒绝，本层不重新校验）。meta 含 source_sha256 / source_bytes / parsed_at /
+    skipped, created}；sk 由调用方登录 TMS 后透传（2026-08-19 起；create 模式
+    sk 缺失/空白由本层防御性拒绝 400，与路由层同语义——build_result 为公开
+    函数，防第二入口漏传 sk 时以空 token 逐单静默失败而返 200）。
+    meta 含 source_sha256 / source_bytes / parsed_at /
     parser / raw_rows / template / unmatched_headers。
     箱型白名单（2026-08-18 用户拍板）：**文件级校验**——preview 与 create 统一
     执行，任一单含标准代码形态且不在白名单的箱型（如 40GOH）→ 全部未决单拒绝
     （unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），不调下游；
     无强制提交通道；非标表述（大冷/拼箱/17M飞翼车等）不校验（既有规则不变）。
     """
+    # 防御性校验（置于解析前，零 IO 快速失败）：路由层已拦截，此处为公开函数
+    # 兑底——未来第二入口漏传 sk 时同样返 400，而非空 token 逐单失败返 200
+    if create_order and not (sk or "").strip():
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
     try:

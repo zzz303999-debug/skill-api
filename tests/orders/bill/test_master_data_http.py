@@ -353,6 +353,46 @@ class TestParallelIsolation:
         assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 1
 
 
+class TestSkPassthroughAllKinds:
+    """sk 透传防回归：客户/工厂/车辆/司机四类建档请求头一律携带调用方 sk。
+
+    既有用例仅客户类断言过 headers（TestClientCreate），工厂/车辆/司机只断言
+    请求体字段（2026-08-19 review 发现的覆盖缺口）；漏传 sk 时下游 203 拒单，
+    且 create_archives 不校验 sk 非空——靠本断言守住透传链不回归。
+    """
+
+    def test_all_four_kinds_carry_sk_header(self, md_config, fake_http, real_archives):
+        md_config(_md_cfg(threshold=1))
+        fake_http(
+            lambda url, **kw: FakeResponse(
+                _success(KIND_TRUCK)
+                if "Truck" in url
+                else _success(KIND_DRIVER)
+                if "Driver" in url
+                else _success(KIND_FACTORY)
+                if "Factory" in url
+                else _success(KIND_CLIENT)
+            )
+        )
+        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        assert [a["kind"] for a in report["archived"]] == [
+            KIND_CLIENT,
+            KIND_FACTORY,
+            KIND_TRUCK,
+            KIND_DRIVER,
+        ]
+        # 四类建档端点各命中一次（依赖序：客户→工厂、车辆→司机）
+        assert {r["url"] for r in fake_http.captured} == {
+            TEST_ENDPOINTS["client_create"],
+            TEST_ENDPOINTS["factory_create"],
+            TEST_ENDPOINTS["truck_create"],
+            TEST_ENDPOINTS["driver_create"],
+        }
+        # 每一笔建档请求头逐一断言：sk 原样透传（不重写/不丢失）
+        for req in fake_http.captured:
+            assert req["headers"] == {"sk": "sk-token"}, f"{req['url']} 未携带 sk"
+
+
 class TestServiceIntegration:
     """service 层集成：建档失败进 meta.master_data.failed，订单照常创建（不阻断）。"""
 
