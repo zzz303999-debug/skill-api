@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -38,27 +37,12 @@ class Settings(BaseSettings):
     order_api_url: str = "https://s3.jxt56.com/Car/publishCreateOrder"
     order_api_timeout_seconds: int = Field(default=30, ge=1, le=300)
 
-    # 竞品账单导入下游（GetWebKey → login → AddWork；凭据为服务端静态配置，不随请求传入）
-    jxt_ext_app_id: str = ""
-    jxt_ext_user_id: str = ""
-    jxt_jxt_open_id: str = ""
-    jxt_getwebkey_url: str = "https://a3.jxt56.com/Api/Account/GetWebKey"
-    jxt_login_url: str = "https://a3.jxt56.com/Api/login"
+    # 竞品账单导入下游（AddWork 端点 + sk 头鉴权；sk 由调用方登录 TMS 后经请求头透传）
     jxt_addwork_url: str = "https://s3.jxt56.com/Car/WorkOut/AddWork"
     jxt_timeout_seconds: int = Field(default=30, ge=1, le=300)
-    # 竞品账单下单通道：form=AddWork 表单（默认，AddWork 端点 + sk 头实测可用
-    # 2026-08-13；publishCreateOrder 现强制要求 userId+roomId，204 拒单）；
-    # json=嵌套 JSON（旧默认，暂不可用，保留代码供 roomId 来源明确后恢复）
-    jxt_create_channel: Literal["json", "form"] = "form"
     # to_other 长尾监控阈值（T14）：某原费目名归并次数 ≥ 该值 → 对账报告 warning
     # 提示升级为显式映射（补映射 = 改模板 fees.mapping，零代码）
     fee_to_other_warning_threshold: int = Field(default=50, ge=1, le=10000)
-
-    @field_validator("jxt_create_channel", mode="before")
-    @classmethod
-    def _normalize_create_channel(cls, value: str) -> str:
-        """环境变量大小写宽容（JSON/Form → json/form）；before 模式在 Literal 校验前执行。"""
-        return value.strip().lower()
 
     # OpenAI-compatible LLM
     llm_base_url: str = "https://api.openai.com/v1"

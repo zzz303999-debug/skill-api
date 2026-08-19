@@ -470,10 +470,6 @@ class TestE2EMock:
         addwork_forms: list[dict] = []
 
         def fake_post(url, data=None, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             if "/Create/Price" in url:
                 state["price"] += 1
                 state["archives"].append(("price", data))
@@ -497,7 +493,7 @@ class TestE2EMock:
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
 
         # 第一次上传：四类链路全部触发
-        result = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True)
+        result = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert result.summary == {
             "total": 1,
             "success": 1,
@@ -542,7 +538,7 @@ class TestE2EMock:
         from app.orders.bill.master_data_store import get_store
 
         counts_after_first = dict(get_store().snapshot())
-        second = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True)
+        second = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert second.summary == {
             "total": 1,
             "success": 1,

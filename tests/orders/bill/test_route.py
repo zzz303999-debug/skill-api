@@ -14,12 +14,8 @@ from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
 AUTH_HEADERS = {"X-API-Key": "test-secret-key"}
 
 
-# GetWebKey/login/AddWork 均成功（create 模式下游 mock）
+# AddWork 均成功（create 模式下游 mock；sk 由调用方请求头透传）
 def _ok_chain_post(url, **_kwargs):
-    if "GetWebKey" in url:
-        return FakeResponse({"code": 200, "msg": "操作成功", "web_key": "wk-1"})
-    if "login" in url:
-        return FakeResponse({"code": 200, "data": {"token": "sk-1"}, "msg": "操作成功"})
     return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]})
 
 
@@ -95,16 +91,19 @@ class TestPreview:
     not REAL_XLS.exists(), reason="golden 样本未入库（表格文件不入库），本地放置后自动启用"
 )
 class TestCreateMode:
+    # create 模式请求头：带调用方登录 TMS 后的 sk（缺 sk → 400，见缺头用例）
+    CREATE_HEADERS = {**AUTH_HEADERS, "sk": "sk-1"}
+
     def test_create_order_true_creates_all(self, monkeypatch):
         """create_order=true → 200：逐单 create_result + summary（每单一 AddWork；
         建档调用在端点已配后激活，不计入下单计数）。"""
         calls = {"addwork": 0}
+        sk_seen: list[str | None] = []
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url or "login" in url:
-                return _ok_chain_post(url)
             if "/Car/Car" in url:  # 建档族（/Car/Car* 路径，区别于下单 /Car/WorkOut/AddWork）
                 return _archive_post(url)
+            sk_seen.append((_kwargs.get("headers") or {}).get("sk"))
             calls["addwork"] += 1
             return _ok_chain_post(url)
 
@@ -115,7 +114,7 @@ class TestCreateMode:
                 "b.xls",
                 REAL_XLS.read_bytes(),
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers=self.CREATE_HEADERS,
             )
         assert r.status_code == 200
         data = r.json()
@@ -138,15 +137,15 @@ class TestCreateMode:
         assert all(o["create_result"]["sn"] == "EX26080042" for o in data["orders"])
         # 每单一次下单（建档调用不计入：端点已配后达阈值候选会建档）
         assert calls["addwork"] == REAL_ORDER_COUNT
+        # sk 原样透传下游（2026-08-19 起：调用方请求头 → AddWork 请求头）
+        assert sk_seen and all(s == "sk-1" for s in sk_seen)
 
-    def test_credential_failure_502_not_per_order(self, monkeypatch):
-        """GetWebKey 失败 → 全局 502 order_upstream_error；下单 0 次（不逐单）。
-        建档路径（端点已配后激活）凭证失败仅结构化进报告，不抛断。"""
+    def test_missing_sk_400_not_per_order(self, monkeypatch):
+        """create 模式缺 sk 头 → 400 bad_request（不进入解析/下单流程）。
+        建档路径（端点已配后激活）同样不触发。"""
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 500, "msg": "凭据无效"})
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功"})
 
@@ -159,22 +158,22 @@ class TestCreateMode:
                 data={"create_order": "true"},
                 headers=AUTH_HEADERS,
             )
-        assert r.status_code == 502
+        assert r.status_code == 400
         error = r.json()["error"]
-        assert error["code"] == "order_upstream_error"
-        assert error["description"] == "订单系统拒绝了请求或不可达，请稍后重试"
-        assert error["details"]["upstream_code"] == 500
-        assert calls["addwork"] == 0  # 凭证失败 → 不逐单执行
+        assert error["code"] == "bad_request"
+        assert "sk" in error["message"]
+        assert error["details"]["upstream"] == {
+            "code": "400",
+            "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+            "data": [],
+        }
+        assert calls["addwork"] == 0  # 缺 token 不进入下游
 
     def test_partial_failure_summary(self, monkeypatch):
         """部分单失败 → 200 + summary.failed 计数，单失败不影响其他。"""
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             calls["addwork"] += 1
@@ -189,7 +188,7 @@ class TestCreateMode:
                 "b.xls",
                 REAL_XLS.read_bytes(),
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers=self.CREATE_HEADERS,
             )
         assert r.status_code == 200
         data = r.json()
@@ -223,10 +222,6 @@ class TestCreateMode:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             calls["addwork"] += 1
@@ -239,7 +234,7 @@ class TestCreateMode:
                 "b.xls",
                 REAL_XLS.read_bytes(),
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers=self.CREATE_HEADERS,
             )
         assert r.status_code == 200
         data = r.json()
@@ -349,7 +344,7 @@ class TestFileErrors:
                 "many.xlsx",
                 b"x",
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "too_many_rows"
@@ -420,8 +415,6 @@ class TestNanEcho:
         """AddWork 回显 data[0] 含 NaN → 200 + upstream 中为 null（序列化不炸）。"""
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url or "login" in url:
-                return _ok_chain_post(url)
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             return FakeResponse(
@@ -435,7 +428,7 @@ class TestNanEcho:
                 "junyu.xlsx",
                 self._junyu_file(),
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
         assert r.status_code == 200
         data = r.json()
@@ -523,7 +516,7 @@ class TestDedupConflict:
                 "b.xlsx",
                 b"x",
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
         assert r.status_code == 409
         body = r.json()
@@ -548,7 +541,7 @@ class TestDedupConflict:
                 "b.xlsx",
                 b"x",
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
         assert r.status_code == 200
         data = r.json()
@@ -560,8 +553,6 @@ class TestDedupConflict:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url or "login" in url:
-                return _ok_chain_post(url)
             if "/Car/Car" in url:  # 建档族（区别于下单 /Car/WorkOut/AddWork）
                 return _archive_post(url)
             calls["addwork"] += 1
@@ -574,7 +565,7 @@ class TestDedupConflict:
                 "b.xls",
                 real_xls_bytes,
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
             assert first.status_code == 200
             second = upload(
@@ -582,7 +573,7 @@ class TestDedupConflict:
                 "b.xls",
                 real_xls_bytes,
                 data={"create_order": "true"},
-                headers=AUTH_HEADERS,
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
             )
         assert second.status_code == 409
         body = second.json()

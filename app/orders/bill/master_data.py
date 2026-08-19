@@ -255,12 +255,13 @@ def defaults_for(kind: str) -> dict[str, Any]:
 
 
 def run_master_data(
-    orders: list[CanonicalOrder], *, create_order: bool
+    orders: list[CanonicalOrder], *, create_order: bool, sk: str = ""
 ) -> dict[str, Any] | None:
     """阈值编排：聚合后、payload 构造前执行 → 报告 dict（meta["master_data"]）。
 
-    create_order=true：计数 → 按依赖序建档 → 当批回填 + 订单标注；false：只读
-    探测（不计数不建档，展示当前计数状态）。disabled → None（不产生报告段）。
+    create_order=true：计数 → 按依赖序建档（sk 由调用方登录 TMS 后透传）→ 当批
+    回填 + 订单标注；false：只读探测（不计数不建档，展示当前计数状态）。
+    disabled → None（不产生报告段）。
     建档失败/端点 TODO → 结构化进报告，不抛断订单流程（订单永远照常提交）。
     """
     config = load_config()
@@ -321,7 +322,7 @@ def run_master_data(
             if url is None:
                 continue  # 端点 TODO → 只计数不建档（degraded 已在报告）
             result = _create_one(
-                kind, candidate, rec, store, create_archives, attempted, archived, failed, exists_external
+                kind, candidate, rec, store, create_archives, attempted, archived, failed, exists_external, sk
             )
             if result:
                 archived[(kind, key)] = result
@@ -370,6 +371,7 @@ def _create_one(
     archived: dict[tuple[str, str], dict[str, Any]],
     failed: list[dict[str, Any]],
     exists_external: list[dict[str, Any]] | None = None,
+    sk: str = "",
 ) -> dict[str, Any] | None:
     """建档一次（依赖前置检查 + 建档调用 + 结果登记）；失败进 failed 不抛断。
 
@@ -443,7 +445,7 @@ def _create_one(
                 truck_form = build_truck_form(
                     candidate.plate, sn_for(KIND_TRUCK, int((truck_rec or {}).get("count") or 0) + 1)
                 )
-                truck_result = create_archives({KIND_TRUCK: {plate_key_: truck_form}})
+                truck_result = create_archives({KIND_TRUCK: {plate_key_: truck_form}}, sk)
                 truck_out = (truck_result.get(KIND_TRUCK) or {}).get(plate_key_) or {}
                 if truck_out.get("success"):
                     truck_archive_id = str(truck_out["archive_id"])
@@ -467,7 +469,7 @@ def _create_one(
     elif kind in (KIND_BAILOR, KIND_PRICE):
         return None  # 委托人只计数不建档（来源字段缺失）；费目建档在自举管线（fee_bootstrap）
 
-    results = create_archives(forms)
+    results = create_archives(forms, sk)
     outcome = (results.get(kind) or {}).get(candidate.key) or {}
     if outcome.get("success"):
         store.set_archive(kind, candidate.key, outcome["archive_id"])

@@ -89,7 +89,7 @@ def _no_real_archive_calls(monkeypatch):
     real_create = md_client_module.create_archives  # 真实函数（此刻未被 mock）
     counter = itertools.count(9000)
 
-    def _fake(forms_by_kind: dict):
+    def _fake(forms_by_kind: dict, sk: str = ""):
         return {
             kind: {
                 key: {

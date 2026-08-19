@@ -120,7 +120,7 @@ def fake_create(monkeypatch):
     calls: list[dict] = []
 
     def _install(*, fail_codes: set[str] | None = None):
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]]):
+        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -411,7 +411,7 @@ class TestDuplicateExternal:
         md_endpoint()
         calls: list[dict] = []
 
-        def _fake(forms_by_kind):
+        def _fake(forms_by_kind, sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -444,7 +444,7 @@ class TestDuplicateExternal:
         md_endpoint()
         calls: list[dict] = []
 
-        def _fake(forms_by_kind):
+        def _fake(forms_by_kind, sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -645,12 +645,6 @@ class TestGoldenBootstrap:
         from helpers import FakeResponse
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "操作成功", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse(
-                    {"code": 200, "data": {"token": "sk"}, "msg": "操作成功"}
-                )
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]}
             )

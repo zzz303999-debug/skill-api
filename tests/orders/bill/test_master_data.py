@@ -75,7 +75,7 @@ def fake_create(md_config, monkeypatch):
     def _install(cfg: dict | None = None, *, fail_kinds: set[str] | None = None):
         md_config(cfg or _default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]]):
+        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -485,13 +485,11 @@ class TestClientDirectURL:
             )
 
         monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
-        monkeypatch.setattr(md_client_module, "get_web_key", lambda: "wk")
-        monkeypatch.setattr(md_client_module, "login", lambda web_key: "sk-token")
         # 本用例验证 create_archives 内部调用链：恢复真实实现（conftest 全局
         # mock 是零网络兜底，显式依赖本 fixture 拿回真实函数）
         monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
         result = md_client_module.create_archives(
-            {KIND_CLIENT: {"key": {"client_name": "测试", "sn": "CLT00001"}}}
+            {KIND_CLIENT: {"key": {"client_name": "测试", "sn": "CLT00001"}}}, "sk-token"
         )
         # 全量 URL 原样直发（含 host，无 base_url 拼接）
         assert captured["url"] == TEST_ENDPOINTS["client_create"]
@@ -507,7 +505,7 @@ class TestDuplicateExternal:
         """建档 mock：客户建档返回 duplicate（TMS 已存在 204），其余成功。"""
         md_config(_default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]]):
+        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -567,7 +565,7 @@ class TestDuplicateExternal:
         reload_store(tmp_path / "md2.json")
         calls: list[dict] = []
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]]):
+        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -599,7 +597,7 @@ class TestDuplicateExternal:
         calls: list[dict] = []
         md_config(_default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]]):
+        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -698,15 +696,11 @@ class TestGoldenIntegration:
         path = FAMILIES_DIR / "junyu" / "2020-10上海军羽应收对账单.xls"
         if not path.exists():
             pytest.skip("junyu 样本缺失")
-        # mock 下单通道（零网络）：GetWebKey → login → 下单成功回显；建档族按 URL 回主键
+        # mock 下单通道（零网络）：AddWork 成功回显；建档族按 URL 回主键（sk 由调用方透传）
         import app.orders.bill.client as client_module
         from helpers import FakeResponse
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "操作成功", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "操作成功"})
             if "/Car/Car" in url:  # 建档族（/Car/Car* 路径；下单 AddWork 也在 s3.jxt56.com/Car/ 下，不能按 /Car/ 或 host 判断）
                 pk = (
                     "client_id"

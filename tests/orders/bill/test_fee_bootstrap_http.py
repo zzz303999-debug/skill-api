@@ -9,7 +9,7 @@
 - service 集成：自举失败不阻断订单（费用降级 excluded 仅对账）
 
 - 建档调用一律 mock（零网络）；费目映射表/自举配置/建档端点全走注入测试值；
-- 凭证 mock：get_web_key/login 直接返回（聚焦建档端点）。
+- sk 由调用方透传（run_fee_bootstrap 显式传 sk，聚焦建档端点）。
 """
 
 from __future__ import annotations
@@ -131,8 +131,6 @@ def fake_http(monkeypatch):
             return responder(url, data=data)
 
         monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
-        monkeypatch.setattr(md_client_module, "get_web_key", lambda: "wk")
-        monkeypatch.setattr(md_client_module, "login", lambda web_key: "sk-token")
 
     _install.captured = captured
     return _install
@@ -174,7 +172,7 @@ class TestPriceForm:
     def test_success_parses_price_id_and_registers(self, price_cfg, md_endpoint, fake_http, real_archives):
         """建档成功 → price_id 解析 → registry 登记 → 当批 apply_price_map 回填。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": {"price_id": 90001}}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["mode"] == "create"
         assert report["created"] == [{"code": "waiting", "tms_name": "待时费", "price_id": 90001}]
         assert report["failed"] == [] and report["exists_external"] == []
@@ -193,7 +191,7 @@ class TestPriceForm:
         """同批多码逐码建档（一次调用一码），互不干扰。"""
         price_ids = iter([90001, 90002])
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "ok", "data": {"price_id": next(price_ids)}}))
-        report = run_fee_bootstrap([_make_order("waiting", "other")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting", "other")], create_order=True, sk="sk-token")
         assert [c["code"] for c in report["created"]] == ["waiting", "other"]
         assert [r["data"]["sn"] for r in fake_http.captured] == ["AUTO_WAITING", "AUTO_OTHER"]
         assert get_registry().lookup("other")["price_id"] == 90002
@@ -204,40 +202,40 @@ class TestPriceFailures:
 
     def test_failure_http_500(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse({"msg": "boom"}, status_code=500))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["created"] == [] and report["exists_external"] == []
         assert report["failed"] and "HTTP error: 500" in report["failed"][0]["reason"]
         assert get_registry().lookup("waiting") is None  # 失败不登记 → 下批重试
 
     def test_failure_non_json(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "not a JSON object" in report["failed"][0]["reason"]
 
     def test_failure_rejected_code(self, price_cfg, md_endpoint, fake_http, real_archives):
         """code 非 "200"（拒单，msg 不命中已存在）→ failed。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "500", "msg": "费类不存在"}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "费类不存在" in report["failed"][0]["reason"]
 
     def test_failure_duplicate_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
         """「已存在」拒单 → exists_external 登记（不再重试自举）。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "204", "msg": "费用名称已存在"}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] == []
         ext = report["exists_external"]
         assert ext and ext[0]["code"] == "waiting" and "已存在" in ext[0]["message"]
         assert get_registry().lookup("waiting") is None
         assert get_registry().exists_external("waiting") is True
         # 下批不再重试（exists_external 终态；无缺失码 → 不产生报告段）
-        assert run_fee_bootstrap([_make_order("waiting")], create_order=True) is None
+        assert run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token") is None
 
     def test_failure_no_primary_key_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
         """成功但无主键 → 自举路径按 failed 处理（registry 不登记，下批重试）；
         注：与 master_data 建档（exists_external 终态防重复建档）语义不一致，
         已报告待实现侧决策（当前价格创建端点实测均回 price_id，未触发此路径）。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": []}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True)
+        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "未返回主键" in report["failed"][0]["reason"]
         assert report["exists_external"] == [] and report["created"] == []
         assert get_registry().lookup("waiting") is None
@@ -250,10 +248,6 @@ class TestServiceIntegration:
         import app.orders.bill.client as client_module
 
         def fake_post(url, data=None, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             if "/Create/Price" in url:
                 return FakeResponse({"code": "500", "msg": "费目建档失败"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
@@ -279,7 +273,7 @@ class TestServiceIntegration:
                 headers,
                 [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "K": 50}],
             ),
-            create_order=True,
+            create_order=True, sk="sk-token",
         )
         # 订单照常创建（自举失败不使订单丢失）
         assert result.summary["success"] == 1 and result.summary["failed"] == 0

@@ -9,7 +9,6 @@ import pytest
 import app.orders.bill.client as client_module
 from app.errors import ConvertError
 from app.orders.bill import BillParseResult, build_result
-from app.orders.bill.client import UpstreamError
 from helpers import (
     REAL_ORDER_COUNT,
     REAL_RAW_ROWS,
@@ -98,10 +97,6 @@ class TestCreateMode:
         """create_order=True → 逐单 create_result + summary；preview 路径零变化。"""
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "操作成功", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "操作成功"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]})
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
@@ -109,6 +104,7 @@ class TestCreateMode:
             filename=REAL_XLS.name,
             file_bytes=REAL_XLS.read_bytes(),
             create_order=True,
+            sk="sk-token",
         )
         assert result.create_order is True
         assert result.summary == {
@@ -130,27 +126,6 @@ class TestCreateMode:
             for o in result.orders
         )
 
-    def test_credential_failure_raises_upstream_error(self, monkeypatch):
-        """凭证失败 → UpstreamError（502 order_upstream_error）上抛，不逐单。"""
-        calls = {"addwork": 0}
-
-        def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 500, "msg": "凭据无效"})
-            calls["addwork"] += 1
-            return FakeResponse({"code": "200", "msg": "添加成功"})
-
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        with pytest.raises(UpstreamError) as caught:
-            build_result(
-                filename=REAL_XLS.name,
-                file_bytes=REAL_XLS.read_bytes(),
-                create_order=True,
-            )
-        assert caught.value.http_status == 502
-        assert caught.value.code == "order_upstream_error"
-        assert calls["addwork"] == 0
-
     def test_preview_never_calls_downstream(self, monkeypatch):
         """preview 路径（create_order=False）零下游调用（行为零变化）。"""
         calls = {"n": 0}
@@ -169,8 +144,6 @@ class TestCreateMode:
         （AddWork 端点 + sk 头 + create_order=true，2026-08-13 实测定论）。"""
         responses = iter(
             [
-                FakeResponse({"code": 200, "web_key": "wk"}),
-                FakeResponse({"code": 200, "data": {"token": "sk"}}),
                 FakeResponse({"code": "200", "data": [{"sn": "EX1", "o_id": "2101"}]}),
             ]
         )
@@ -201,6 +174,7 @@ class TestCreateMode:
                 [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "F": "TCLU1"}],
             ),
             create_order=True,
+            sk="sk-token",
         )
         assert result.summary == {
             "total": 1,
@@ -254,13 +228,9 @@ class TestCreateMode:
 
     @staticmethod
     def _fake_ok_chain(monkeypatch, calls: dict):
-        """GetWebKey/login 固定成功；下单按调用序计数并返回成功。"""
+        """下单按调用序计数并返回成功（sk 由调用方透传，无凭证链路）。"""
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
@@ -271,7 +241,7 @@ class TestCreateMode:
         calls = {"addwork": 0}
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
-        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert first.summary == {
             "total": 2,
             "success": 2,
@@ -282,7 +252,7 @@ class TestCreateMode:
             "failed_details": [],
         }
         assert calls["addwork"] == 2
-        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
             "success": 2,
@@ -303,10 +273,6 @@ class TestCreateMode:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             if calls["addwork"] == 1:
                 return FakeResponse({"code": "204", "msg": "添加失败"})
@@ -314,10 +280,10 @@ class TestCreateMode:
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         file_bytes = self._junyu_file()
-        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert first.summary["failed"] == 1
         assert first.summary["success"] == 1
-        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
             "success": 2,
@@ -333,16 +299,12 @@ class TestCreateMode:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return FakeResponse({"code": "204", "msg": "添加失败"})
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         result = build_result(
-            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True
+            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert result.summary["success"] == 0 and result.summary["failed"] == 2
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
@@ -353,16 +315,12 @@ class TestCreateMode:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功"})  # 无 data[0]
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         result = build_result(
-            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True
+            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert result.summary["success"] == 2 and result.summary["created"] == 2
         # 成功但无原始回显：业务码仍为 200（data 为空），与 summary 不矛盾
@@ -400,10 +358,6 @@ class TestCreateMode:
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1", "fee": float("nan")}]}
@@ -411,7 +365,7 @@ class TestCreateMode:
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         result = build_result(
-            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True
+            filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert calls["addwork"] == 2
         assert result.upstream == {
@@ -452,10 +406,10 @@ class TestCreateMode:
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
         store = master_data_store.get_store()
-        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         after_first = dict(store.snapshot())
         assert after_first  # 第一次导入产生计数
-        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True)
+        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert store.snapshot() == after_first  # 第二次（全 skipped）计数不变
 
 

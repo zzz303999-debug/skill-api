@@ -40,7 +40,7 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
+def _build_fee_reports(output, orders: list, create_order: bool, sk: str = "") -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
     - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
@@ -65,7 +65,7 @@ def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     if orders:
         from .fee_bootstrap import run_fee_bootstrap
 
-        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order)
+        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order, sk=sk)
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -237,13 +237,14 @@ def build_result(
     filename: str,
     file_bytes: bytes,
     create_order: bool = False,
+    sk: str = "",
 ) -> BillParseResult:
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
     create_order=True 时先逐单创建，再填 summary {total, success, failed,
-    skipped, created}；凭证失败抛 UpstreamError（502，不逐单执行）。meta 含
-    source_sha256 / source_bytes / parsed_at / parser / raw_rows / template /
-    unmatched_headers。
+    skipped, created}；sk 由调用方登录 TMS 后透传（2026-08-19 起，缺失由路由层
+    拒绝，本层不重新校验）。meta 含 source_sha256 / source_bytes / parsed_at /
+    parser / raw_rows / template / unmatched_headers。
     箱型白名单（2026-08-18 用户拍板）：**文件级校验**——preview 与 create 统一
     执行，任一单含标准代码形态且不在白名单的箱型（如 40GOH）→ 全部未决单拒绝
     （unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），不调下游；
@@ -344,7 +345,7 @@ def build_result(
     if pending and output.canonical_rows is not None:
         # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
         fee_reconciliation = _build_fee_reports(
-            output, pending, create_order=create_order
+            output, pending, create_order=create_order, sk=sk
         )
 
     # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
@@ -354,7 +355,7 @@ def build_result(
     if pending:
         from .master_data import run_master_data
 
-        master_data_report = run_master_data(pending, create_order=create_order)
+        master_data_report = run_master_data(pending, create_order=create_order, sk=sk)
 
     summary = None
     upstream = None
@@ -362,11 +363,11 @@ def build_result(
     if create_order:
         if orders:
             # 既有语义：双通道下单（行为语义不变）
-            create_orders(orders, source_sha256=file_sha256)
+            create_orders(orders, sk, source_sha256=file_sha256)
         elif canonical_orders:
             from .client import create_canonical_orders
 
-            create_canonical_orders(canonical_orders, source_sha256=file_sha256)
+            create_canonical_orders(canonical_orders, sk, source_sha256=file_sha256)
         # 与创建分支同管线口径（orders 优先，elif canonical_orders）：双管线并存
         # 时（同一批数据的两种表示）只统计实际创建管线，避免 summary 计数翻倍
         # （去重预判标记了两边，created 统计不再合并计数）

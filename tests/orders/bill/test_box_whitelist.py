@@ -258,14 +258,10 @@ class TestBuildResultIntegration:
 
     @staticmethod
     def _fake_downstream(monkeypatch):
-        """GetWebKey → login → AddWork 全 mock；统计 AddWork 调用次数。"""
+        """AddWork 全 mock（sk 由调用方透传）；统计 AddWork 调用次数。"""
         calls = {"addwork": 0}
 
         def fake_post(url, **_kwargs):
-            if "GetWebKey" in url:
-                return FakeResponse({"code": 200, "msg": "ok", "web_key": "wk"})
-            if "login" in url:
-                return FakeResponse({"code": 200, "data": {"token": "sk"}, "msg": "ok"})
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 

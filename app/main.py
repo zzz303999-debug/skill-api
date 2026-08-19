@@ -796,8 +796,9 @@ async def import_bill(
     """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
 
     create_order 缺省 false（只预览不下单）；显式传 true 时逐单创建订单
-    （GetWebKey → login → AddWork 链路，见 app/orders/bill/client.py），
-    响应附 orders[].create_result 与 summary；凭证获取失败返回 502。
+    （sk 由调用方登录 TMS 后经请求头透传，AddWork/建档共用，见
+    app/orders/bill/client.py；2026-08-19 起移除服务端 GetWebKey → login 换取），
+    响应附 orders[].create_result 与 summary；create 模式缺 sk → 400 bad_request。
     表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
     请求自动记录访问日志（文件名/大小/耗时/状态码）。
     create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
@@ -806,6 +807,21 @@ async def import_bill(
     白名单外标准代码箱型（如 40GOH）→ 全部未决单拒绝（unknown_box_type，
     返回「系统没有此箱型，请联系客服」），不调下游；无强制提交通道。
     """
+    sk = (request.headers.get("sk") or "").strip()
+    if create_order and not sk:
+        # TMS 全部下游接口（AddWork/建档）均以 sk 头鉴权：create 模式缺 token
+        # 直接拒绝（不进入解析/下单流程）；preview 零下游调用不要求
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
@@ -815,6 +831,7 @@ async def import_bill(
             filename=file.filename or "unnamed",
             file_bytes=content,
             create_order=create_order,
+            sk=sk,
         )
     )
     # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
