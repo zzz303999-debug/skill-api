@@ -181,53 +181,76 @@ def _canonical_order(bl_no: str, b_type: str) -> CanonicalOrder:
 
 
 class TestRejectUnknownBoxTypes:
-    """service 层校验函数：canonical（box_groups）与既有（order_data.box）双管线。"""
+    """service 层文件级校验：任一单含非法箱型 → 全部未决单拒绝（双管线覆盖）。"""
 
-    def test_canonical_unknown_rejected(self):
-        order = _canonical_order("OOLU10000001", "40GOH")
-        _reject_unknown_box_types([order], force=False)
-        result = order.create_result
-        assert result["success"] is False
-        assert result["error"]["code"] == "unknown_box_type"
-        assert result["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
-        assert result["error"]["details"] == {"unknown_box_types": ["40GOH"]}
+    def test_any_unknown_rejects_all_orders(self):
+        """40GOH 单触发文件级拒绝：合法单也一并失败（消息报文件级清单）。"""
+        good = _canonical_order("OOLU10000001", "40HQ")
+        bad = _canonical_order("OOLU10000002", "40GOH")
+        rejected = _reject_unknown_box_types([good, bad])
+        assert rejected is True
+        # 非法单：报自己的箱型 + 上游业务码（对齐 TMS 204 失败口径）
+        assert bad.create_result["success"] is False
+        assert bad.create_result["error"]["code"] == "unknown_box_type"
+        assert bad.create_result["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
+        assert bad.create_result["error"]["details"]["unknown_box_types"] == ["40GOH"]
+        assert bad.create_result["error"]["details"]["upstream"] == {
+            "code": "204", "msg": "添加失败", "data": [],
+        }
+        # 合法单：文件级拒绝，报全局清单
+        assert good.create_result["success"] is False
+        assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
+        assert good.create_result["error"]["details"]["unknown_box_types"] == ["40GOH"]
 
-    def test_canonical_known_pass(self):
-        order = _canonical_order("OOLU10000002", "40HQ")
-        _reject_unknown_box_types([order], force=False)
-        assert order.create_result is None  # 未被标记 → 后续照常提交
+    def test_all_known_pass(self):
+        """全部箱型在白名单 → 不拒（create_result 保持 None 待提交）。"""
+        orders = [_canonical_order("OOLU10000003", "40HQ"), _canonical_order("OOLU10000004", "40OT")]
+        rejected = _reject_unknown_box_types(orders)
+        assert rejected is False
+        assert all(o.create_result is None for o in orders)
 
     def test_legacy_order_data_box_rejected(self):
-        """既有语义管线（BillOrder.order_data.box）同样校验。"""
-        order = BillOrder(order_num1="OOLU10000003", order_data={"box": [{"b_type": "40GOH"}]})
-        _reject_unknown_box_types([order], force=False)
-        assert order.create_result["error"]["code"] == "unknown_box_type"
+        """既有语义管线（BillOrder.order_data.box）同样参与文件级校验。"""
+        legacy = BillOrder(order_num1="OOLU10000005", order_data={"box": [{"b_type": "40GOH"}]})
+        good = _canonical_order("OOLU10000006", "40HQ")
+        _reject_unknown_box_types([legacy, good])
+        assert legacy.create_result["error"]["code"] == "unknown_box_type"
+        assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
 
-    def test_mixed_only_unknown_rejected(self):
+    def test_non_standard_expression_does_not_trigger(self):
+        """非标表述（大冷）不触发文件级拒绝（既有规则放行）。"""
         orders = [
-            _canonical_order("OOLU10000004", "40HQ"),
-            _canonical_order("OOLU10000005", "40GOH"),
-            _canonical_order("OOLU10000006", "大冷"),
+            _canonical_order("OOLU10000007", "40HQ"),
+            _canonical_order("OOLU10000008", "大冷"),
         ]
-        _reject_unknown_box_types(orders, force=False)
-        assert orders[0].create_result is None
-        assert orders[1].create_result["error"]["code"] == "unknown_box_type"
-        assert orders[2].create_result is None  # 非标表述不校验
+        rejected = _reject_unknown_box_types(orders)
+        assert rejected is False
+        assert all(o.create_result is None for o in orders)
 
-    def test_force_skips_check(self):
-        order = _canonical_order("OOLU10000007", "40GOH")
-        _reject_unknown_box_types([order], force=True)
-        assert order.create_result is None  # force 跳过 → 照常提交
+    def test_multi_unknown_dedup_message(self):
+        """多个非法箱型：文件级清单去重保序。"""
+        orders = [
+            _canonical_order("OOLU10000009", "40GOH"),
+            _canonical_order("OOLU10000010", "20GOH"),
+            _canonical_order("OOLU10000011", "40HQ"),
+        ]
+        _reject_unknown_box_types(orders)
+        assert orders[2].create_result["error"]["message"] == "文件含非法箱型：40GOH、20GOH，请联系客服"
+        assert orders[2].create_result["error"]["details"]["unknown_box_types"] == ["40GOH", "20GOH"]
+        assert orders[2].create_result["error"]["details"]["upstream"]["code"] == "204"
 
     def test_already_marked_skipped_not_overwritten(self):
-        order = _canonical_order("OOLU10000008", "40GOH")
-        order.create_result = {"success": True, "skipped": True, "sn": "EX1", "error": None}
-        _reject_unknown_box_types([order], force=False)
-        assert order.create_result["skipped"] is True  # 历史成功单不重复校验
+        """已标记 skipped 的单不动（历史成功单必然合法，不参与文件级拒绝）。"""
+        skipped = _canonical_order("OOLU10000012", "40GOH")
+        skipped.create_result = {"success": True, "skipped": True, "sn": "EX1", "error": None}
+        bad = _canonical_order("OOLU10000013", "40GOH")
+        _reject_unknown_box_types([skipped, bad])
+        assert skipped.create_result["skipped"] is True
+        assert bad.create_result["error"]["code"] == "unknown_box_type"
 
 
 class TestBuildResultIntegration:
-    """端到端（junyu 家族 canonical 管线 + mock 下游）：拦截与 force 行为。"""
+    """端到端（junyu 家族 canonical 管线 + mock 下游）：文件级拒绝与 preview 行为。"""
 
     @staticmethod
     def _build_bytes(rows: list[dict]) -> bytes:
@@ -249,8 +272,8 @@ class TestBuildResultIntegration:
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
         return calls
 
-    def test_unknown_box_type_rejected_not_submitted(self, monkeypatch):
-        """40GOH 单拒绝（unknown_box_type、不调下游）；40HQ 单正常提交。"""
+    def test_any_unknown_rejects_whole_file_not_submitted(self, monkeypatch):
+        """文件含 40GOH → 全部单拒绝（含合法 40HQ 单），零 AddWork 提交。"""
         calls = self._fake_downstream(monkeypatch)
         result = build_result(
             filename="mix.xlsx",
@@ -263,29 +286,46 @@ class TestBuildResultIntegration:
             create_order=True,
         )
         assert result.summary["total"] == 2
-        assert result.summary["success"] == 1
-        assert result.summary["failed"] == 1
-        assert calls["addwork"] == 1  # 仅 40HQ 单提交
+        assert result.summary["success"] == 0
+        assert result.summary["failed"] == 2
+        assert calls["addwork"] == 0  # 文件级拒绝：任何单都不提交
+        # failed_details 透传上游业务码（对齐 TMS 204 失败口径）
+        assert result.summary["failed_details"] == [
+            {
+                "order_num": "OOLU12345678",
+                "error_code": "unknown_box_type",
+                "error_message": "文件含非法箱型：40GOH，请联系客服",
+                "error_upstream": {"code": "204", "msg": "添加失败", "data": []},
+            },
+            {
+                "order_num": "OOLU12345679",
+                "error_code": "unknown_box_type",
+                "error_message": "系统没有此箱型：40GOH，请联系客服",
+                "error_upstream": {"code": "204", "msg": "添加失败", "data": []},
+            },
+        ]
         by_bl = {o.bl_no: o for o in result.canonical_orders}
-        assert by_bl["OOLU12345678"].create_result["success"] is True
         rejected = by_bl["OOLU12345679"].create_result
         assert rejected["success"] is False
         assert rejected["error"]["code"] == "unknown_box_type"
         assert rejected["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
+        # 合法单同样被文件级拒绝
+        good = by_bl["OOLU12345678"].create_result
+        assert good["success"] is False
+        assert good["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
 
-    def test_force_unknown_submits_all(self, monkeypatch):
-        """force_unknown_box_types=true → 40GOH 也照常提交。"""
+    def test_clean_file_submits_all(self, monkeypatch):
+        """全白名单箱型 → 全部提交（文件级校验不误伤）。"""
         calls = self._fake_downstream(monkeypatch)
         result = build_result(
-            filename="force.xlsx",
+            filename="clean.xlsx",
             file_bytes=self._build_bytes(
                 [
-                    {"A": 1, "B": "客户甲", "E": "OOLU12345680", "D": "40GOH*1"},
-                    {"A": 2, "B": "客户甲", "E": "OOLU12345681", "D": "40HQ"},
+                    {"A": 1, "B": "客户甲", "E": "OOLU12345680", "D": "40HQ"},
+                    {"A": 2, "B": "客户甲", "E": "OOLU12345681", "D": "40OT"},
                 ]
             ),
             create_order=True,
-            force_unknown_box_types=True,
         )
         assert result.summary["success"] == 2
         assert result.summary["failed"] == 0
@@ -305,15 +345,32 @@ class TestBuildResultIntegration:
         assert result.summary["failed"] == 0
         assert calls["addwork"] == 1
 
-    def test_preview_never_checks_or_submits(self, monkeypatch):
-        """preview（create_order=false）不读白名单、不调下游（零副作用）。"""
+    def test_preview_also_rejects(self, monkeypatch):
+        """preview 也执行文件级校验：含非法箱型 → 单级 create_result 失败，零下游。"""
         calls = self._fake_downstream(monkeypatch)
         result = build_result(
             filename="preview.xlsx",
             file_bytes=self._build_bytes(
-                [{"A": 1, "B": "客户甲", "E": "OOLU12345683", "D": "40GOH*1"}]
+                [
+                    {"A": 1, "B": "客户甲", "E": "OOLU12345683", "D": "40GOH*1"},
+                    {"A": 2, "B": "客户甲", "E": "OOLU12345684", "D": "40HQ"},
+                ]
             ),
         )
-        assert result.summary is None
+        assert result.summary is None  # preview 契约不变
+        assert calls["addwork"] == 0
+        by_bl = {o.bl_no: o for o in result.canonical_orders}
+        assert by_bl["OOLU12345683"].create_result["error"]["code"] == "unknown_box_type"
+        assert by_bl["OOLU12345684"].create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
+
+    def test_preview_clean_keeps_null(self, monkeypatch):
+        """preview 全合法箱型 → create_result 保持 null（既有契约不变）。"""
+        calls = self._fake_downstream(monkeypatch)
+        result = build_result(
+            filename="preview-clean.xlsx",
+            file_bytes=self._build_bytes(
+                [{"A": 1, "B": "客户甲", "E": "OOLU12345685", "D": "40HQ"}]
+            ),
+        )
         assert calls["addwork"] == 0
         assert all(o.create_result is None for o in result.canonical_orders)

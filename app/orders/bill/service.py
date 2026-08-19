@@ -174,39 +174,62 @@ def _build_fee_reports(output, orders: list, create_order: bool) -> dict:
     return report
 
 
-def _reject_unknown_box_types(orders: list, force: bool) -> None:
-    """箱型白名单校验（2026-08-18）：标准代码形态箱型必须命中 TMS 箱型白名单，
-    未命中 → 该单 create_result 置失败（unknown_box_type，不调下游；force 跳过）。
-    既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交；
-    已标记 skipped 的单不重复校验（历史成功单必然合法）。
+def _reject_unknown_box_types(orders: list) -> bool:
+    """文件级箱型白名单校验（2026-08-18 用户拍板）：任一单含标准代码形态且不在
+    白名单的箱型 → 全部未决单拒绝（unknown_box_type，不调下游），返回 True。
+
+    preview 与 create 统一执行（preview 也拒）；已标记 skipped 的单不动
+    （历史成功单必然合法）。单级 message 报该单自己的非法箱型，无非法箱型的
+    单报文件级清单；details.unknown_box_types 同 message 口径。
     """
-    if force:
-        return
     from .box_whitelist import check_unknown_box_types
 
-    for order in orders:
+    def _types(order) -> list[str]:
+        if isinstance(getattr(order, "box_groups", None), list):
+            return [g.b_type for g in order.box_groups if getattr(g, "b_type", None)]
+        return [
+            box.get("b_type")
+            for box in (order.order_data or {}).get("box", []) or []
+            if isinstance(box, dict) and box.get("b_type")
+        ]
+
+    file_unknown: list[str] = []
+    per_order: dict[int, list[str]] = {}
+    for idx, order in enumerate(orders):
+        if order.create_result is not None:
+            continue  # 已标记（skipped/预判）的单不动
+        unknown = check_unknown_box_types(_types(order))
+        if unknown:
+            per_order[idx] = unknown
+            for t in unknown:
+                if t not in file_unknown:
+                    file_unknown.append(t)
+    if not file_unknown:
+        return False
+    for idx, order in enumerate(orders):
         if order.create_result is not None:
             continue
-        if isinstance(getattr(order, "box_groups", None), list):
-            types = [g.b_type for g in order.box_groups if getattr(g, "b_type", None)]
-        else:
-            types = [
-                box.get("b_type")
-                for box in (order.order_data or {}).get("box", []) or []
-                if isinstance(box, dict) and box.get("b_type")
-            ]
-        unknown = check_unknown_box_types(types)
-        if unknown:
-            order.create_result = {
-                "success": False,
-                "sn": None,
-                "error": {
-                    "code": "unknown_box_type",
-                    "message": f"系统没有此箱型：{'、'.join(unknown)}，请联系客服",
-                    "description": "箱型不在 TMS 支持清单中，请联系客服或改用支持的箱型",
-                    "details": {"unknown_box_types": unknown},
+        order_unknown = per_order.get(idx, [])
+        order.create_result = {
+            "success": False,
+            "sn": None,
+            "error": {
+                "code": "unknown_box_type",
+                "message": (
+                    f"系统没有此箱型：{'、'.join(order_unknown)}，请联系客服"
+                    if order_unknown
+                    else f"文件含非法箱型：{'、'.join(file_unknown)}，请联系客服"
+                ),
+                "description": "箱型不在 TMS 支持清单中，请联系客服",
+                "details": {
+                    "unknown_box_types": order_unknown or file_unknown,
+                    # 全场景业务码统一可达（§3.7/既有规范）：本地拦截等价于该单
+                    # 添加失败，对齐 TMS「新建全部失败 → 204」口径
+                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
                 },
-            }
+            },
+        }
+    return True
 
 
 def build_result(
@@ -214,7 +237,6 @@ def build_result(
     filename: str,
     file_bytes: bytes,
     create_order: bool = False,
-    force_unknown_box_types: bool = False,
 ) -> BillParseResult:
     """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
 
@@ -222,9 +244,10 @@ def build_result(
     skipped, created}；凭证失败抛 UpstreamError（502，不逐单执行）。meta 含
     source_sha256 / source_bytes / parsed_at / parser / raw_rows / template /
     unmatched_headers。
-    箱型白名单（2026-08-18）：create 模式提交前校验标准代码形态箱型是否命中
-    TMS 箱型白名单，未命中单拒绝（unknown_box_type，不调下游）；非标表述
-    不校验（既有规则不变）；force_unknown_box_types=true 跳过校验强制提交。
+    箱型白名单（2026-08-18 用户拍板）：**文件级校验**——preview 与 create 统一
+    执行，任一单含标准代码形态且不在白名单的箱型（如 40GOH）→ 全部未决单拒绝
+    （unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），不调下游；
+    无强制提交通道；非标表述（大冷/拼箱/17M飞翼车等）不校验（既有规则不变）。
     """
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
@@ -310,6 +333,13 @@ def build_result(
     # 未决单（去重后待处理）：preview 时未预判，即全量
     pending = [o for o in canonical_orders if o.create_result is None]
 
+    # 文件级箱型白名单校验（2026-08-18 用户拍板）：preview 与 create 统一执行，
+    # 任一单含非法箱型（标准代码形态不在白名单，如 40GOH）→ 全部未决单拒绝，
+    # 不调下游（置于费目自举/建档之前，被拒文件零副作用）；无强制提交通道。
+    # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
+    all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
+    _reject_unknown_box_types(all_pending)
+
     fee_reconciliation = None
     if pending and output.canonical_rows is not None:
         # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
@@ -330,11 +360,6 @@ def build_result(
     upstream = None
     file_sha256 = _sha256(file_bytes)
     if create_order:
-        # 箱型白名单校验（2026-08-18）：标准代码形态箱型必须命中 TMS 箱型白名单，
-        # 未命中 → 该单拒绝（unknown_box_type，不调下游；调用方可 force 强制提交）。
-        # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
-        _reject_unknown_box_types((*canonical_orders, *orders), force_unknown_box_types)
-
         if orders:
             # 既有语义：双通道下单（行为语义不变）
             create_orders(orders, source_sha256=file_sha256)
@@ -365,12 +390,20 @@ def build_result(
             "success_sns": [
                 o.create_result.get("sn") for o in created if o.create_result.get("success")
             ],
-            # 失败单明细（单号 + 错误码/消息），人工可查
+            # 失败单明细（单号 + 错误码/消息/上游业务码），人工可查；本地拦截
+            # （unknown_box_type）额外带 error_upstream（对齐 TMS 204 失败口径）
             "failed_details": [
                 {
-                    "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-                    "error_code": (o.create_result.get("error") or {}).get("code"),
-                    "error_message": (o.create_result.get("error") or {}).get("message"),
+                    **{
+                        "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
+                        "error_code": (o.create_result.get("error") or {}).get("code"),
+                        "error_message": (o.create_result.get("error") or {}).get("message"),
+                    },
+                    **(
+                        {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
+                        if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
+                        else {}
+                    ),
                 }
                 for o in created
                 if not o.create_result.get("success")

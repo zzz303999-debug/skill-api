@@ -317,10 +317,95 @@ function fmtBytes(n) {
 
 function fmtBody(raw, truncated, label) {
   const note = truncated ? "\n\n… " + (label || "内容") + "已截断（完整内容见 storage/logs/requests.jsonl）" : "";
+  const pretty = prettyJson(raw);
+  return pretty !== null ? pretty + note : raw + note;
+}
+
+// 容错 JSON 格式化：可 parse 直接格式化；截断 JSON 先修复（截到最后一个完整值
+// 并补全括号）再格式化；都失败返回 null（调用方保持原文）
+function prettyJson(raw) {
+  if (typeof raw !== "string") return null;
+  let parsed = null;
   try {
-    return JSON.stringify(JSON.parse(raw), null, 2) + note;
-  } catch {
-    return raw + note;
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    const repaired = repairTruncatedJson(raw);
+    if (repaired === null) return null;
+    try {
+      parsed = JSON.parse(repaired);
+    } catch (e2) {
+      return null;
+    }
+  }
+  return JSON.stringify(parsed, null, 2);
+}
+
+// 截断 JSON 容错修复：跳过字符串（含转义），按括号配平找到最后一个完整值边界；
+// 截断在字符串中间 → 闭合未完成字符串（去掉孤立转义符后补引号；属性名位置
+// 再补 :null 占位值）；截断在属性名后（等冒号）→ 从该 key 后截断补 :null；
+// 截断在值中间 → 截到最后一个完整值；均补全未闭合括号；结构已损坏返回 null
+function repairTruncatedJson(raw) {
+  const text = String(raw).replace(/\s*…\s*$/, "");
+  const stack = [];
+  let lastComplete = -1;
+  let lastKeyEnd = -1; // 最后一个完整属性名的闭合引号后位置
+  let lastKeyEndStackLen = 0; // 该属性名闭合时的容器深度（补全括号依据）
+  let inString = false;
+  let esc = false;
+  let strStart = -1; // 当前未闭合字符串的起始引号位置
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') {
+        inString = false;
+        // 闭合引号前一个非空白为 { 或 , → 该字符串是属性名（后续应为冒号）
+        const prev = text.slice(0, strStart).replace(/\s+$/, "").slice(-1);
+        if (prev === "{" || prev === ",") {
+          lastKeyEnd = i + 1;
+          lastKeyEndStackLen = stack.length;
+        }
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      strStart = i;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      stack.push(ch);
+    } else if (ch === "}" || ch === "]") {
+      const open = stack.pop();
+      if (open === undefined || (ch === "}" && open !== "{") || (ch === "]" && open !== "[")) {
+        return null; // 括号错配，无法修复
+      }
+      if (stack.length === 0) lastComplete = i + 1;
+    }
+  }
+  let head;
+  if (inString) {
+    // 截断点在字符串中间：去掉孤立转义符后闭合引号（字符串内容保留）
+    head = esc ? text.slice(0, -1) : text;
+    head += '"';
+    // 属性名位置（起始引号前一个非空白为 { 或 ,）→ 补 null 占位值保证语法合法
+    const prev = text.slice(0, strStart).replace(/\s+$/, "").slice(-1);
+    if (prev === "{" || prev === ",") head += ":null";
+  } else if (lastComplete > 0) {
+    head = text.slice(0, lastComplete); // 截到最后一个完整值
+  } else if (lastKeyEnd > 0) {
+    head = text.slice(0, lastKeyEnd) + ":null"; // 属性名后截断 → 补 null 值
+    while (stack.length > lastKeyEndStackLen) stack.pop(); // 丢弃该 key 之后开始的值结构（如未闭合数组）
+  } else {
+    head = text;
+  }
+  while (stack.length) head += stack.pop() === "{" ? "}" : "]"; // 补全括号（先内后外）
+  try {
+    JSON.parse(head); // 验证修复结果可 parse
+    return head;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -515,17 +600,27 @@ function downloadJson(payload, filename) {
 }
 
 // 导出时把 JSON 字符串字段还原为对象（多行缩进），方便人工排查；
-// 截断/非 JSON 内容解析失败则保持原文
+// 截断 JSON 先容错修复（截到最后一个完整值 + 补全括号）再还原为对象，
+// 非 JSON / 修复失败的内容保持原字符串
 function normalizeExportItem(item) {
   const out = { ...item };
   for (const key of ["body", "response", "response_full"]) {
     const v = out[key];
     if (typeof v === "string") {
+      let parsed = null;
       try {
-        out[key] = JSON.parse(v);
+        parsed = JSON.parse(v);
       } catch (e) {
-        // 非 JSON（如截断内容）保持原字符串
+        const repaired = repairTruncatedJson(v);
+        if (repaired !== null) {
+          try {
+            parsed = JSON.parse(repaired);
+          } catch (e2) {
+            parsed = null;
+          }
+        }
       }
+      if (parsed !== null) out[key] = parsed;
     }
   }
   return out;
