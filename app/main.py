@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import math
 import time
 import uuid
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import FastAPI, File, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, create_model
 
@@ -32,6 +33,7 @@ from app.core.skill_base import SkillBase, SkillMeta
 from app.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
+    DuplicateBillError,
     ServiceBusyError,
     SkillAPIError,
 )
@@ -46,6 +48,7 @@ from app.orders import (
     parse_source_fields,
     publish_create_order,
 )
+from app.orders.bill import BillParseResult, build_result
 
 setup_logging()
 log = get_logger(__name__)
@@ -66,12 +69,25 @@ _skill_executor = ThreadPoolExecutor(
 _inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 # 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
-_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico"}
+_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico", "/bill-import", "/bill-import-help"}
 
-# 鉴权豁免路径：健康检查、OpenAPI 文档与日志页面本身（页面无数据）；
+# 鉴权豁免路径：健康检查、OpenAPI 文档与日志/账单上传页面本身（页面无数据）；
 # /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
+# /orders/bill/import 为内网免 key 使用场景豁免（与页面配套，见 /bill-import），
+# 仅限可信内网部署；对外开放部署时应移出豁免并恢复页面 Key 输入。
 _AUTH_FREE_PATHS = frozenset(
-    {"/healthz", "/skills", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/logs"}
+    {
+        "/healthz",
+        "/skills",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/favicon.ico",
+        "/logs",
+        "/bill-import",
+        "/bill-import-help",
+        "/orders/bill/import",
+    }
 )
 
 
@@ -85,9 +101,7 @@ _light_limiter = rate_limit.SlidingWindowLimiter(
     window_seconds=settings.rate_limit_light_window_seconds,
 )
 _rate_limit_whitelist = frozenset(
-    ip.strip()
-    for ip in settings.rate_limit_whitelist.split(",")
-    if ip.strip()
+    ip.strip() for ip in settings.rate_limit_whitelist.split(",") if ip.strip()
 )
 _LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
 
@@ -266,6 +280,78 @@ async def _capture_json_response(response: Response) -> tuple[Response, str | No
     return rebuilt, text, False
 
 
+# 摘要中保留的最大未映射表头数与建档明细条数（其余只留计数，避免日志膨胀）
+_MAX_UNMATCHED_HEADERS_IN_SUMMARY = 20
+_MAX_ARCHIVE_ITEMS_IN_SUMMARY = 10
+
+
+def _summarize_import_response(text: str) -> str | None:
+    """把竞品录入（/orders/bill/import）完整响应压缩为排查摘要 JSON。
+
+    保留：文件/结算区间/行数/单数/create_order、建单统计 summary、meta 中
+    模板命中/引擎/未映射表头（截断）与基础资料计数；丢弃 orders /
+    canonical_orders 全量明细与 upstream 回显——排查定位用摘要足矣，
+    完整明细可从客户端响应重新获取。非 JSON 或非对象响应返回 None，
+    调用方保持原文（摘要失败不回退原始大 JSON 的兜底）。
+    """
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    out: dict[str, Any] = {
+        k: data.get(k)
+        for k in ("file", "bill_period", "total_rows", "order_count", "create_order")
+    }
+    if data.get("summary") is not None:
+        out["summary"] = data["summary"]
+    meta = data.get("meta") or {}
+    out["meta"] = {
+        "template": meta.get("template"),
+        "parser": meta.get("parser"),
+        "raw_rows": meta.get("raw_rows"),
+        "source_bytes": meta.get("source_bytes"),
+    }
+    unmatched = meta.get("unmatched_headers") or []
+    if unmatched:
+        out["meta"]["unmatched_headers"] = unmatched[:_MAX_UNMATCHED_HEADERS_IN_SUMMARY]
+        if len(unmatched) > _MAX_UNMATCHED_HEADERS_IN_SUMMARY:
+            out["meta"]["unmatched_truncated"] = (
+                len(unmatched) - _MAX_UNMATCHED_HEADERS_IN_SUMMARY
+            )
+    md = meta.get("master_data")
+    if isinstance(md, dict):
+        out["meta"]["master_data"] = {
+            k: md.get(k) for k in ("mode", "candidates", "degraded")
+        }
+        # 建档明细保留少量（含 archive_id），其余只留计数
+        for key in ("archived", "exists_external", "failed"):
+            items = md.get(key) or []
+            if items:
+                out["meta"]["master_data"][key] = items[:_MAX_ARCHIVE_ITEMS_IN_SUMMARY]
+                if len(items) > _MAX_ARCHIVE_ITEMS_IN_SUMMARY:
+                    out["meta"]["master_data"][f"{key}_truncated"] = (
+                        len(items) - _MAX_ARCHIVE_ITEMS_IN_SUMMARY
+                    )
+    return json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+
+
+def _summarize_response_for_log(path: str, text: str) -> str | None:
+    """按 access_log_summarize_paths 配置对匹配路径的 JSON 响应做摘要。
+
+    非匹配路径或摘要失败返回 None，调用方保留原始响应文本（响应截断标记
+    语义不变）。仅作用于成功响应（status < 400）；错误响应本身较小且是
+    排查重点，不摘要。
+    """
+    needles = [
+        p.strip() for p in settings.access_log_summarize_paths.split(",") if p.strip()
+    ]
+    if not needles or not any(n in path for n in needles):
+        return None
+    return _summarize_import_response(text)
+
+
 @app.middleware("http")
 async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     """请求访问日志（审计）：记录时间、客户端 IP、UA、方法、路径、上传文件、
@@ -306,9 +392,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         status_code = response.status_code
         if settings.access_log_record_response:
             try:
-                response, response_text, response_truncated = await _capture_json_response(
-                    response
-                )
+                response, response_text, response_truncated = await _capture_json_response(response)
             except Exception:
                 # 捕获失败时响应流可能已被部分消费，继续返回会造成空体与
                 # content-length 不匹配；直接抛出使请求走 500，避免静默损坏响应
@@ -318,9 +402,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         # 请求体超限（声明式 Content-Length 或 chunked 流式读取）：统一返回 413，
         # 与 try 内其他路径一致，finally 仍会记录审计
         status_code = 413
-        max_bytes = getattr(
-            request.state, "payload_max_bytes", settings.api_max_upload_bytes
-        )
+        max_bytes = getattr(request.state, "payload_max_bytes", settings.api_max_upload_bytes)
         request.state.error_code = "payload_too_large"
         request.state.error_detail = {
             "code": "payload_too_large",
@@ -342,6 +424,23 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     except Exception:
         raise
     finally:
+        # 竞品录入等大响应：按配置只落排查摘要（客户端响应不受影响，截断
+        # 标记同步重置——摘要本身远小于截断上限）；完整响应体单独保留
+        # response_full 供导出/取证，受独立上限截断（response_full_truncated）
+        response_summarized = False
+        response_full = None
+        response_full_truncated = False
+        if response_text is not None and status_code < 400:
+            summarized = _summarize_response_for_log(request.url.path, response_text)
+            if summarized is not None:
+                response_full = response_text
+                max_full = settings.access_log_response_full_max_chars
+                if max_full > 0 and len(response_full) > max_full:
+                    response_full_truncated = True
+                    response_full = response_full[:max_full]
+                response_text = summarized
+                response_truncated = False
+                response_summarized = True
         error_detail = getattr(request.state, "error_detail", None)
         if error_detail is None and status_code >= 400:
             # 非业务异常（如 FastAPI 校验 422）也记录错误信息，保证审计完整
@@ -364,6 +463,9 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
                 "body_truncated": body_truncated,
                 "response": response_text,
                 "response_truncated": response_truncated,
+                "response_summarized": response_summarized,
+                "response_full": response_full,
+                "response_full_truncated": response_full_truncated,
                 "status": status_code,
                 "error_code": getattr(request.state, "error_code", None),
                 "error": error_detail,
@@ -422,9 +524,7 @@ async def _http_probe(base_url: str, path: str) -> str:
     仅连接失败/超时视为 unreachable。
     """
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.health_probe_timeout_seconds
-        ) as client:
+        async with httpx.AsyncClient(timeout=settings.health_probe_timeout_seconds) as client:
             await client.get(f"{base_url.rstrip('/')}{path}")
         return "ok"
     except (httpx.HTTPError, OSError):
@@ -486,8 +586,13 @@ def list_request_logs(
     status: int | None = Query(default=None, ge=100, le=599),
     request_id: str | None = Query(default=None),
     ip: str | None = Query(default=None),
+    include_full: bool = Query(default=False),
 ) -> dict:
-    """请求访问日志列表（时间倒序），支持分页与过滤。"""
+    """请求访问日志列表（时间倒序），支持分页与过滤。
+
+    include_full=true 时返回摘要化条目的完整响应体 response_full
+    （大字段，仅导出/取证场景使用；列表默认剥离以保持页面轻量）。
+    """
     return access_log.query(
         limit=limit,
         offset=offset,
@@ -496,6 +601,7 @@ def list_request_logs(
         status=status,
         request_id=request_id,
         ip=ip,
+        include_full=include_full,
     )
 
 
@@ -504,6 +610,20 @@ def request_logs_page() -> FileResponse:
     """内置的请求日志查看页面。"""
     static_dir = Path(__file__).resolve().parent / "static"
     return FileResponse(static_dir / "logs.html")
+
+
+@app.get("/bill-import", include_in_schema=False)
+def bill_import_page() -> FileResponse:
+    """竞品账单上传页面（静态页，无数据；上传接口鉴权豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import.html")
+
+
+@app.get("/bill-import-help", include_in_schema=False)
+def bill_import_help_page() -> FileResponse:
+    """竞品账单导入操作手册页面（静态页，无数据；豁免见 _AUTH_FREE_PATHS）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "bill_import_help.html")
 
 
 def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
@@ -660,6 +780,81 @@ async def parse_order_document(
     content = await _read_upload(file)
     request.state.file_size = len(content)
     return await _parse_document_to_order(content, file.filename or "unnamed")
+
+
+@app.post(
+    "/orders/bill/import",
+    response_model=BillParseResult,
+    tags=["orders"],
+    summary="Import a competitor bill and optionally create orders",
+)
+async def import_bill(
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    create_order: bool = Form(default=False),
+) -> BillParseResult:
+    """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
+
+    create_order 缺省 false（只预览不下单）；显式传 true 时逐单创建订单
+    （sk 由调用方登录 TMS 后经请求头透传，AddWork/建档共用，见
+    app/orders/bill/client.py；2026-08-19 起移除服务端 GetWebKey → login 换取），
+    响应附 orders[].create_result 与 summary；create 模式缺 sk → 400 bad_request。
+    表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
+    请求自动记录访问日志（文件名/大小/耗时/状态码）。
+    create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
+    避免调用方把「已创建过」误判为成功（details 携带已创建业务编号）。
+    箱型白名单（v1.3）：preview 与 create 统一执行文件级校验——任一单含 TMS
+    白名单外标准代码箱型（如 40GOH）→ 全部未决单拒绝（unknown_box_type，
+    返回「系统没有此箱型，请联系客服」），不调下游；无强制提交通道。
+    """
+    sk = (request.headers.get("sk") or "").strip()
+    if create_order and not sk:
+        # TMS 全部下游接口（AddWork/建档）均以 sk 头鉴权：create 模式缺 token
+        # 直接拒绝（不进入解析/下单流程）；preview 零下游调用不要求
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
+    request.state.file_name = file.filename or "unnamed"
+    content = await _read_upload(file)
+    request.state.file_size = len(content)
+    result = await _run_in_executor(
+        partial(
+            build_result,
+            filename=file.filename or "unnamed",
+            file_bytes=content,
+            create_order=create_order,
+            sk=sk,
+        )
+    )
+    # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
+    # 便于调用方/监控区分「已存在」与「成功创建」；部分跳过（有新建）仍 200，
+    # 明细在 summary（skipped/created/success_sns）
+    if create_order and result.summary:
+        if result.summary["skipped"] > 0 and result.summary["created"] == 0:
+            success_sns = result.summary["success_sns"] or []
+            raise DuplicateBillError(
+                "all bills already created; nothing new was created",
+                details={
+                    "success_sns": result.summary["success_sns"],
+                    "summary": result.summary,
+                    # 对齐 create 模式 upstream 结构（code/msg/data），
+                    # 便于调用方统一按 upstream.code 判断业务结果
+                    "upstream": {
+                        "code": "409",
+                        "msg": "账单已全部创建过",
+                        "data": [{"sn": sn} for sn in success_sns],
+                    },
+                },
+            )
+    return result
 
 
 def _make_extract_route(skill: SkillBase):

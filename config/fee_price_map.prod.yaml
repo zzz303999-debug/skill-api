@@ -1,0 +1,45 @@
+# 标准费目码 → TMS 费目/price_id 映射表（生产环境）
+# 结构同 test 环境；生产价格表到位后整表补 price_id，tms_name 以生产价格表为准（名称可能不同）。
+# 缺本文件/加载失败 → 启动 fail fast（不允许裸跑）；补值只改 YAML，零代码。
+freight:     { tms_name: 运费,     price_id: null }
+pre_pick:    { tms_name: 预提费,   price_id: null }
+fuel:        { tms_name: 油费,     price_id: null }
+trip:        { tms_name: 出车费,   price_id: null }
+hijack:      { tms_name: 打劫费,   price_id: null }
+waiting:     { tms_name: 待时费,   price_id: null }
+pre_inport:  { tms_name: 预进港,   price_id: null }
+drop_box:    { tms_name: 落箱费,   price_id: null }
+amend:       { tms_name: 打单费,   price_id: null }
+yangshan:    { tms_name: 洋山费,   price_id: null }
+damage_box:  { tms_name: 坏污箱费, price_id: null }
+overdue:     { tms_name: 超期费,   price_id: null }
+overweight:  { tms_name: 超重费,   price_id: null }
+inspect:     { tms_name: 动检费,   price_id: null }
+weigh:       { tms_name: 过磅费,   price_id: null }
+tally:       { tms_name: 理货费,   price_id: null }
+move:        { tms_name: 搬移费,   price_id: null }
+lift:        { tms_name: 上下车费, price_id: null }
+port_misc:   { tms_name: 港杂费,   price_id: null }
+tax:         { tms_name: 税金,     price_id: null, import: false }
+other:       { tms_name: 其它费,   price_id: null }
+
+# 费目自举（T24/T25）：生产默认关闭——价格表由运维管控，自举属越权行为，需显式开启。
+# 结构与 test 环境一致（结构同步便于运维开启后直接生效）；endpoint_key 复用 master_data endpoints。
+fee_bootstrap:
+  enabled: false
+  endpoint_key: price_create
+  create_defaults:
+    sn_prefix: AUTO
+    inout: "3"
+    is_get: on
+    is_pay: on
+    price_type: "1"
+    is_profit: "1"
+    status: "1"
+    dai_dian: "2"
+    bao_zhang: "1"
+    od: "0"
+    use_imprest: "0"
+    expense_rate: "5"
+    class_id: "4612"
+    classification_name: 运费
