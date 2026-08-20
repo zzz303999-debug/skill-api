@@ -34,6 +34,7 @@ from app.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
     DuplicateBillError,
+    DuplicateManifestError,
     ServiceBusyError,
     SkillAPIError,
 )
@@ -49,6 +50,7 @@ from app.orders import (
     publish_create_order,
 )
 from app.orders.bill import BillParseResult, build_result
+from app.orders.manifest import ManifestParseResult, build_manifest_result
 
 setup_logging()
 log = get_logger(__name__)
@@ -850,6 +852,71 @@ async def import_bill(
                     "upstream": {
                         "code": "409",
                         "msg": "账单已全部创建过",
+                        "data": [{"sn": sn} for sn in success_sns],
+                    },
+                },
+            )
+    return result
+
+
+@app.post(
+    "/orders/manifest/import",
+    response_model=ManifestParseResult,
+    tags=["orders"],
+    summary="Import an English manifest and optionally create a TMS bill",
+)
+async def import_manifest(
+    file: Annotated[UploadFile, File()],
+    request: Request,
+    create_order: bool = Form(default=False),
+) -> ManifestParseResult:
+    """上传英文舱单（托书/SI，.xlsx），解析后预览或创建 TMS 舱单（addBill）。
+
+    create_order 缺省 false（只预览不触达 TMS）；显式传 true 时创建舱单
+    （sk 由调用方登录 TMS 后经请求头透传，addBill 端点鉴权，见
+    app/orders/manifest/client.py），响应附 orders[].create_result 与 summary。
+    家族识别/格式校验/坏文件等由 parse_manifest 覆盖，错误统一走全局异常处理；
+    箱型白名单复用账单导入同一份配置（config/box_type_whitelist.yaml）：
+    任一单含白名单外标准码箱型 → 全部未决单拒绝（unknown_box_type），
+    preview 亦拒绝、不调下游（对齐账单导入 v1.3 语义）。
+    create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_manifest。
+    """
+    sk = (request.headers.get("sk") or "").strip()
+    if create_order and not sk:
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
+    request.state.file_name = file.filename or "unnamed"
+    content = await _read_upload(file)
+    request.state.file_size = len(content)
+    result = await _run_in_executor(
+        partial(
+            build_manifest_result,
+            filename=file.filename or "unnamed",
+            file_bytes=content,
+            create_order=create_order,
+            sk=sk,
+        )
+    )
+    if create_order and result.summary:
+        if result.summary["skipped"] > 0 and result.summary["created"] == 0:
+            success_sns = result.summary["success_sns"] or []
+            raise DuplicateManifestError(
+                "manifest already created; nothing new was created",
+                details={
+                    "success_sns": result.summary["success_sns"],
+                    "summary": result.summary,
+                    "upstream": {
+                        "code": "409",
+                        "msg": "舱单已全部创建过",
                         "data": [{"sn": sn} for sn in success_sns],
                     },
                 },

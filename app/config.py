@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     # 竞品账单导入下游（AddWork 端点 + sk 头鉴权；sk 由调用方登录 TMS 后经请求头透传）
     jxt_addwork_url: str = "https://s3.jxt56.com/Car/WorkOut/AddWork"
     jxt_timeout_seconds: int = Field(default=30, ge=1, le=300)
+    # 舱单导入下游（addBill 端点，JSON body + sk 头；2026-08-19 抓包确认，
+    # 与 AddWork 不同域名不同通道，超时复用 jxt_timeout_seconds 口径独立配置）
+    jxt_manifest_addbill_url: str = "https://service.jxt56.com/crm/order/bill/addBill"
     # to_other 长尾监控阈值（T14）：某原费目名归并次数 ≥ 该值 → 对账报告 warning
     # 提示升级为显式映射（补映射 = 改模板 fees.mapping，零代码）
     fee_to_other_warning_threshold: int = Field(default=50, ge=1, le=10000)

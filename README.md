@@ -3,13 +3,15 @@
 单证解析与业务数据接入服务：把散落的单证解析能力封装成带强类型契约的 HTTP 接口，供其他业务系统调用。内置能力：
 
 - **竞品账单导入 TMS**：上传竞品应收对账单，解析归集后预览或批量创建订单（`POST /orders/bill/import`）
+- **舱单导入 TMS**：上传英文舱单（托书/SI，`.xlsx`），解析后预览或创建 TMS 舱单（`POST /orders/manifest/import`）
 - **订单创建**：自由文本 / 上传文档 → 订单字段 → 调用下游下单（`POST /orders`、`POST /orders/parse-document`）
 - **托书抽取**：海运托书（PDF/图片/doc/docx/xlsx）→ 结构化 JSON（`POST /skills/tuoshu/extract`）
 
 ## 特性
 
-- **多接口服务**：skill 可扩展（自动发现挂路由）+ 订单链路 + 竞品账单导入，OpenAPI 文档展示各接口精确输入输出 schema
+- **多接口服务**：skill 可扩展（自动发现挂路由）+ 订单链路 + 竞品账单导入 + 舱单导入，OpenAPI 文档展示各接口精确输入输出 schema
 - **竞品账单导入**：模板驱动解析（内置模板 + AI 表头映射自动固化）、四类归集（业务信息/财务信息 → 订单，基础信息 → 客户/门点/司机/车辆建档，费用栏目 → 费用管理）、preview/create 双模式、按提单号去重（first-write-wins）
+- **舱单导入**：家族识别（托书/SI）+ label 定位解析，`.xlsx` → TMS 舱单字段（addBill JSON 通道），preview/create 双模式、按提单号去重（first-write-wins）、箱型白名单与账单导入共用一份配置
 - **统一 LLM 出口**：所有 LLM 调用走 `app.llm`（OpenAI-compatible，thinking 模式/JSON schema 探测降级）
 - **页级质量路由**：合格 PDF 页走 `pdfplumber`，扫描/残缺页走 MinerU；图片按文件签名校验后直传 MinerU，失败或低置信时转视觉模型
 - **鉴权**：配置 `API_KEY` 后所有接口必须携带凭证（Bearer / X-API-Key），未授权请求留审计记录
@@ -56,6 +58,13 @@ skill-api/
 │   │       ├── client.py        # 竞品账单下游（GetWebKey → login → AddWork）
 │   │       ├── service.py       # 编排（parse → aggregate → create）
 │   │       └── schema.py        # 账单导入响应契约
+│   │   └── manifest/            # 舱单导入（/orders/manifest/import）
+│   │       ├── parser.py        # 家族识别 + label 定位提取 + 箱明细模式识别
+│   │       ├── payload.py       # TMS addBill 载荷构建（每箱运价恒 0）
+│   │       ├── registry.py      # 成功单去重注册表（提单号 first-write-wins）
+│   │       ├── client.py        # 舱单下游 addBill 提交（JSON body + sk 头）
+│   │       ├── service.py       # 编排（parse → 白名单 → preview/create）
+│   │       └── schema.py        # 舱单导入响应契约
 │   └── skills/
 │       └── tuoshu/              # 海运托书抽取 skill
 │           ├── skill.py         # 编排：convert → prompt → LLM → 后处理 → 校验
@@ -70,9 +79,9 @@ skill-api/
 │   └── Dockerfile               # MinerU CPU 镜像构建（模型随镜像发布）
 ├── scripts/
 │   └── deploy.sh                # 服务器部署脚本（拉码、构建、健康检查、回滚）
-├── docs/                        # 需求/设计/接口文档（托书、竞品账单导入）
+├── docs/                        # 需求/设计/接口文档（托书、竞品账单导入、舱单）
 ├── tests/                       # 单元测试 + golden 资产（tests/golden/）
-├── storage/                     # 运行期数据（日志、账单模板固化、导入去重注册表）——git 忽略
+├── storage/                     # 运行期数据（日志、账单模板固化、账单/舱单导入去重注册表）——git 忽略
 ├── Dockerfile
 ├── docker-compose.yml           # 本地/单机部署（skill-api + MinerU）
 ├── docker-compose.deploy.yml    # 生产部署（镜像发布 + 构建 MinerU）
@@ -260,6 +269,31 @@ curl -X POST http://localhost:9000/orders/bill/import \
 - **create 模式**：逐单走 `GetWebKey → login → AddWork` 链路创建订单；按提单号去重（first-write-wins，成功单登记 `imported_orders.json`，同提单号再次导入整体忽略）；下游凭证获取失败返回 `502`
 - **响应**：`file`/`bill_period`/`total_rows`/`order_count`/`create_order`/`orders`（或 `canonical_orders`）/`summary`/`upstream`/`meta`；完整结构见 OpenAPI schema
 
+### `POST /orders/manifest/import`
+
+上传英文舱单（托书/SI，`.xlsx`），解析后**预览或创建 TMS 舱单**（addBill JSON 通道）。详细规格见 [`docs/舱单/舱单导入接口文档.md`](docs/舱单/舱单导入接口文档.md)。
+
+请求：`multipart/form-data`
+
+- `file`：舱单文件（仅 `.xlsx`，magic bytes 校验，上限 20 MB）
+- `create_order`：`false`（默认，只预览不触达 TMS）/ `true`（逐单创建）
+- `sk` 请求头：create 模式必填，TMS token 原样透传下游（服务端不落盘）
+
+```bash
+curl -X POST http://localhost:9000/orders/manifest/import \
+  -F "file=@./SI.xlsx" \
+  -F "create_order=false"
+```
+
+行为要点：
+
+- **解析**：家族识别（托书 Entrusting books / SI Shipping Instruction）+ label 定位提取 + 箱明细内容模式识别，一文件一票
+- **必填三项**：提单号 / 箱型箱量 / 起运港（POL 原文清洗，自由输入）；preview 缺失只标记，create 拦截该单（不阻塞其他单，错误码 `manifest_order_not_ready`）
+- **箱型白名单**：复用账单导入同一份 `config/box_type_whitelist.yaml`；任一单含白名单外标准码箱型 → 全部未决单拒绝（400 `unknown_box_type`），preview 亦拒绝、不调下游
+- **preview 模式零副作用**：不触达 TMS、不写任何注册表
+- **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；按提单号去重（first-write-wins，成功单登记 `imported_manifests.json`）；全部命中无新建 → 409 `duplicate_manifest`；失败单不登记，重导照常提交；不自动重试
+- **响应**：`file`/`create_order`/`orders`（含 `order_data` 请求体回显与 `create_result`）/`summary`/`upstream`/`meta`；完整结构见 OpenAPI schema
+
 ## 添加新 skill
 
 三步：
@@ -295,6 +329,7 @@ curl -X POST http://localhost:9000/orders/bill/import \
 | `JXT_GETWEBKEY_URL` | 竞品账单下游凭证接口，默认 `https://a3.jxt56.com/Api/Account/GetWebKey` |
 | `JXT_LOGIN_URL` | 竞品账单下游登录接口，默认 `https://a3.jxt56.com/Api/login` |
 | `JXT_ADDWORK_URL` | 竞品账单下单接口，默认 `https://s3.jxt56.com/Car/WorkOut/AddWork` |
+| `JXT_MANIFEST_ADDBILL_URL` | 舱单新增接口（addBill，JSON body + `sk` 头，与 AddWork 不同通道），默认 `https://service.jxt56.com/crm/order/bill/addBill` |
 | `JXT_TIMEOUT_SECONDS` | 竞品账单下游超时秒数，默认 30 |
 | `JXT_CREATE_CHANNEL` | 下单通道：`form`=AddWork 表单（默认，实测可用）；`json`=嵌套 JSON（旧默认，暂不可用） |
 | `FEE_TO_OTHER_WARNING_THRESHOLD` | to_other 长尾监控阈值：某原费目名归并次数 ≥ 该值 → 对账报告 warning |
