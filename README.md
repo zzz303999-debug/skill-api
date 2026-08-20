@@ -277,6 +277,7 @@ curl -X POST http://localhost:9000/orders/bill/import \
 
 - `file`：舱单文件（仅 `.xlsx`，magic bytes 校验，上限 20 MB）
 - `create_order`：`false`（默认，只预览不触达 TMS）/ `true`（逐单创建）
+- `force`：缺省 `false`；create 模式下显式传 `true` 时跳过本地去重查重（TMS 侧已删除该单后重录场景，重复风险调用方自负）
 - `sk` 请求头：create 模式必填，TMS token 原样透传下游（服务端不落盘）
 
 ```bash
@@ -291,7 +292,7 @@ curl -X POST http://localhost:9000/orders/manifest/import \
 - **必填三项**：提单号 / 箱型箱量 / 起运港（POL 原文清洗，自由输入）；preview 缺失只标记，create 拦截该单（不阻塞其他单，错误码 `manifest_order_not_ready`）
 - **箱型白名单**：复用账单导入同一份 `config/box_type_whitelist.yaml`；任一单含白名单外标准码箱型 → 全部未决单拒绝（400 `unknown_box_type`），preview 亦拒绝、不调下游
 - **preview 模式零副作用**：不触达 TMS、不写任何注册表
-- **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；按提单号去重（first-write-wins，成功单登记 `imported_manifests.json`）；全部命中无新建 → 409 `duplicate_manifest`；失败单不登记，重导照常提交；不自动重试
+- **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；按提单号去重（first-write-wins，成功单登记 `imported_manifests.json`）；全部命中无新建 → 409 `duplicate_manifest`；`force=true` 跳过去重查重（TMS 删单后重录）；失败单不登记，重导照常提交；不自动重试
 - **响应**：`file`/`create_order`/`orders`（含 `order_data` 请求体回显与 `create_result`）/`summary`/`upstream`/`meta`；完整结构见 OpenAPI schema
 
 ## 添加新 skill

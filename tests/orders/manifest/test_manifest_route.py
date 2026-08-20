@@ -100,6 +100,28 @@ class TestRouteCreate:
         assert body["error"]["details"]["success_sns"] == ["11801"]
         assert body["error"]["details"]["upstream"]["code"] == "409"
 
+    def test_force_reimport_bypasses_409(self, auth_bytes, monkeypatch):
+        """重导 409 → force=true 跳过本地去重重新创建（TMS 删单后重录）。"""
+        def fake(_payload, _sk):
+            return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
+
+        monkeypatch.setattr(service_module, "submit_manifest", fake)
+        client = TestClient(app)
+        assert _post(
+            client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
+        ).status_code == 200
+        assert _post(
+            client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
+        ).status_code == 409
+        r = _post(
+            client,
+            auth_bytes,
+            data={"create_order": "true", "force": "true"},
+            headers=CREATE_HEADERS,
+        )
+        assert r.status_code == 200
+        assert r.json()["summary"]["created"] == 1
+
     def test_create_all_failed_204_upstream(self, auth_bytes, monkeypatch):
         """下游全拒 → 200 + upstream 204（业务失败，非 HTTP 错误）。"""
         def fake(_payload, _sk):

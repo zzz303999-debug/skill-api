@@ -119,6 +119,28 @@ class TestCreate:
         assert result.summary["created"] == 0
         assert result.upstream is None  # 全部 skipped → None（路由层转 409）
 
+    def test_force_reimport_after_tms_delete(self, auth_bytes, monkeypatch):
+        """force=True 跳过去重：TMS 侧删单后重录场景（重复风险调用方自负）。"""
+        _patch_submit(
+            monkeypatch,
+            {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}},
+        )
+        build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk")
+        # 常规重导 → skipped 不提交
+        calls = _patch_submit(monkeypatch, {"success": True, "sn": "99999"})
+        r1 = build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk")
+        assert calls["n"] == 0 and r1.orders[0].create_result["skipped"] is True
+        # force 重导 → 重新提交
+        calls = _patch_submit(
+            monkeypatch,
+            {"success": True, "sn": "11802", "error": None, "upstream": {"bId": 11802}},
+        )
+        r2 = build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk", force=True)
+        assert calls["n"] == 1
+        cr = r2.orders[0].create_result
+        assert cr["success"] is True and not cr.get("skipped")
+        assert r2.summary["created"] == 1
+
     def test_upstream_rejection_failed_not_registered(self, auth_bytes, monkeypatch):
         """下游 204 拒绝 → 失败单不登记，可重导重试。"""
         _patch_submit(monkeypatch, {"success": False, "sn": None, "error": {"code": "x", "message": "m"}})

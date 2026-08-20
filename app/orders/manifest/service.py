@@ -92,10 +92,12 @@ def _mark_skipped(order, sn: str) -> None:
     order.create_result = {"success": True, "skipped": True, "sn": sn, "error": None}
 
 
-def _create_one(order, sk: str, file_sha256: str) -> None:
+def _create_one(order, sk: str, file_sha256: str, force: bool = False) -> None:
     """单舱单创建管线：必填拦截 → 去重查 → 提交 → 登记（per-bl_no 锁临界区）。
 
     已在解析/白名单阶段标记 create_result 的单（箱型拒绝）直接跳过提交。
+    force=True 跳过去重查重（本地注册表不知晓 TMS 侧删除：TMS 删单后重录
+    场景由调用方显式强制，重复风险自负）。
     """
     if order.create_result is not None:
         return
@@ -103,10 +105,11 @@ def _create_one(order, sk: str, file_sha256: str) -> None:
         _mark_not_ready(order)
         return
     with lock_for(order.bl_no):
-        rec = get_manifest_registry().lookup(order.bl_no)
-        if rec:
-            _mark_skipped(order, str(rec.get("sn") or ""))
-            return
+        if not force:
+            rec = get_manifest_registry().lookup(order.bl_no)
+            if rec:
+                _mark_skipped(order, str(rec.get("sn") or ""))
+                return
         payload = to_submit_payload(build_order_data(order))
         result = submit_manifest(payload, sk)
         order.create_result = result
@@ -122,8 +125,9 @@ def build_manifest_result(
     file_bytes: bytes,
     create_order: bool = False,
     sk: str = "",
+    force: bool = False,
 ) -> ManifestParseResult:
-    """编排入口：解析 → 白名单 → 运价回填 → preview/create → 响应组装。"""
+    """编排入口：解析 → 白名单 → preview/create → 响应组装（force 见 _create_one）。"""
     file_sha256 = _sha256(file_bytes)
     out = parse_manifest(file_bytes)
     order = out.order
@@ -135,7 +139,7 @@ def build_manifest_result(
     order.order_data = build_order_data(order)
 
     if create_order:
-        _create_one(order, sk, file_sha256)
+        _create_one(order, sk, file_sha256, force=force)
 
     summary = None
     upstream = None
