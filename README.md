@@ -289,8 +289,8 @@ curl -X POST http://localhost:9000/orders/manifest/import \
 行为要点：
 
 - **解析**：家族识别（托书 Entrusting books / SI Shipping Instruction）+ label 定位提取 + 箱明细内容模式识别，一文件一票
-- **必填三项**：提单号 / 箱型箱量 / 起运港（POL 原文清洗，自由输入）；preview 缺失只标记，create 拦截该单（不阻塞其他单，错误码 `manifest_order_not_ready`）
-- **箱型白名单**：复用账单导入同一份 `config/box_type_whitelist.yaml`；任一单含白名单外标准码箱型 → 全部未决单拒绝（400 `unknown_box_type`），preview 亦拒绝、不调下游
+- **必填三项**：提单号 / 箱型箱量 / 起运港（POL 原文清洗，自由输入）；`bl_no`/`pol` 缺失 preview 只标记、create 拦截该单（错误码 `manifest_order_not_ready`）；**箱型缺失（`box_groups` 为空）文件级拒绝**（v1.7：preview 亦拒绝、不调下游，错误码 `manifest_box_missing`）
+- **箱型白名单**：复用账单导入同一份 `config/box_type_whitelist.yaml`；任一单含白名单外标准码箱型 → 全部未决单拒绝（400 `unknown_box_type`），preview 亦拒绝、不调下游；与箱型缺失拒绝互斥（空列表不触发白名单）
 - **preview 模式零副作用**：不触达 TMS、不写任何注册表
 - **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；按提单号去重（first-write-wins，成功单登记 `imported_manifests.json`）；全部命中无新建 → 409 `duplicate_manifest`；`force=true` 跳过去重查重（TMS 删单后重录）；失败单不登记，重导照常提交；不自动重试
 - **响应**：`file`/`create_order`/`orders`（含 `order_data` 请求体回显与 `create_result`）/`summary`/`upstream`/`meta`；完整结构见 OpenAPI schema

@@ -180,3 +180,60 @@ class TestBoxWhitelist:
         assert calls["n"] == 0
         assert result.summary["failed"] == 1
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+
+
+class TestBoxMissing:
+    """箱型整体缺失文件级拒绝（v1.7：preview 亦拒绝；不调下游；与白名单互斥）。"""
+
+    def _no_box_bytes(self, auth_bytes) -> bytes:
+        """清空托书 Container volume 值格 → 解析无箱型（box_groups 空）。"""
+        wb = load_workbook(io.BytesIO(auth_bytes))
+        wb.active.cell(15, 8).value = None
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_box_missing_rejected_preview(self, auth_bytes):
+        """preview 亦拒绝：create_result 标记 manifest_box_missing，summary 仍 null。"""
+        result = build_manifest_result("a.xlsx", self._no_box_bytes(auth_bytes))
+        order = result.orders[0]
+        assert order.create_result["success"] is False
+        assert order.create_result["error"]["code"] == "manifest_box_missing"
+        assert "box_groups" in order.create_result["error"]["message"]
+        details = order.create_result["error"]["details"]
+        assert details["missing_fields"] == ["box_groups"]
+        assert details["missing_reasons"]["box_groups"] == "原文未找到"
+        assert details["upstream"]["code"] == "204"
+        assert result.summary is None  # preview：summary 仍为 null（对齐账单）
+
+    def test_box_missing_not_submitted_create(self, auth_bytes, monkeypatch):
+        """create：不调下游、不登记注册表；summary failed=1；upstream 204。"""
+        calls = _patch_submit(monkeypatch, {"success": True, "sn": "1"})
+        result = build_manifest_result(
+            "a.xlsx", self._no_box_bytes(auth_bytes), create_order=True, sk="tk"
+        )
+        assert calls["n"] == 0
+        order = result.orders[0]
+        assert order.create_result["error"]["code"] == "manifest_box_missing"
+        assert result.summary["failed"] == 1
+        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        from app.orders.manifest import registry
+
+        assert registry.get_manifest_registry().snapshot() == {}
+
+    def test_si_variant1_no_box_source_rejected(self, si_bytes):
+        """SI 变体 1（无底部汇总/明细无箱型列，天然无箱型）→ 同样文件级拒绝。"""
+        result = build_manifest_result("a.xlsx", si_bytes)
+        order = result.orders[0]
+        assert order.box_groups == []
+        assert order.create_result["error"]["code"] == "manifest_box_missing"
+
+    def test_whitelist_unknown_still_takes_precedence(self, auth_bytes):
+        """有箱型但白名单外 → 仍走 unknown_box_type（box_missing 不触发，互斥）。"""
+        wb = load_workbook(io.BytesIO(auth_bytes))
+        wb.active.cell(15, 8).value = "1*40GOH (FFAU7731669/SITR853037)"
+        buf = io.BytesIO()
+        wb.save(buf)
+        result = build_manifest_result("a.xlsx", buf.getvalue())
+        order = result.orders[0]
+        assert order.create_result["error"]["code"] == "unknown_box_type"

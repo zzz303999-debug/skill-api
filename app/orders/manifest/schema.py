@@ -21,7 +21,9 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 # create 模式必填（缺失 → 拦截该单不提交，preview 只报告）：
-# 提单号 / 箱型箱量 / 起运港（POL 原文）
+# 提单号 / 起运港（POL 原文）
+# （box_groups 自 v1.7 起升级为文件级拒绝 manifest_box_missing（preview 亦拒绝），
+#   不在 _mark_not_ready 按单拦截；保留于元组供解析层 missing 标记与防御）
 # （每箱运价已移出必填：TMS 误设必填 + 模版无运价字段 → 恒 0，2026-08-20）
 MANIFEST_REQUIRED: tuple[str, ...] = ("bl_no", "box_groups", "pol")
 

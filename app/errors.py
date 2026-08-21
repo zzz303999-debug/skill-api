@@ -46,6 +46,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     # ---- 舱单 ----
     "unknown_manifest_family": "舱单未识别，请使用支持的舱单",
     "manifest_order_not_ready": "舱单必填信息不完整，无法录入，请补充后重试",
+    "manifest_box_missing": "舱单未识别到箱型箱量，无法录入，请检查文件后重试",
     "duplicate_manifest": "舱单已全部创建过，本次未录入",
     # ---- 限流 ----
     "rate_limited": "请求过于频繁，已被限流，请稍后重试",

@@ -6,9 +6,10 @@
   check_unknown_box_types（用户确认「箱型复用账单录入的」）；文件级拒绝
   对齐账单语义——任一单含白名单外标准码箱型 → 全部未决单 create_result
   标记 unknown_box_type（preview 亦拒绝，不调下游，upstream 204 口径）；
+- 箱型整体缺失（v1.7）：解析未提取到箱型 → 文件级拒绝 manifest_box_missing
+  （preview 亦拒绝；形态对齐 unknown_box_type；空列表不触发白名单，互斥）；
 - 每箱运价恒 0（build_order_data 内冻结；模版无运价字段，TMS 误设必填）；
-- create 模式必填缺失（MANIFEST_REQUIRED 任意项）拦截该单
-  manifest_order_not_ready；
+- create 模式必填缺失（bl_no/pol）拦截该单 manifest_order_not_ready；
 - 去重：per-bl_no 锁包住「查重→提交→登记」临界区；成功单登记注册表，
   重导命中 skipped；失败单不登记；
 - preview 零副作用（不触达注册表读写、无下游调用）。
@@ -59,6 +60,36 @@ def _mark_box_type_rejection(order) -> bool:
             "description": "箱型不在 TMS 支持清单中，请联系客服",
             "details": {
                 "unknown_box_types": unknown,
+                # 全场景业务码统一可达：本地拦截等价于该单添加失败，
+                # 对齐 TMS「新建全部失败 → 204」口径
+                "upstream": {"code": "204", "msg": "添加失败", "data": []},
+            },
+        },
+    }
+    return True
+
+
+def _mark_box_missing_rejection(order) -> bool:
+    """箱型整体缺失文件级拒绝（v1.7，用户拍板）。
+
+    解析未提取到任何箱型（SI 变体 1 无箱型来源、箱型无箱量变体）→ preview 与
+    create 统一拒绝（manifest_box_missing，不调下游），形态对齐 unknown_box_type
+    （create_result 标记 + upstream 204 口径）。box_groups 为空不触发白名单校验
+    （空列表全放行），两者互斥。返回是否命中（调用方跳过后续提交）。
+    """
+    if order.box_groups:
+        return False
+    missing = {f: order.missing_reasons.get(f, "原文未找到") for f in ("box_groups",)}
+    order.create_result = {
+        "success": False,
+        "sn": None,
+        "error": {
+            "code": "manifest_box_missing",
+            "message": "舱单未识别到箱型箱量（box_groups），请检查文件后重试",
+            "description": "舱单未提取到箱型箱量，无法录入，请检查文件后重试",
+            "details": {
+                "missing_fields": ["box_groups"],
+                "missing_reasons": missing,
                 # 全场景业务码统一可达：本地拦截等价于该单添加失败，
                 # 对齐 TMS「新建全部失败 → 204」口径
                 "upstream": {"code": "204", "msg": "添加失败", "data": []},
@@ -127,13 +158,15 @@ def build_manifest_result(
     sk: str = "",
     force: bool = False,
 ) -> ManifestParseResult:
-    """编排入口：解析 → 白名单 → preview/create → 响应组装（force 见 _create_one）。"""
+    """编排入口：解析 → 箱型校验 → preview/create → 响应组装（force 见 _create_one）。"""
     file_sha256 = _sha256(file_bytes)
     out = parse_manifest(file_bytes)
     order = out.order
 
     # 箱型白名单文件级校验（preview 亦拒绝；对齐账单语义）
     _mark_box_type_rejection(order)
+    # 箱型整体缺失文件级拒绝（v1.7，preview 亦拒绝；空列表不触发白名单，互斥）
+    _mark_box_missing_rejection(order)
 
     # order_data 展示口径（每箱运价恒 0，build_order_data 内冻结）
     order.order_data = build_order_data(order)
