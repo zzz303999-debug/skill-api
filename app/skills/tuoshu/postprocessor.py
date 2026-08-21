@@ -7,6 +7,7 @@ from datetime import date
 from typing import Any
 
 from .normalizer import (
+    normalize_label,
     normalize_review_issues,
     parse_date_or_none,
 )
@@ -33,6 +34,7 @@ from .post_checks import (
     _validate_shipper_company,
 )
 from .post_common import (
+    _FIELD_LABEL_VOCAB,
     _MARKDOWN_PARAGRAPH_PREFIX_RE,
     _append_issue,
     _append_top_level_remark,
@@ -46,10 +48,12 @@ from .post_common import (
     _extract_table_column_values,
     _field_value,
     _header_company_candidates,
+    _looks_like_field_label,
     _person_name_is_in_source,
     _recipient_row_extras,
     _remove_issue,
     _remove_remark_clauses_containing,
+    _value_grounded_in_source,
 )
 
 _PERSON_FIELDS = ("sender", "sender_contact", "factory.contact")
@@ -64,6 +68,11 @@ _TRANSIT_LOOKUP_VALUES = (
     "见 EIR",
     "见设",
 )
+
+
+# 中转港值的裸简写（不在 _TRANSIT_LOOKUP_VALUES 全局兜底里，避免原文任意
+# 位置出现该词就触发 lookup 污染；仅在 transit 候选过滤时按待查语义处理）
+_BARE_TRANSIT_LOOKUP = frozenset({"设备单"})
 
 
 _ALWAYS_BLOCKING_CODES = {
@@ -84,6 +93,11 @@ _ALWAYS_BLOCKING_CODES = {
     "missing_container_type",
     "missing_address",
     "missing_customer",
+    "customer_conflicting_candidates",
+    "customer_ungrounded",
+    "mbl_no_not_verbatim",
+    "container_type_ungrounded",
+    "doc_ole_fallback_used",
     "hbl_misclassified_as_mbl",
     "hbl_no_not_verbatim",
     "person_name_not_verbatim",
@@ -134,6 +148,9 @@ _KNOWN_REVIEW_ISSUE_CODES = _ALWAYS_BLOCKING_CODES | {
     "notice_remark_restored",
     "legacy_xls_formula_unverified",
     "document_value_unclear",
+    "customer_unverified",
+    "customer_cross_chain",
+    "mbl_no_unverified",
 }
 
 
@@ -228,14 +245,74 @@ def _restore_explicit_header_fields(
         if value not in fm_values
     )
     explicit_customers = _extract_explicit_values(source_text, ("客户", "客户名称", "客户简称"))
+    notice_heading_values = _customer_notice_heading_candidates(source_text)
+    header_values = _header_company_candidates(source_text)
     customer_candidates = (
-        fm_values
-        or explicit_customers
-        or _customer_notice_heading_candidates(source_text)
-        or _header_company_candidates(source_text)
+        fm_values or explicit_customers or notice_heading_values or header_values
     )
     if len(customer_candidates) == 1:
         data["customer"] = customer_candidates[0]
+        # 采用首条非空链时，其余链若也有候选：透出为非阻断诊断，不静默丢弃
+        ignored_cross_chain = [
+            *explicit_customers,
+            *notice_heading_values,
+            *header_values,
+        ]
+        ignored_cross_chain = [
+            value
+            for value in ignored_cross_chain
+            if value != customer_candidates[0]
+        ]
+        if ignored_cross_chain:
+            _append_issue(
+                issues if issues is not None else data.setdefault("review_issues", []),
+                code="customer_cross_chain",
+                field="customer",
+                message="其他候选链也识别到不同客户值，已按优先级取首条链，建议人工抽检",
+                blocking=False,
+                source_values=list(dict.fromkeys(ignored_cross_chain)),
+            )
+    elif len(customer_candidates) > 1:
+        # 同一链内多个确定性候选：无法唯一裁决，置空待人工填入，不猜
+        data["customer"] = None
+        _append_issue(
+            issues if issues is not None else data.setdefault("review_issues", []),
+            code="customer_conflicting_candidates",
+            field="customer",
+            message="客户确定性候选有多个且无法唯一确定，已置空待人工填入",
+            source_values=customer_candidates,
+        )
+    elif isinstance(data.get("customer"), str) and data["customer"].strip():
+        # 四条确定性链均未命中但模型给出了值：验证或置空，不采信无据值
+        model_customer = data["customer"].strip()
+        if source_text and _value_grounded_in_source(model_customer, source_text):
+            _append_issue(
+                issues if issues is not None else data.setdefault("review_issues", []),
+                code="customer_unverified",
+                field="customer",
+                message="客户值仅由模型输出（原文可找到依据），FM/客户栏/通知抬头/正文抬头四条确定性链均未命中，建议人工抽检",
+                blocking=False,
+                source_values=[model_customer],
+            )
+        elif source_text:
+            data["customer"] = None
+            _append_issue(
+                issues if issues is not None else data.setdefault("review_issues", []),
+                code="customer_ungrounded",
+                field="customer",
+                message="客户值未在原文中找到依据，已置空待人工填入",
+                source_values=[model_customer],
+            )
+        else:
+            # 纯视觉输入无文本可核对：保留值但必须提示不可验证
+            _append_issue(
+                issues if issues is not None else data.setdefault("review_issues", []),
+                code="customer_unverified",
+                field="customer",
+                message="视觉输入中无法与文本核对客户值，建议人工抽检",
+                blocking=False,
+                source_values=[model_customer],
+            )
 
     loading_values = _extract_explicit_values(
         source_text,
@@ -341,8 +418,30 @@ def _restore_explicit_header_fields(
         if value not in transit_values
     )
     if transit_values:
-        concrete = [value for value in transit_values if value not in _TRANSIT_LOOKUP_VALUES]
-        data["transit_port"] = concrete[0] if concrete else transit_values[0]
+        concrete = [
+            value
+            for value in transit_values
+            if value not in _TRANSIT_LOOKUP_VALUES
+            and value not in _BARE_TRANSIT_LOOKUP
+            and normalize_label(value) not in _FIELD_LABEL_VOCAB
+            and not _looks_like_field_label(value)
+        ]
+        lookup_only = [
+            value
+            for value in transit_values
+            if value in _TRANSIT_LOOKUP_VALUES or value in _BARE_TRANSIT_LOOKUP
+        ]
+        if concrete:
+            data["transit_port"] = concrete[0]
+        elif lookup_only:
+            data["transit_port"] = lookup_only[0]
+        else:
+            # 候选全是字段标签词残留：不写垃圾值，模型输出的标签词同样清除
+            current = data.get("transit_port")
+            if isinstance(current, str) and (
+                normalize_label(current) in _FIELD_LABEL_VOCAB
+            ):
+                data["transit_port"] = None
 
     required_port_times = _extract_explicit_values(
         source_text, ("要求进港时间", "要求进港")
@@ -523,7 +622,33 @@ def finalize_extraction(
     )
     _validate_container_identifiers(data, source_text, issues)
     _sanitize_bill_numbers(data, issues)
-    _restore_mbl_no_from_source(data, source_text, issues)
+    mbl_no_value = data.get("mbl_no")
+    if isinstance(mbl_no_value, str) and mbl_no_value.strip():
+        mbl_no_value = mbl_no_value.strip()
+        if source_text and not _value_grounded_in_source(mbl_no_value, source_text):
+            # 编造的格式合法提单号：先置空再尝试从原文恢复，恢复失败才报无据
+            data["mbl_no"] = None
+            _restore_mbl_no_from_source(data, source_text, issues)
+            if not data.get("mbl_no"):
+                _append_issue(
+                    issues,
+                    code="mbl_no_not_verbatim",
+                    field="mbl_no",
+                    message="提单号未在原文中逐字出现且无法从原文恢复，已置空待人工填入",
+                    source_values=[mbl_no_value],
+                )
+        elif not source_text:
+            # 纯视觉输入无文本可核对：保留值但必须提示不可验证
+            _append_issue(
+                issues,
+                code="mbl_no_unverified",
+                field="mbl_no",
+                message="视觉输入中无法与文本核对提单号，建议人工抽检",
+                blocking=False,
+                source_values=[mbl_no_value],
+            )
+    else:
+        _restore_mbl_no_from_source(data, source_text, issues)
     _prefer_explicit_detail_container(data, source_text, issues)
     _preserve_container_types(data, source_text, issues)
     _sanitize_container_measurements(data, issues)

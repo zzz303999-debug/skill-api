@@ -6,6 +6,7 @@ import pytest
 
 from app.skills.tuoshu.chinese_schema import to_chinese
 from app.skills.tuoshu.normalizer import normalize_llm_output
+from app.skills.tuoshu.post_common import _clean_labeled_value, _header_company_candidates
 from app.skills.tuoshu.postprocessor import finalize_extraction
 from app.skills.tuoshu.prompt import format_to_chat_text
 from app.skills.tuoshu.schema import TuoshuOutput
@@ -39,6 +40,38 @@ def test_transit_port_same_row_label_value_pair():
     )
 
     assert result["transit_port"] == "见设备交接单"
+
+
+def test_transit_port_value_beyond_empty_cell_in_same_row():
+    """启胜集卡委托书布局：标签与值之间隔一个空单元格，取同行后第一个非空值。"""
+    source_text = (
+        "| _row/col_ | A | B | C | D | E | F | G | H | I | J |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 7 | 目的港 | NEW YORK |  |  | 中转港代码 |  | XXXXX |  | 码放/配载 |  |\n"
+        "| 8 | 截关时间 | 2025-08-26 00:00 |  |  | 截单时间 |  |  |  | 提单状态 |  |\n"
+    )
+    result = finalize_extraction(
+        {"transit_port": None},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] == "XXXXX"
+
+
+def test_transit_port_empty_column_not_polluted_by_field_label():
+    """中转港代码列整列为空：不得把下一行同列的其它字段标签（截单时间）当值。"""
+    source_text = (
+        "| _row/col_ | A | B | C | D | E |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| 7 | 目的港 | NAGOYA |  | 中转港代码 |  |\n"
+        "| 8 | 截关时间 | 2025-08-08 |  | 截单时间 |  |\n"
+    )
+    result = finalize_extraction(
+        {"transit_port": "截单时间"},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] is None
 
 
 def test_numbered_notice_remark_restored_when_model_missing():
@@ -632,9 +665,11 @@ def test_review_issues_are_single_source_for_missing_measurements_and_renderer()
         "missing_customer",
         "missing_loading_time",
         "missing_address",
+        "container_type_ungrounded",
     }
     assert result["carrier"] == "OOCL"
-    assert len(result["review_issues"]) == 4
+    assert result["containers"][0]["type"] is None
+    assert len(result["review_issues"]) == 5
 
     rendered = format_to_chat_text(
         {
@@ -1201,6 +1236,7 @@ def test_unknown_container_type_is_preserved_with_non_blocking_review():
         },
         source_text=(
             "客户：测试客户\n托运人：某托运人公司\n"
+            "提单号：ABC1234567890\n"
             "箱型：40NOR\n件数：10\n体积：20"
         ),
     )
@@ -1260,3 +1296,430 @@ def test_known_conflict_cannot_disable_blocking():
 
     assert result["review_issues"][0]["blocking"] is True
     assert result["ready_for_order"] is False
+
+
+def test_customer_from_compound_doc_title_header():
+    """「公司全称+单据类型」复合抬头（启胜集卡委托书）剥离词尾后取公司全称。"""
+    source_text = (
+        "## Page 1\n\n### Text\n\n"
+        "_l1_ 启胜国际物流集团有限公司集卡委托书\n"
+        "_l2_ 联系人： 王新雨 电话： 055162654270 手机： 19355568968\n"
+        "_l3_ 我司编号 SEF2685396 客户代码 SLM02316\n"
+        "_l4_ 船名航次 CMA CGM LEO V.0XRBRE 出货流程\n"
+    )
+    result = finalize_extraction(
+        {
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["customer"] == "启胜国际物流集团有限公司"
+    assert result["shipper_agent"] == "启胜国际物流集团有限公司"
+    assert not any(issue["code"] == "missing_customer" for issue in result["review_issues"])
+
+
+def test_header_company_strips_doc_title_suffix_only():
+    """复合抬头剥离词尾后必须仍是纯公司名，否则宁可丢弃也不猜。"""
+    assert _header_company_candidates(
+        "启胜国际物流集团有限公司集卡委托书\n联系人： 王新雨"
+    ) == ["启胜国际物流集团有限公司"]
+    assert _header_company_candidates(
+        "嘉兴新捷国际货运代理有限公司车队装箱通知单\n"
+    ) == ["嘉兴新捷国际货运代理有限公司"]
+    assert _header_company_candidates(
+        "上海三人行供应链管理装箱委托单\n"
+    ) == []
+    assert _header_company_candidates("做  箱  通  知\n") == []
+    # 纯公司名行行为不变
+    assert _header_company_candidates("上海凯福国际物流有限公司\n") == [
+        "上海凯福国际物流有限公司"
+    ]
+
+
+def test_clean_labeled_value_strips_br_residue():
+    """表格单元格内换行转 <br>：值首尾的 <br> 残留清除，中间保留。"""
+    assert _clean_labeled_value("<br>上海泓枢物流/1") == "上海泓枢物流/1"
+    assert _clean_labeled_value("上海泓枢物流/1<br>") == "上海泓枢物流/1"
+    assert _clean_labeled_value("  <br> 上海泓枢物流/1 <br> ") == "上海泓枢物流/1"
+    assert _clean_labeled_value("甲<br>乙") == "甲<br>乙"
+    assert _clean_labeled_value("<br>") is None
+
+
+def test_customer_from_fm_label_sharing_cell_with_br_separator():
+    """LibreOffice 转换表格常见形态：标签与值同格、换行转 <br>。"""
+    source_text = (
+        "| _row/col_ | A | B |\n"
+        "| --- | --- | --- |\n"
+        "| 2 | TO: | 王广杰 |\n"
+        "| 3 | FM:<br>上海泓枢物流/1 |  |\n"
+    )
+    result = finalize_extraction(
+        {"factory": {"name": "某门点"}},
+        source_text=source_text,
+    )
+
+    assert result["customer"] == "上海泓枢物流/1"
+    assert not any(issue["code"] == "missing_customer" for issue in result["review_issues"])
+
+
+def test_mbl_no_split_by_br_in_table_cell_still_grounded():
+    """表格单元格内换行转 <br> 拆开的提单号：紧凑比对剥 <br> 后仍判有据。"""
+    source_text = "提单号：ZIMUSNH2272<br>2965\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "ZIMUSNH22722965",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "ZIMUSNH22722965"
+
+
+def test_mbl_no_lowercase_model_value_still_grounded():
+    """模型小写化提单号：大小写归一后仍判有据，不清真值。"""
+    source_text = "提单号：MSCU1234567\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "mscu1234567",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "mscu1234567"
+    assert not any(
+        issue["code"] == "mbl_no_not_verbatim" for issue in result["review_issues"]
+    )
+
+
+def test_mbl_no_prefix_fabrication_restores_real_value():
+    """模型输出真值前缀（格式合法）：token 完全匹配才放行，前缀错值被置空并从原文恢复。"""
+    source_text = "提单号：MSCU1234567\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "MSCU1234",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "MSCU1234567"
+    assert not any(
+        issue["code"] == "mbl_no_not_verbatim" for issue in result["review_issues"]
+    )
+
+
+def test_mbl_no_fabrication_falls_back_to_source_restore():
+    """模型编造提单号但原文有真值：先置空再恢复，真值不被丢弃。"""
+    source_text = "提单号：MSCU1234567\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "FAKE12345678",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "MSCU1234567"
+    assert not any(
+        issue["code"] == "mbl_no_not_verbatim" for issue in result["review_issues"]
+    )
+
+
+def test_container_type_fabrication_is_nulled_when_source_has_none():
+    """原文无任何箱型 token：模型编造的已知箱型置空待人工，宁空勿错。"""
+    source_text = "提单号：MSCU1234567\n托运人：某托运人公司\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "MSCU1234567",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+            "containers": [{"type": "40GP", "packages": 10}],
+        },
+        source_text=source_text,
+    )
+
+    assert result["containers"][0]["type"] is None
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "container_type_ungrounded"
+    )
+    assert issue["blocking"] is True
+    assert issue["source_values"] == ["40GP"]
+
+
+def test_container_type_quantity_form_in_source_is_recognized():
+    """数量+箱型写法（1X20'GP / 2*40HC）：原文有据，模型值保留不误杀。"""
+    result = finalize_extraction(
+        {
+            "mbl_no": "MSCU1234567",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+            "containers": [{"type": "20GP", "packages": 10}],
+        },
+        source_text="箱型箱量: 1X20'GP\n提单号：MSCU1234567\n",
+    )
+
+    assert result["containers"][0]["type"] == "20GP"
+    assert not any(
+        issue["code"] == "container_type_ungrounded" for issue in result["review_issues"]
+    )
+
+    result2 = finalize_extraction(
+        {
+            "mbl_no": "MSCU1234567",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+            "containers": [{"type": "40HQ", "packages": 10}],
+        },
+        source_text="箱型箱量: 1X40'HQ\n提单号：MSCU1234567\n",
+    )
+
+    assert result2["containers"][0]["type"] == "40HQ"
+    assert not any(
+        issue["code"] == "container_type_ungrounded" for issue in result2["review_issues"]
+    )
+
+
+def test_customer_cross_chain_candidates_are_reported():
+    """FM 命中时其他链（客户栏/抬头）有不同候选：非阻断透出诊断，不静默丢弃。"""
+    source_text = (
+        "启胜国际物流集团有限公司\n"
+        "FM：海丰\n"
+        "客户名称：特格威\n"
+    )
+    result = finalize_extraction(
+        {"factory": {"name": "某门点"}},
+        source_text=source_text,
+    )
+
+    assert result["customer"] == "海丰"
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "customer_cross_chain"
+    )
+    assert issue["blocking"] is False
+    assert set(issue["source_values"]) == {"启胜国际物流集团有限公司", "特格威"}
+
+
+def test_doc_ole_fallback_issue_survives_finalize_whitelist():
+    """doc_ole_fallback_used 进白名单：finalize 端到端后复核提示仍存在。"""
+    result = finalize_extraction(
+        {
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+            "review_issues": [
+                {
+                    "code": "doc_ole_fallback_used",
+                    "field": "source",
+                    "message": "libreoffice 转换丢失正文，已用 OLE 流提取纯文本兜底",
+                    "source_values": [],
+                    "blocking": True,
+                }
+            ],
+        },
+        source_text="FM：测试客户\n提单号：MSCU1234567\n箱型：1X40HQ\n",
+    )
+
+    assert any(
+        issue["code"] == "doc_ole_fallback_used" for issue in result["review_issues"]
+    )
+
+
+def test_transit_port_side_label_not_grabbed_by_same_row_scan():
+    """同行跳空格扫描：未入词表的裸标签（毛重）不再被当值抓取。"""
+    source_text = (
+        "| _row/col_ | A | B | C | D | E | F | G |\n"
+        "| --- | --- | --- | --- | --- | --- | --- |\n"
+        "| 7 | 目的港 | NAGOYA |  | 中转港代码 |  | 毛重 | 12000 |\n"
+        "| 8 | 截关时间 | 2025-08-08 |  | 截单时间 |  |  |  |\n"
+    )
+    result = finalize_extraction(
+        {"transit_port": None},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] is None
+
+
+def test_transit_port_bare_device_note_kept():
+    """中转港：设备单（简写）按待查语义保留，不被标签词表清空。"""
+    source_text = "中转港：设备单\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {"transit_port": "设备单"},
+        source_text=source_text,
+    )
+
+    assert result["transit_port"] == "设备单"
+
+def test_customer_llm_value_grounded_but_chain_missed_keeps_value_with_notice():
+    """四条确定性链均未命中但模型值在原文中有依据：保留值并标非阻断提示。"""
+    source_text = (
+        "## Page 1\n\n### Text\n\n"
+        "_l1_ 集装箱货物托运单\n"
+        "_l2_ 某模型识别客户 托运\n"
+        "_l3_ 提单号：MSCU1234567\n"
+        "_l4_ 箱型：1X40HQ\n"
+    )
+    result = finalize_extraction(
+        {
+            "customer": "某模型识别客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["customer"] == "某模型识别客户"
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "customer_unverified"
+    )
+    assert issue["blocking"] is False
+    assert not any(issue["code"] == "missing_customer" for issue in result["review_issues"])
+
+
+def test_customer_llm_value_not_in_source_is_nulled():
+    """模型编造的客户值在原文中无依据：置空待人工填入，宁空勿错。"""
+    source_text = (
+        "## Page 1\n\n### Text\n\n"
+        "_l1_ 集装箱货物托运单\n"
+        "_l2_ 提单号：MSCU1234567\n"
+        "_l3_ 箱型：1X40HQ\n"
+    )
+    result = finalize_extraction(
+        {
+            "customer": "某编造客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["customer"] is None
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "customer_ungrounded"
+    )
+    assert issue["blocking"] is True
+    assert issue["source_values"] == ["某编造客户"]
+    # 必填缺失提示共存，下游看到空值会阻断下单等人工填入
+    assert any(issue["code"] == "missing_customer" for issue in result["review_issues"])
+
+
+def test_customer_conflicting_candidates_nulled_with_blocking_issue():
+    """同一链内多个确定性候选：置空待人工填入并报 blocking 冲突，候选透出供裁决。"""
+    source_text = (
+        "启胜国际物流集团有限公司\n"
+        "上海凯福国际物流有限公司\n"
+        "托运人：某托运人公司\n"
+    )
+    result = finalize_extraction(
+        {
+            "customer": "某模型识别客户",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["customer"] is None
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "customer_conflicting_candidates"
+    )
+    assert issue["blocking"] is True
+    assert issue["source_values"] == ["启胜国际物流集团有限公司", "上海凯福国际物流有限公司"]
+    assert result["ready_for_order"] is False
+
+
+def test_mbl_no_fabricated_value_is_nulled():
+    """格式合法但未在原文出现的提单号：先置空；原文无真值可恢复时保持空待人工。"""
+    source_text = (
+        "客户：测试客户\n"
+        "箱型：1X40HQ\n"
+    )
+    result = finalize_extraction(
+        {
+            "mbl_no": "FAKE12345678",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] is None
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "mbl_no_not_verbatim"
+    )
+    assert issue["blocking"] is True
+    assert issue["source_values"] == ["FAKE12345678"]
+    assert any(issue["code"] == "missing_mbl_no" for issue in result["review_issues"])
+
+
+def test_mbl_no_fabrication_restores_real_value_from_source():
+    """模型编造提单号但原文有真值：置空后从原文恢复，真值不被丢弃。"""
+    source_text = "提单号：MSCU1234567\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "FAKE12345678",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "MSCU1234567"
+    assert not any(
+        issue["code"] == "mbl_no_not_verbatim" for issue in result["review_issues"]
+    )
+
+
+def test_mbl_no_split_across_lines_still_grounded():
+    """提单号被换行/连字符拆开（OCR 常见）：紧凑比对仍判有据，不清真值。"""
+    source_text = "提单号：ZIMUSNH2272-\n2965\n箱型：1X40HQ\n"
+    result = finalize_extraction(
+        {
+            "mbl_no": "ZIMUSNH22722965",
+            "customer": "测试客户",
+            "factory": {"name": "某门点"},
+        },
+        source_text=source_text,
+    )
+
+    assert result["mbl_no"] == "ZIMUSNH22722965"
+    assert not any(
+        issue["code"] == "mbl_no_not_verbatim" for issue in result["review_issues"]
+    )
+
+def test_customer_from_text_box_flattened_doc():
+    """LibreOffice 转 WPS 老版 .doc：正文内容全部落入文本框，每个文本框
+    重复两份，标签与值之间穿插转换器结构行（### Text box N / _source:）。"""
+    source_text = (
+        "# SSCZ2622783-做箱通知.docx\n"
+        "_format: docx_\n"
+        "_p1: (empty)_\n"
+        "## Text boxes\n"
+        "### Text box 19\n"
+        "_source: word/document.xml_\n"
+        "FM:\n"
+        "### Text box 20\n"
+        "_source: word/document.xml_\n"
+        "FM:\n"
+        "### Text box 21\n"
+        "_source: word/document.xml_\n"
+        "上海泓枢物流/1\n"
+        "### Text box 22\n"
+        "_source: word/document.xml_\n"
+        "上海泓枢物流/1\n"
+        "### Text box 23\n"
+        "_source: word/document.xml_\n"
+        "王广杰\n"
+    )
+    result = finalize_extraction(
+        {"factory": {"name": "某门点"}},
+        source_text=source_text,
+    )
+
+    assert result["customer"] == "上海泓枢物流/1"
+    assert not any(issue["code"] == "missing_customer" for issue in result["review_issues"])

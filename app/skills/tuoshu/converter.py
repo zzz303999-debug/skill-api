@@ -17,6 +17,7 @@ import os
 import posixpath
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -738,53 +739,83 @@ def convert_word_xml(path: str) -> str:
     _emit(f"# {Path(path).name}")
     _emit("_format: word_xml_")
     _emit()
-    paragraph_index = 0
-    table_index = 0
-    for child in body:
-        name = _xml_local_name(child.tag)
-        if name == "p":
-            paragraph_index += 1
-            value = _word_xml_text(child)
-            _emit(f"_p{paragraph_index}_ {value}" if value else f"_p{paragraph_index}: (empty)_")
-            _emit()
-            continue
-        if name != "tbl":
-            continue
+    counters = {"p": 0, "tbl": 0}
 
-        table_index += 1
-        rows = [node for node in child if _xml_local_name(node.tag) == "tr"]
-        _emit(f"### Table {table_index}")
-        _emit()
-        if not rows:
-            _emit("_empty table_")
+    def emit_container(container: ElementTree.Element) -> None:
+        """递归处理 body/sect 节点：Word 2003 XML 的正文可能包在 <w:sect> 内。"""
+        for child in container:
+            name = _xml_local_name(child.tag)
+            if name == "sect":
+                emit_container(child)
+                continue
+            if name == "p":
+                counters["p"] += 1
+                value = _word_xml_text(child)
+                _emit(f"_p{counters['p']}_ {value}" if value else f"_p{counters['p']}: (empty)_")
+                _emit()
+                continue
+            if name != "tbl":
+                continue
+            counters["tbl"] += 1
+            rows = [node for node in child if _xml_local_name(node.tag) == "tr"]
+            _emit(f"### Table {counters['tbl']}")
             _emit()
-            continue
-        parsed_rows = [
-            [_word_xml_text(cell) for cell in row if _xml_local_name(cell.tag) == "tc"]
-            for row in rows
-        ]
-        column_count = max((len(row) for row in parsed_rows), default=0)
-        header = "| " + " | ".join(
-            ["_row/col_", *[_cell_col_letter(index + 1) for index in range(column_count)]]
-        ) + " |"
-        _emit(header)
-        _emit("| " + " | ".join(["---"] * (column_count + 1)) + " |")
-        for row_index, row in enumerate(parsed_rows, start=1):
-            cells = [str(row_index)]
-            cells.extend(_clean_cell(value).replace("|", "\\|") for value in row)
-            cells.extend([""] * (column_count - len(row)))
-            _emit("| " + " | ".join(cells) + " |")
-        _emit()
+            if not rows:
+                _emit("_empty table_")
+                _emit()
+                continue
+            parsed_rows = [
+                [_word_xml_text(cell) for cell in row if _xml_local_name(cell.tag) == "tc"]
+                for row in rows
+            ]
+            column_count = max((len(row) for row in parsed_rows), default=0)
+            header = "| " + " | ".join(
+                ["_row/col_", *[_cell_col_letter(index + 1) for index in range(column_count)]]
+            ) + " |"
+            _emit(header)
+            _emit("| " + " | ".join(["---"] * (column_count + 1)) + " |")
+            for row_index, row in enumerate(parsed_rows, start=1):
+                cells = [str(row_index)]
+                cells.extend(_clean_cell(value).replace("|", "\\|") for value in row)
+                cells.extend([""] * (column_count - len(row)))
+                _emit("| " + " | ".join(cells) + " |")
+            _emit()
+
+    emit_container(body)
     return buf.getvalue()
 
 
 def convert_doc(path: str) -> tuple[str, dict[str, object] | None]:
     if _is_word_xml(path):
-        return convert_word_xml(path), None
+        try:
+            converted = convert_word_xml(path)
+        except (ValueError, ElementTree.ParseError):
+            # 截断/损坏的伪 XML：不向上传播，落到 LibreOffice 级联
+            converted = ""
+        # 解析成功且存在非空正文即信任（不设字符数下限，避免误伤合法短文档）
+        if converted.strip() and _effective_body_chars(converted) > 0:
+            return converted, None
+        # 伪 word_xml 或节结构解析失败：不返回空结果，落到 LibreOffice 级联
 
     soffice = _find_soffice()
     textutil = _find_textutil() if not soffice else None
     if not soffice and not textutil:
+        # 无外部转换器：纯 Python OLE 兜底仍可救 WPS 老 .doc
+        ole_text = _doc_text_from_ole(path)
+        if ole_text is not None:
+            fallback_markdown, _ = _ole_text_to_markdown(ole_text, Path(path).name)
+            return fallback_markdown, {
+                "issues": [
+                    {
+                        "code": "doc_ole_fallback_used",
+                        "message": (
+                            "未找到 LibreOffice/textutil，已用 OLE 流提取纯文本兜底，"
+                            "无表格结构，请对照原文件复核"
+                        ),
+                        "source_values": [],
+                    }
+                ]
+            }
         return (
             f"SCAN_OR_IMAGE_HINT: {path}  # "
             "doc 需 LibreOffice 或 macOS textutil 转换（均未找到）；请安装 LibreOffice 或改用 OCR",
@@ -824,7 +855,132 @@ def convert_doc(path: str) -> tuple[str, dict[str, object] | None]:
                 return f"SCAN_OR_IMAGE_HINT: {path}  # libreoffice 未产出 docx", None
             docx_path = candidates[0]
 
-        return convert_docx(str(docx_path))
+        converted, report = convert_docx(str(docx_path))
+        if _effective_body_chars(converted) >= _DOC_BODY_MIN_CHARS:
+            return converted, report
+
+        # 转换器丢失正文（部分 WPS 旧版 .doc 会全丢，只剩 1x1 占位图）：
+        # 纯 Python 直读 OLE WordDocument 流兜底，跨平台无需系统工具
+        ole_text = _doc_text_from_ole(path)
+        if ole_text is not None:
+            issues = list((report or {}).get("issues") or [])
+            issues.append(
+                {
+                    "code": "doc_ole_fallback_used",
+                    "message": (
+                        f"{converter_name} 转换丢失正文，已用 OLE 流提取纯文本兜底，"
+                        "无表格结构，请对照原文件复核"
+                    ),
+                    "source_values": [converter_name],
+                }
+            )
+            fallback_report = dict(report or {})
+            fallback_report["issues"] = issues
+            fallback_markdown, _ = _ole_text_to_markdown(ole_text, Path(path).name)
+            return fallback_markdown, fallback_report
+
+        return (
+            f"SCAN_OR_IMAGE_HINT: {path}  # "
+            f"{converter_name} 转换丢失正文且 OLE 兜底无有效文本；"
+            "请转 PDF/图片重传或人工处理",
+            None,
+        )
+
+
+# 转换产物里不携带正文的行（空段占位、结构标题、来源标记、表格骨架）
+_IGNORED_BODY_LINE_RE = re.compile(
+    r"^(?:"
+    r"_p\d+(?:\.\d+)?(?:\s*: \(empty\))?_?\s*$"
+    r"|#.*"
+    r"|_format:.*"
+    r"|_source:.*"
+    r"|### Text box \d+.*"
+    r"|### Image \d+.*"
+    r"|\|(?:\s*[-: ]+\s*\|)+\s*$"
+    r"|\|\s*_row/col_\s*\|.*"
+    r"|\|(?:\s*\d+\s*\|)(?:\s*\|)*\s*$"
+    r"|_empty (?:table|sheet)_"
+    r"|\s*$"
+    r")"
+)
+
+
+def _effective_body_chars(markdown: str) -> int:
+    """统计转换产物中的有效正文字符（剔除空段/结构行/表格骨架后）。"""
+    count = 0
+    for line in markdown.splitlines():
+        if _IGNORED_BODY_LINE_RE.match(line):
+            continue
+        count += len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", line))
+    return count
+
+
+# 与 MinerU insufficient_text_blocks 同阈值：低于此值视为丢失正文
+_DOC_BODY_MIN_CHARS = 20
+
+
+def _word_document_stream_text(stream: bytes) -> str | None:
+    """从 WordDocument 流字节中读正文（FIB fcMin..fcMac，UTF-16LE）。
+
+    fComplex 严格来说应走 piece table；但 WPS 生成的中文文档简单区间
+    即为连续 UTF-16LE 正文，配合质量校验（有效字符阈值）作为务实兑底，
+    读不出合格文本时返回 None 交由上层报错。
+    """
+    if len(stream) < 0x20:
+        return None
+    try:
+        fc_min, fc_mac = struct.unpack_from("<ii", stream, 0x18)
+    except struct.error:
+        return None
+    if not (0 <= fc_min < fc_mac <= len(stream)):
+        return None
+    if fc_mac - fc_min < 2 or (fc_mac - fc_min) % 2:
+        return None
+    text = stream[fc_min:fc_mac].decode("utf-16-le", errors="replace")
+    text = text.replace("\r", "\n").replace("\x07", "\n").replace("\x0b", "\n")
+    # 清理控制字符垃圾行（WPS 表格边框残留的 \x08 串）与不间断空格
+    text = "\n".join(
+        re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", line).replace("\xa0", " ").strip()
+        for line in text.split("\n")
+    )
+    text = re.sub(r"\n{2,}", "\n", text)
+    effective = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", text))
+    if effective < _DOC_BODY_MIN_CHARS:
+        return None
+    return text
+
+
+def _doc_text_from_ole(path: str) -> str | None:
+    """直接读旧版 .doc 的 OLE WordDocument 流正文，跨平台纯 Python。"""
+    try:
+        import olefile
+    except ImportError:
+        # 依赖缺失（部署未同步 uv.lock）：保底返回 None，上层报转换失败
+        return None
+
+    try:
+        with olefile.OleFileIO(path) as ole:
+            if not ole.exists("WordDocument"):
+                return None
+            return _word_document_stream_text(ole.openstream("WordDocument").read())
+    except Exception:
+        return None
+
+
+def _ole_text_to_markdown(text: str, filename: str) -> tuple[str, dict[str, object]]:
+    """把 OLE 提取的纯文本包装为 _pN_ 段落流 markdown（与 textutil 形态一致）。"""
+    buf = io.StringIO()
+    _emit = _writer(buf)
+    _emit(f"# {Path(filename).name}")
+    _emit("_format: doc_")
+    _emit()
+    for index, line in enumerate(text.split("\n"), start=1):
+        if line.strip():
+            _emit(f"_p{index}_ {line.rstrip()}")
+        else:
+            _emit(f"_p{index}: (empty)_")
+        _emit()
+    return buf.getvalue(), {}
 
 
 # ---------- 分支：pdf ----------
