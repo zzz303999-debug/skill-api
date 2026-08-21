@@ -47,7 +47,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "unknown_manifest_family": "舱单未识别，请使用支持的舱单",
     "manifest_order_not_ready": "舱单必填信息不完整，无法录入，请补充后重试",
     "manifest_box_missing": "舱单未识别到箱型箱量，无法录入，请检查文件后重试",
-    "duplicate_manifest": "舱单已全部创建过，本次未录入",
+    "manifest_multi_bl_no": "舱单文件包含多个提单号，无法录入，请拆分文件后重试",
     # ---- 限流 ----
     "rate_limited": "请求过于频繁，已被限流，请稍后重试",
     "server_busy": "服务繁忙（并发处理任务已满），请稍后重试",
@@ -144,12 +144,3 @@ class UnknownManifestFamilyError(SkillAPIError):
 
     http_status = 400
     code = "unknown_manifest_family"
-
-
-class DuplicateManifestError(SkillAPIError):
-    """409：舱单 create 模式重复上传且全部命中成功单注册表（无新建）。
-
-    语义对齐账单 DuplicateBillError；details 携带已创建回执（bId）。"""
-
-    http_status = 409
-    code = "duplicate_manifest"

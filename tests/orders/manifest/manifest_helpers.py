@@ -62,9 +62,11 @@ def build_authorization_bytes() -> bytes:
     ws.merge_cells("A11:E13")
     ws["A11"] = "SAME AS CONSIGNEE"
     # 单头字段：label 右值（F 列 label，H 列值）
+    # MBL NO 用单号（正常样本）：斜杠双号（参考号/船司号）v1.8 起按两个
+    # 提单号计入多提单号拒绝（用户拍板），拒绝样本在测试内改 cell 构造
     for row, label, value in (
         (2, "Business type:", "FCL Sea Freight Export"),
-        (3, "MBL NO:", "SIT0807BASH591/SITGBASH006434"),
+        (3, "MBL NO:", "SITGBASH006434"),
         (4, "HBL NO:", None),
         (5, "Transaction method:", "EXW"),
         (7, "ETD: Launch Date", "SITC HAODE 2617N (ETD: 15/08)"),

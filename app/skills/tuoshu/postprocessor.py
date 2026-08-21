@@ -18,6 +18,7 @@ from .post_checks import (
     _normalize_port_fields,
     _prefer_explicit_detail_container,
     _preserve_container_types,
+    _reject_conflicting_mbl_no,
     _remove_confirmed_ocr_artifacts,
     _remove_empty_remark_clauses,
     _restore_explicit_hbl,
@@ -87,6 +88,7 @@ _ALWAYS_BLOCKING_CODES = {
     "sender_contact_not_from_from_field",
     "carrier_prefix_mismatch",
     "conflicting_container_data",
+    "conflicting_mbl_no",
     "missing_container_measurements",
     "conflicting_transit_port",
     "missing_mbl_no",
@@ -622,6 +624,7 @@ def finalize_extraction(
     )
     _validate_container_identifiers(data, source_text, issues)
     _sanitize_bill_numbers(data, issues)
+    _reject_conflicting_mbl_no(data, source_text, issues)
     mbl_no_value = data.get("mbl_no")
     if isinstance(mbl_no_value, str) and mbl_no_value.strip():
         mbl_no_value = mbl_no_value.strip()
@@ -747,12 +750,16 @@ def finalize_extraction(
     mbl_no = data.get("mbl_no")
     if not isinstance(mbl_no, str) or not mbl_no.strip():
         data["mbl_no"] = None
-        _append_issue(
-            issues,
-            code="missing_mbl_no",
-            field="mbl_no",
-            message="缺少提单号，需人工确认",
-        )
+        # 多提单号拒绝已明确表达原因（conflicting_mbl_no），不再冗余报缺失
+        if not any(
+            issue.get("code") == "conflicting_mbl_no" for issue in issues
+        ):
+            _append_issue(
+                issues,
+                code="missing_mbl_no",
+                field="mbl_no",
+                message="缺少提单号，需人工确认",
+            )
     else:
         _remove_issue(issues, code="missing_mbl_no", field="mbl_no")
 

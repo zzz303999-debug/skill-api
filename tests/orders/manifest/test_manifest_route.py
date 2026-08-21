@@ -1,4 +1,4 @@
-"""路由层测试：preview/create 语义、sk 校验、409 duplicate_manifest、错误码。"""
+"""路由层测试：preview/create 语义、sk 校验、重复上传照常 200、错误码。"""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class TestRoutePreview:
 
 
 class TestRouteCreate:
-    """create：缺 sk 400；成功 200 + summary；全 skipped 409。"""
+    """create：缺 sk 400；成功 200 + summary；重复上传照常 200。"""
 
     def test_create_missing_sk_400(self, auth_bytes):
         client = TestClient(app)
@@ -83,8 +83,8 @@ class TestRouteCreate:
         assert data["summary"]["success_sns"] == ["11801"]
         assert data["upstream"] == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
 
-    def test_create_all_skipped_409(self, auth_bytes, monkeypatch):
-        """重导全部命中 → 409 duplicate_manifest（upstream 409 结构）。"""
+    def test_duplicate_upload_returns_200(self, auth_bytes, monkeypatch):
+        """v1.9 放开本地去重：同一文件重复上传照常重新创建，不再 409。"""
         def fake(_payload, _sk):
             return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
 
@@ -94,33 +94,11 @@ class TestRouteCreate:
             client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
         ).status_code == 200
         r = _post(client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS)
-        assert r.status_code == 409
-        body = r.json()
-        assert body["error"]["code"] == "duplicate_manifest"
-        assert body["error"]["details"]["success_sns"] == ["11801"]
-        assert body["error"]["details"]["upstream"]["code"] == "409"
-
-    def test_force_reimport_bypasses_409(self, auth_bytes, monkeypatch):
-        """重导 409 → force=true 跳过本地去重重新创建（TMS 删单后重录）。"""
-        def fake(_payload, _sk):
-            return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
-
-        monkeypatch.setattr(service_module, "submit_manifest", fake)
-        client = TestClient(app)
-        assert _post(
-            client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
-        ).status_code == 200
-        assert _post(
-            client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
-        ).status_code == 409
-        r = _post(
-            client,
-            auth_bytes,
-            data={"create_order": "true", "force": "true"},
-            headers=CREATE_HEADERS,
-        )
         assert r.status_code == 200
-        assert r.json()["summary"]["created"] == 1
+        data = r.json()
+        assert data["summary"]["created"] == 1
+        assert data["summary"]["skipped"] == 0
+        assert data["upstream"] == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
 
     def test_create_all_failed_204_upstream(self, auth_bytes, monkeypatch):
         """下游全拒 → 200 + upstream 204（业务失败，非 HTTP 错误）。"""

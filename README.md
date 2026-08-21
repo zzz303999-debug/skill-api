@@ -11,7 +11,7 @@
 
 - **多接口服务**：skill 可扩展（自动发现挂路由）+ 订单链路 + 竞品账单导入 + 舱单导入，OpenAPI 文档展示各接口精确输入输出 schema
 - **竞品账单导入**：模板驱动解析（内置模板 + AI 表头映射自动固化）、四类归集（业务信息/财务信息 → 订单，基础信息 → 客户/门点/司机/车辆建档，费用栏目 → 费用管理）、preview/create 双模式、按提单号去重（first-write-wins）
-- **舱单导入**：家族识别（托书/SI）+ label 定位解析，`.xlsx` → TMS 舱单字段（addBill JSON 通道），preview/create 双模式、按提单号去重（first-write-wins）、箱型白名单与账单导入共用一份配置
+- **舱单导入**：家族识别（托书/SI）+ label 定位解析，`.xlsx` → TMS 舱单字段（addBill JSON 通道），preview/create 双模式、箱型白名单与账单导入共用一份配置；v1.9 起不本地去重（重复上传照常重新提交，重复风险调用方自负）
 - **统一 LLM 出口**：所有 LLM 调用走 `app.llm`（OpenAI-compatible，thinking 模式/JSON schema 探测降级）
 - **页级质量路由**：合格 PDF 页走 `pdfplumber`，扫描/残缺页走 MinerU；图片按文件签名校验后直传 MinerU，失败或低置信时转视觉模型
 - **鉴权**：配置 `API_KEY` 后所有接口必须携带凭证（Bearer / X-API-Key），未授权请求留审计记录
@@ -277,7 +277,6 @@ curl -X POST http://localhost:9000/orders/bill/import \
 
 - `file`：舱单文件（仅 `.xlsx`，magic bytes 校验，上限 20 MB）
 - `create_order`：`false`（默认，只预览不触达 TMS）/ `true`（逐单创建）
-- `force`：缺省 `false`；create 模式下显式传 `true` 时跳过本地去重查重（TMS 侧已删除该单后重录场景，重复风险调用方自负）
 - `sk` 请求头：create 模式必填，TMS token 原样透传下游（服务端不落盘）
 
 ```bash
@@ -292,7 +291,7 @@ curl -X POST http://localhost:9000/orders/manifest/import \
 - **必填三项**：提单号 / 箱型箱量 / 起运港（POL 原文清洗，自由输入）；`bl_no`/`pol` 缺失 preview 只标记、create 拦截该单（错误码 `manifest_order_not_ready`）；**箱型缺失（`box_groups` 为空）文件级拒绝**（v1.7：preview 亦拒绝、不调下游，错误码 `manifest_box_missing`）
 - **箱型白名单**：复用账单导入同一份 `config/box_type_whitelist.yaml`；任一单含白名单外标准码箱型 → 全部未决单拒绝（400 `unknown_box_type`），preview 亦拒绝、不调下游；与箱型缺失拒绝互斥（空列表不触发白名单）
 - **preview 模式零副作用**：不触达 TMS、不写任何注册表
-- **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；按提单号去重（first-write-wins，成功单登记 `imported_manifests.json`）；全部命中无新建 → 409 `duplicate_manifest`；`force=true` 跳过去重查重（TMS 删单后重录）；失败单不登记，重导照常提交；不自动重试
+- **create 模式**：逐单走 addBill（JSON body + `sk` 头）；成功判定 = `code` **数字** 200（与账单 AddWork 字符串 `"200"` 不同）；**v1.9 起不本地去重**——不查成功单注册表、不登记、不 skipped，同一文件/同提单号重复上传照常重新提交（重复风险调用方自负；重复/幂等由调用方自行对账，并发重复提交不再被服务端拦截）；`force` 参数与 409 `duplicate_manifest` 已移除；summary `skipped` 恒 0；失败单照常可重导重试；不自动重试
 - **响应**：`file`/`create_order`/`orders`（含 `order_data` 请求体回显与 `create_result`）/`summary`/`upstream`/`meta`；完整结构见 OpenAPI schema
 
 ## 添加新 skill

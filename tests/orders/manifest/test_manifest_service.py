@@ -57,10 +57,10 @@ class TestPreview:
 
 
 class TestCreate:
-    """create：成功提交+登记、必填拦截、去重 skipped、箱型拒绝、上游回显。"""
+    """create：成功提交、必填拦截、重复上传照常提交、箱型拒绝、上游回显。"""
 
-    def test_success_submits_and_registers(self, auth_bytes, monkeypatch):
-        """成功：提交体=order_data（实际提交回显）；注册表登记 bId；summary/upstream。"""
+    def test_success_submits(self, auth_bytes, monkeypatch):
+        """成功：提交体=order_data（实际提交回显）；summary/upstream。"""
         _patch_submit(
             monkeypatch,
             {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}},
@@ -81,10 +81,6 @@ class TestCreate:
         assert result.upstream == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
         # 实际提交体回显：None→空串已转换
         assert order.order_data["orderInfos"][0]["bDate"] == ""
-        # 注册表登记（可被下次去重命中）
-        from app.orders.manifest import registry
-
-        assert registry.get_manifest_registry().lookup("SITGBASH006434")["sn"] == "11801"
 
     def test_required_missing_intercepted(self, auth_bytes, monkeypatch):
         """必填缺失 → create 拦截（manifest_order_not_ready），不提交、不登记。"""
@@ -102,8 +98,8 @@ class TestCreate:
         assert result.summary["failed"] == 1
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
 
-    def test_duplicate_skipped(self, auth_bytes, monkeypatch):
-        """重导命中注册表 → skipped；不重复提交；summary created=0。"""
+    def test_duplicate_upload_submits_again(self, auth_bytes, monkeypatch):
+        """v1.9 放开本地去重：同一文件重复上传照常重新提交，不再 skipped。"""
         _patch_submit(
             monkeypatch,
             {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}},
@@ -112,34 +108,12 @@ class TestCreate:
         calls = _patch_submit(monkeypatch, {"success": True, "sn": "99999"})
         result = build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk")
         order = result.orders[0]
-        assert calls["n"] == 0  # 未再提交
-        assert order.create_result["skipped"] is True
-        assert order.create_result["sn"] == "11801"
-        assert result.summary["skipped"] == 1
-        assert result.summary["created"] == 0
-        assert result.upstream is None  # 全部 skipped → None（路由层转 409）
-
-    def test_force_reimport_after_tms_delete(self, auth_bytes, monkeypatch):
-        """force=True 跳过去重：TMS 侧删单后重录场景（重复风险调用方自负）。"""
-        _patch_submit(
-            monkeypatch,
-            {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}},
-        )
-        build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk")
-        # 常规重导 → skipped 不提交
-        calls = _patch_submit(monkeypatch, {"success": True, "sn": "99999"})
-        r1 = build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk")
-        assert calls["n"] == 0 and r1.orders[0].create_result["skipped"] is True
-        # force 重导 → 重新提交
-        calls = _patch_submit(
-            monkeypatch,
-            {"success": True, "sn": "11802", "error": None, "upstream": {"bId": 11802}},
-        )
-        r2 = build_manifest_result("a.xlsx", auth_bytes, create_order=True, sk="tk", force=True)
-        assert calls["n"] == 1
-        cr = r2.orders[0].create_result
-        assert cr["success"] is True and not cr.get("skipped")
-        assert r2.summary["created"] == 1
+        assert calls["n"] == 1  # 重复上传仍提交
+        assert order.create_result["success"] is True
+        assert order.create_result.get("skipped") is None
+        assert result.summary["skipped"] == 0
+        assert result.summary["created"] == 1
+        assert result.upstream == {"code": "200", "msg": "成功", "data": []}
 
     def test_upstream_rejection_failed_not_registered(self, auth_bytes, monkeypatch):
         """下游 204 拒绝 → 失败单不登记，可重导重试。"""
@@ -237,3 +211,65 @@ class TestBoxMissing:
         result = build_manifest_result("a.xlsx", buf.getvalue())
         order = result.orders[0]
         assert order.create_result["error"]["code"] == "unknown_box_type"
+
+
+class TestMultiBlNo:
+    """多提单号文件级拒绝（v1.8：preview 亦拒绝；不调下游；upstream 204 口径）。"""
+
+    def _two_sheet_si_bytes(self, si_bytes) -> bytes:
+        """双舱单 sheet 各一提单号（多票文件）。"""
+        wb = load_workbook(io.BytesIO(si_bytes))
+        ws2 = wb.create_sheet("Shipping Instruction 2")
+        ws2["C1"] = "Booking / BL Number : SITGBAQI005920"
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_multi_bl_no_rejected_preview(self, si_bytes):
+        """preview 亦拒绝：create_result 标记 manifest_multi_bl_no，summary 仍 null。"""
+        result = build_manifest_result("a.xlsx", self._two_sheet_si_bytes(si_bytes))
+        order = result.orders[0]
+        assert order.create_result["success"] is False
+        error = order.create_result["error"]
+        assert error["code"] == "manifest_multi_bl_no"
+        assert "拆分文件" in error["message"]
+        assert error["details"]["bl_nos"] == ["SITGBAQI005920", "SITGBAYP006017"]
+        assert error["details"]["upstream"]["code"] == "204"
+        assert result.summary is None
+
+    def test_multi_bl_no_not_submitted_create(self, si_bytes, monkeypatch):
+        """create：不调下游；summary failed=1；upstream 204。"""
+        calls = _patch_submit(monkeypatch, {"success": True, "sn": "1"})
+        result = build_manifest_result(
+            "a.xlsx", self._two_sheet_si_bytes(si_bytes), create_order=True, sk="tk"
+        )
+        assert calls["n"] == 0
+        assert result.orders[0].create_result["error"]["code"] == "manifest_multi_bl_no"
+        assert result.summary["failed"] == 1
+        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+
+    def test_slash_double_no_rejected(self, auth_bytes):
+        """MBL NO 斜杠双号（参考号/船司号）视为两个提单号（v1.8 用户拍板）→ 拒绝。"""
+        wb = load_workbook(io.BytesIO(auth_bytes))
+        wb.active.cell(3, 8, "SIT0807BASH591/SITGBASH006434")
+        buf = io.BytesIO()
+        wb.save(buf)
+        result = build_manifest_result("a.xlsx", buf.getvalue())
+        order = result.orders[0]
+        assert order.create_result["success"] is False
+        assert order.create_result["error"]["code"] == "manifest_multi_bl_no"
+        assert order.create_result["error"]["details"]["bl_nos"] == [
+            "SIT0807BASH591",
+            "SITGBASH006434",
+        ]
+
+    def test_same_bl_no_duplicated_not_rejected(self, si_bytes):
+        """同一提单号在多个 sheet 重复出现：不算多票，不拒绝。"""
+        wb = load_workbook(io.BytesIO(si_bytes))
+        ws2 = wb.create_sheet("Shipping Instruction 2")
+        ws2["C1"] = "Booking / BL Number : SITGBAYP006017"
+        buf = io.BytesIO()
+        wb.save(buf)
+        result = build_manifest_result("a.xlsx", buf.getvalue())
+        error_code = (result.orders[0].create_result or {}).get("error", {}).get("code")
+        assert error_code != "manifest_multi_bl_no"

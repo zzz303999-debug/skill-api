@@ -1723,3 +1723,108 @@ def test_customer_from_text_box_flattened_doc():
 
     assert result["customer"] == "上海泓枢物流/1"
     assert not any(issue["code"] == "missing_customer" for issue in result["review_issues"])
+
+
+def _finalize_mbl(source_text: str, mbl_no: str | None = None) -> dict:
+    base = {
+        "mbl_no": mbl_no,
+        "shipper_company": "某托运人公司",
+        "factory": {"name": "某门点"},
+    }
+    return finalize_extraction(base, source_text=source_text)
+
+
+def test_conflicting_mbl_no_two_labels_rejected():
+    """两个不同提单号标签值（SI 常见 HBL/MBL 同标“提单号”）：置空并 blocking 拒绝。"""
+    result = _finalize_mbl(
+        "提单号：MSCU1234567\n提单号：MSCU7654321\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] is None
+    issue = next(
+        issue for issue in result["review_issues"] if issue["code"] == "conflicting_mbl_no"
+    )
+    assert issue["blocking"] is True
+    assert issue["source_values"] == ["MSCU1234567", "MSCU7654321"]
+    assert result["ready_for_order"] is False
+
+
+def test_conflicting_mbl_no_table_form_rejected():
+    """表格单元格两个提单号标签：同样置空并 blocking 拒绝。"""
+    result = _finalize_mbl(
+        "| 提单号 | MSCU1234567 |\n| 提单号 | MSCU7654321 |\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] is None
+    assert any(
+        issue["code"] == "conflicting_mbl_no" for issue in result["review_issues"]
+    )
+
+
+def test_conflicting_mbl_no_llm_value_still_rejected():
+    """LLM 已输出其中一个值，原文仍有两个提单号 → 文档级拒绝，不保留 LLM 值。"""
+    result = _finalize_mbl(
+        "提单号：MSCU1234567\n提单号：MSCU7654321\n托运人：某托运人公司",
+        mbl_no="MSCU1234567",
+    )
+
+    assert result["mbl_no"] is None
+    assert any(
+        issue["code"] == "conflicting_mbl_no" for issue in result["review_issues"]
+    )
+
+
+def test_conflicting_mbl_no_same_value_deduplicated():
+    """同一提单号重复出现（提单号/主提单号同值）不算多提单号。"""
+    result = _finalize_mbl(
+        "提单号：MSCU1234567\n主提单号：MSCU1234567\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] == "MSCU1234567"
+    assert not any(
+        issue["code"] == "conflicting_mbl_no" for issue in result["review_issues"]
+    )
+
+
+def test_conflicting_mbl_no_master_plus_child_ok():
+    """主提单号+分提单号并存：主单恢复、分单入 hbl_no，不算多提单号。"""
+    result = _finalize_mbl(
+        "主提单号：MSCU1234567\n分提单号：MSCU7654321\n托运人：某托运人公司"
+    )
+
+    assert result["mbl_no"] == "MSCU1234567"
+    assert result["hbl_no"] == "MSCU7654321"
+    assert not any(
+        issue["code"] == "conflicting_mbl_no" for issue in result["review_issues"]
+    )
+
+
+def test_conflicting_mbl_no_case_variant_dedup():
+    """大小写变体同值按大写去重计 1 个：不触发多提单号拒绝。"""
+    result = _finalize_mbl(
+        "提单号：MSCU1234567\n主提单号：mscu1234567\n托运人：某托运人公司"
+    )
+
+    assert not any(
+        issue["code"] == "conflicting_mbl_no" for issue in result["review_issues"]
+    )
+
+
+def test_conflicting_mbl_no_candidate_in_hbl_stays_null():
+    """候选之一被 LLM 拆入 hbl_no：拒绝后 mbl_no 保持置空，不得回填另一候选。"""
+    result = finalize_extraction(
+        {
+            "mbl_no": "MSCU1234567",
+            "hbl_no": "MSCU7654321",
+            "shipper_company": "某托运人公司",
+            "factory": {"name": "某门点"},
+        },
+        source_text="提单号：MSCU1234567\n提单号：MSCU7654321\n托运人：某托运人公司",
+    )
+
+    assert result["mbl_no"] is None
+    assert result["hbl_no"] == "MSCU7654321"
+    codes = {issue["code"] for issue in result["review_issues"]}
+    assert "conflicting_mbl_no" in codes
+    assert "mbl_no_by_format" not in codes  # 未回填：不得出现格式恢复值
+    assert "missing_mbl_no" not in codes  # 拒绝已明确原因，不冗余报缺失

@@ -15,6 +15,9 @@
 - 脏数据：多点号数字（20.652.00 → 20652.00，最后一个点为小数点）、千分位、
   浮点尾巴
 - 原文保真：公司名/品名/提单号逐字复制（仅 strip 首尾空白）
+- 多提单号（v1.8）：全工作簿所有舱单 sheet 的提单号标签值收集进
+  ManifestParseOutput.bl_nos，服务层去重后 ≥2 → 文件级拒绝；MBL NO 斜杠
+  双号（参考号/船司号）视为两个提单号计入（2026-08-21 用户拍板）
 
 一文件一票：parse_manifest 返回 ManifestParseOutput（order + engine + family）。
 """
@@ -24,7 +27,7 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from openpyxl import load_workbook
@@ -82,6 +85,7 @@ class ManifestParseOutput:
     order: ManifestOrder
     engine: str
     family: str
+    bl_nos: list[str] = field(default_factory=list)
 
 
 class _SheetView:
@@ -235,6 +239,8 @@ def _mbl_no_slash(text: str | None) -> str | None:
 
     2026-08-20 TMS 实测 bOrderNum 含斜杠 → 下游 500；后段与其余舱单
     SITGB 号段一致（SITGBASH006434 vs SITGBAYP006017/SITGBAQI005920）。
+    仅用于主提取 bl_no 的展示口径；v1.8 起斜杠双号已按两个提单号计入
+    多提单号拒绝（被拒文件不提交，TMS 无斜杠约束不再可达）。
     无斜杠/后段为空 → 原样返回。
     """
     if not text or "/" not in text:
@@ -607,12 +613,15 @@ def _mark_missing(order: ManifestOrder) -> None:
         order.add_missing("pol")
 
 
-def _detect_manifest_sheet(wb) -> tuple[Any, str] | None:
-    """家族识别：sheet 名或 A1 标题锚点 → (worksheet, family)。
+def _detect_manifest_sheets(wb) -> list[tuple[Any, str]]:
+    """全部可识别为舱单票的 sheet → [(worksheet, family)]。
 
-    跳过空名/SheetN 命名的工作表（SI 模版的 Sheet2/Sheet3 空表）；
-    主识别未命中时兜底扫描任意 sheet 的 A1。
+    v1.8 多提单号检测需要全量：跳过空名/SheetN 命名的工作表（SI 模版的
+    Sheet2/Sheet3 空表）；主识别未命中时兜底扫描任意 sheet 的 A1。
+    同一 sheet 按 sheet 名命中后不再按 A1 重复计入。
     """
+    results: list[tuple[Any, str]] = []
+    seen: set[int] = set()
     for pass_a1 in (False, True):
         for ws in wb.worksheets:
             hints = [] if pass_a1 else [_norm(ws.title or "")]
@@ -620,11 +629,72 @@ def _detect_manifest_sheet(wb) -> tuple[Any, str] | None:
             if a1:
                 hints.append(_norm(str(a1)))
             for hint in hints:
+                family = None
                 if any(anchor in hint for anchor in _FAMILY_AUTHORIZATION_ANCHORS):
-                    return ws, "authorization"
-                if any(anchor in hint for anchor in _FAMILY_SI_ANCHORS):
-                    return ws, "si"
-    return None
+                    family = "authorization"
+                elif any(anchor in hint for anchor in _FAMILY_SI_ANCHORS):
+                    family = "si"
+                if family and id(ws) not in seen:
+                    seen.add(id(ws))
+                    results.append((ws, family))
+                    break
+    return results
+
+
+def _detect_manifest_sheet(wb) -> tuple[Any, str] | None:
+    """主识别 sheet（首个命中）；多 sheet 全量见 _detect_manifest_sheets。"""
+    sheets = _detect_manifest_sheets(wb)
+    return sheets[0] if sheets else None
+
+
+# 提单号标签锚点（norm 后包含匹配；HBL NO 分单天然不匹配，不计入主提单号）
+_MBL_NO_LABELS = ("mblno",)
+_SI_BL_NO_LABELS = ("booking/blnumber", "blnumber", "mblno")
+
+
+def _collect_sheet_bl_nos(sheet: _SheetView, family: str) -> list[str]:
+    """sheet 内全部提单号标签值（多 label 并存全收集；斜杠双号按两号拆分）。
+
+    与 _find_label 同口径（norm 前缀/包含匹配），但收集全部命中位置而非首个：
+    表单区同时存在多个提单号 label（如 Booking/BL Number 与 MBL NO）时
+    各取其值；label:value 同格（SI 合并格）冒号剥离；HBL NO 不匹配锚点；
+    MBL NO 斜杠双号（参考号/船司号）按 `/` 拆分为两个候选（v1.8 用户拍板：
+    视为两个提单号计入多提单号拒绝，不再取后段计 1 个）。
+    """
+    labels = _MBL_NO_LABELS if family == "authorization" else _SI_BL_NO_LABELS
+    values: list[str] = []
+    for r in range(1, min(_LABEL_SCAN_ROWS, sheet.nrows) + 1):
+        for c in range(1, sheet.ncols + 1):
+            norm = _norm(sheet.text(r, c))
+            if not norm or norm.startswith("hbl") or not any(
+                norm.startswith(p) or p in norm for p in labels
+            ):
+                continue
+            label_text = sheet.text(r, c)
+            raw = _label_value_right(sheet, r, c)
+            if not raw:
+                raw = label_text
+            # 同格/合并延续：值文本以 label 开头 → 剥离冒号前段（对齐 _si_form_value）
+            if raw.startswith(label_text.rstrip(":")):
+                _, sep, tail = raw.partition(":")
+                value = tail.strip() if sep else ""
+            else:
+                value = raw
+            for part in value.split("/"):
+                part = part.strip()
+                if part and part not in values:
+                    values.append(part)
+    return values
+
+
+def _collect_manifest_bl_nos(wb) -> list[str]:
+    """全工作簿提单号候选（多票检测）：所有舱单 sheet 的提单号标签值。"""
+    bl_nos: list[str] = []
+    for ws, family in _detect_manifest_sheets(wb):
+        for value in _collect_sheet_bl_nos(_SheetView(ws), family):
+            if value not in bl_nos:
+                bl_nos.append(value)
+    return bl_nos
 
 
 def parse_manifest(file_bytes: bytes) -> ManifestParseOutput:
@@ -651,4 +721,9 @@ def parse_manifest(file_bytes: bytes) -> ManifestParseOutput:
     ws, family = detected
     sheet = _SheetView(ws)
     order = _parse_authorization(sheet) if family == "authorization" else _parse_si(sheet)
-    return ManifestParseOutput(order=order, engine="openpyxl", family=family)
+    return ManifestParseOutput(
+        order=order,
+        engine="openpyxl",
+        family=family,
+        bl_nos=_collect_manifest_bl_nos(wb),
+    )

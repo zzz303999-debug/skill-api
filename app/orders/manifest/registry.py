@@ -1,5 +1,8 @@
 """舱单导入「成功单注册表」：提单号 → 首次创建回执（重复上传去重）。
 
+⚠️ v1.9 起舱单放开重复导入（用户拍板）：service 层不再查重/登记，
+本模块暂停生产使用（保留供回滚/恢复；历史数据 imported_manifests.json 不清除）。
+
 与竞品账单 imported_registry 同模式（契约见需求文档 §6.8）：
 - 存储：{storage_dir}/imported_manifests.json（独立文件，与账单注册表隔离）；
 - 语义：只登记创建成功单（addBill 返回 success 才 register；失败单不登记，

@@ -34,7 +34,6 @@ from app.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
     DuplicateBillError,
-    DuplicateManifestError,
     ServiceBusyError,
     SkillAPIError,
 )
@@ -869,21 +868,17 @@ async def import_manifest(
     file: Annotated[UploadFile, File()],
     request: Request,
     create_order: bool = Form(default=False),
-    force: bool = Form(default=False),
 ) -> ManifestParseResult:
     """上传英文舱单（托书/SI，.xlsx），解析后预览或创建 TMS 舱单（addBill）。
 
     create_order 缺省 false（只预览不触达 TMS）；显式传 true 时创建舱单
     （sk 由调用方登录 TMS 后经请求头透传，addBill 端点鉴权，见
     app/orders/manifest/client.py），响应附 orders[].create_result 与 summary。
-    force 缺省 false；create 模式下显式传 true 时跳过本地去重查重——用于
-    TMS 侧已删除该单后重新录入（本地注册表不知晓 TMS 删除动作，重复风险
-    由调用方自负）。
+    v1.9 起放开本地去重：重复上传不再拦截，照常重新提交（重复风险调用方自负）。
     家族识别/格式校验/坏文件等由 parse_manifest 覆盖，错误统一走全局异常处理；
     箱型白名单复用账单导入同一份配置（config/box_type_whitelist.yaml）：
     任一单含白名单外标准码箱型 → 全部未决单拒绝（unknown_box_type），
     preview 亦拒绝、不调下游（对齐账单导入 v1.3 语义）。
-    create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_manifest。
     """
     sk = (request.headers.get("sk") or "").strip()
     if create_order and not sk:
@@ -908,24 +903,8 @@ async def import_manifest(
             file_bytes=content,
             create_order=create_order,
             sk=sk,
-            force=force,
         )
     )
-    if create_order and result.summary:
-        if result.summary["skipped"] > 0 and result.summary["created"] == 0:
-            success_sns = result.summary["success_sns"] or []
-            raise DuplicateManifestError(
-                "manifest already created; nothing new was created",
-                details={
-                    "success_sns": result.summary["success_sns"],
-                    "summary": result.summary,
-                    "upstream": {
-                        "code": "409",
-                        "msg": "舱单已全部创建过",
-                        "data": [{"sn": sn} for sn in success_sns],
-                    },
-                },
-            )
     return result
 
 

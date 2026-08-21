@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import io
+
 import pytest
+from openpyxl import load_workbook
 
 from app.errors import BadRequestError, ConvertError, UnknownManifestFamilyError
 from app.orders.manifest import parse_manifest
@@ -29,6 +32,57 @@ class TestFamilyDetection:
         assert ei.value.code == "unknown_manifest_family"
         assert ei.value.http_status == 400
         assert "sheets" in ei.value.details
+
+
+class TestMultiBlNo:
+    """v1.8 多提单号候选收集：全工作簿所有舱单 sheet 的提单号标签值。"""
+
+    def test_two_sheets_two_bl_nos_collected(self, si_bytes):
+        """双舱单 sheet 各一提单号 → 收集 2 个。"""
+        wb = load_workbook(io.BytesIO(si_bytes))
+        ws2 = wb.create_sheet("Shipping Instruction 2")
+        ws2["C1"] = "Booking / BL Number : SITGBAQI005920"
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = parse_manifest(buf.getvalue())
+        assert out.bl_nos == ["SITGBAYP006017", "SITGBAQI005920"]
+
+    def test_same_bl_no_duplicated_deduplicated(self, si_bytes):
+        """同一提单号在多个 sheet 重复出现 → 去重后 1 个（不算多票）。"""
+        wb = load_workbook(io.BytesIO(si_bytes))
+        ws2 = wb.create_sheet("Shipping Instruction 2")
+        ws2["C1"] = "Booking / BL Number : SITGBAYP006017"
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = parse_manifest(buf.getvalue())
+        assert out.bl_nos == ["SITGBAYP006017"]
+
+    def test_slash_double_no_collected_as_two(self, auth_bytes):
+        """MBL NO 斜杠双号（参考号/船司号）→ 按两个提单号拆分收集（v1.8 用户拍板）。"""
+        wb = load_workbook(io.BytesIO(auth_bytes))
+        wb.active.cell(3, 8, "SIT0807BASH591/SITGBASH006434")
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = parse_manifest(buf.getvalue())
+        assert out.bl_nos == ["SIT0807BASH591", "SITGBASH006434"]
+
+    def test_single_bl_no_collected(self, auth_bytes):
+        """单提单号（无斜杠）→ 收集 1 个。"""
+        out = parse_manifest(auth_bytes)
+        assert out.bl_nos == ["SITGBASH006434"]
+
+    def test_hbl_no_not_counted(self, auth_bytes):
+        """HBL NO 分单不参与主提单号计数（MBL+HBL 并存不算多提单号）。"""
+        wb = load_workbook(io.BytesIO(auth_bytes))
+        wb.active.cell(4, 8, "HBL99999999")
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = parse_manifest(buf.getvalue())
+        assert out.bl_nos == ["SITGBASH006434"]
+
+    def test_single_sheet_single_bl_no(self, si_bytes):
+        out = parse_manifest(si_bytes)
+        assert out.bl_nos == ["SITGBAYP006017"]
 
 
 class TestBadFile:

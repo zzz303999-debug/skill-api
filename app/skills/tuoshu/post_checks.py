@@ -527,6 +527,51 @@ def _collect_known_strings(obj: Any) -> set[str]:
     return values
 
 
+def _master_bill_label_values(source_text: str) -> list[str]:
+    """收集提单号/主提单号/主单号标签锚定的合法候选（去重）。
+
+    “分提单号/子提单号”等子单标签因标签前边界或归一化差异不会被锚定；
+    关单号标签另走 customs 分支，不计入本候选。
+    """
+    candidates: list[str] = []
+    for value in _extract_explicit_values(source_text, _MASTER_BILL_LABELS):
+        if _BILL_NO_RE.fullmatch(value) and not _looks_like_quantity(value):
+            candidates.append(value)
+    for value in _extract_separated_label_values(source_text, _MASTER_BILL_LABELS):
+        if (
+            _BILL_NO_RE.fullmatch(value)
+            and not _looks_like_quantity(value)
+            and value not in candidates
+        ):
+            candidates.append(value)
+    return candidates
+
+
+def _reject_conflicting_mbl_no(
+    data: dict[str, Any], source_text: str, issues: list[dict[str, Any]]
+) -> None:
+    """原文存在 ≥2 个不同提单号（标签锚定，大写去重）→ 置空并 blocking 拒绝。
+
+    判定口径对齐舱单 v1.8「一文件一票」：同一提单号重复出现（含大小写变体）
+    计 1 个；子提单号标签值不参与主提单号计数（主单+分单并存不算多提单号）。
+    命中后 mbl_no 置空；`_restore_mbl_no_from_source` 入口对候选仍为多个的
+    场景短路，不会回填任一候选（人工核对 source_values 即可）。
+    """
+    if not source_text:
+        return
+    candidates = _master_bill_label_values(source_text)
+    if len({value.upper() for value in candidates}) < 2:
+        return
+    data["mbl_no"] = None
+    _append_issue(
+        issues,
+        code="conflicting_mbl_no",
+        field="mbl_no",
+        message="原文存在多个提单号，一票仅支持一个提单号，已置空并拒绝自动提取，需人工确认",
+        source_values=candidates,
+    )
+
+
 def _restore_mbl_no_from_source(
     data: dict[str, Any], source_text: str, issues: list[dict[str, Any]]
 ) -> None:
@@ -542,18 +587,13 @@ def _restore_mbl_no_from_source(
         return
     if not source_text:
         return
+    # 多提单号已由 _reject_conflicting_mbl_no 拒绝：候选仍为多个，禁止按
+    # 标签或格式特征回填任一候选（否则与 blocking 拒绝语义自相矛盾，
+    # 人工核对时会被误导）
+    if len({value.upper() for value in _master_bill_label_values(source_text)}) >= 2:
+        return
 
-    bill_anchored: list[str] = []
-    for value in _extract_explicit_values(source_text, _MASTER_BILL_LABELS):
-        if _BILL_NO_RE.fullmatch(value) and not _looks_like_quantity(value):
-            bill_anchored.append(value)
-    for value in _extract_separated_label_values(source_text, _MASTER_BILL_LABELS):
-        if (
-            _BILL_NO_RE.fullmatch(value)
-            and not _looks_like_quantity(value)
-            and value not in bill_anchored
-        ):
-            bill_anchored.append(value)
+    bill_anchored = _master_bill_label_values(source_text)
     # 关单号即提单号：仅当原文无“提单号”标签时才作为 mbl_no 来源（提单号优先）；
     # 运编号/业务编号只进 internal_ref，不作为提单号来源；标签前有“报”字的
     # 报关单号不会被提取函数锚定（前边界为行首/空白）
