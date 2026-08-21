@@ -212,10 +212,12 @@ def test_word_2003_xml_is_converted_without_external_tool(monkeypatch, tmp_path)
         """<?xml version="1.0" encoding="UTF-8"?>
 <w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">
   <w:body>
-    <w:p><w:r><w:t>配舱通知</w:t></w:r></w:p>
+    <w:p><w:r><w:t>配舱通知 请速放单 谢谢配合</w:t></w:r></w:p>
     <w:tbl><w:tr>
       <w:tc><w:p><w:r><w:t>提单号</w:t></w:r></w:p></w:tc>
       <w:tc><w:p><w:r><w:t>SITG001</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:r><w:t>船名航次</w:t></w:r></w:p></w:tc>
+      <w:tc><w:p><w:r><w:t>SITC BRAVE V.2620S</w:t></w:r></w:p></w:tc>
     </w:tr></w:tbl>
   </w:body>
 </w:wordDocument>""",
@@ -230,8 +232,8 @@ def test_word_2003_xml_is_converted_without_external_tool(monkeypatch, tmp_path)
     output, _ = converter.convert_doc(str(source))
 
     assert "_format: word_xml_" in output
-    assert "_p1_ 配舱通知" in output
-    assert "| 1 | 提单号 | SITG001 |" in output
+    assert "_p1_ 配舱通知 请速放单 谢谢配合" in output
+    assert "| 1 | 提单号 | SITG001 | 船名航次 | SITC BRAVE V.2620S |" in output
 
 
 def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path):
@@ -241,7 +243,7 @@ def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path):
 <pkg:package xmlns:pkg="http://schemas.microsoft.com/office/2006/xmlPackage"
  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <pkg:part pkg:name="/word/document.xml"><pkg:xmlData>
-    <w:document><w:body><w:p><w:r><w:t>放箱号 0156</w:t></w:r></w:p></w:body></w:document>
+    <w:document><w:body><w:p><w:r><w:t>放箱号 0156 请速放单 谢谢配合 船名航次 SITC BRAVE V.2620S</w:t></w:r></w:p></w:body></w:document>
   </pkg:xmlData></pkg:part>
 </pkg:package>""",
         encoding="utf-8",
@@ -255,8 +257,75 @@ def test_flat_opc_word_xml_extracts_document_body(monkeypatch, tmp_path):
     output, _ = converter.convert_doc(str(source))
 
     assert "_format: word_xml_" in output
-    assert "_p1_ 放箱号 0156" in output
+    assert "_p1_ 放箱号 0156 请速放单 谢谢配合 船名航次 SITC BRAVE V.2620S" in output
     assert "pkg:package" not in output
+
+
+def test_word_2003_xml_with_sect_wrapper_is_converted(monkeypatch, tmp_path):
+    """正文包在 <w:sect> 节内的 Word 2003 XML：递归展开，不再空输出。"""
+    source = tmp_path / "sitc.doc"
+    source.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Word.Document"?>
+<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">
+  <w:body>
+    <w:sect>
+      <w:p><w:r><w:t>客户名称: 海丰武汉</w:t></w:r></w:p>
+      <w:tbl><w:tr>
+        <w:tc><w:p><w:r><w:t>提 单 号:</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>SITGSHSGA36667</w:t></w:r></w:p></w:tc>
+      </w:tr></w:tbl>
+    </w:sect>
+  </w:body>
+</w:wordDocument>""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        converter,
+        "_find_soffice",
+        lambda: (_ for _ in ()).throw(AssertionError("office lookup should not run")),
+    )
+
+    output, _ = converter.convert_doc(str(source))
+
+    assert "_format: word_xml_" in output
+    assert "_p1_ 客户名称: 海丰武汉" in output
+    assert "| 1 | 提 单 号: | SITGSHSGA36667 |" in output
+
+
+def test_word_xml_empty_output_falls_through_to_libreoffice(monkeypatch, tmp_path):
+    """word_xml 解析空正文（伪 xml/解析失败）时不返回空结果，落到 LibreOffice 级联。"""
+    source = tmp_path / "fake-xml.doc"
+    source.write_text(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<w:wordDocument xmlns:w="http://schemas.microsoft.com/office/word/2003/wordml">
+  <w:body><w:sect><w:pPr/></w:sect></w:body>
+</w:wordDocument>""",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(converter, "_find_soffice", lambda: "/usr/bin/soffice")
+
+    def fake_run(command, **_kwargs):
+        outdir = Path(command[command.index("--outdir") + 1])
+        (outdir / "fake-xml.docx").write_bytes(b"fake-docx")
+
+    monkeypatch.setattr(converter.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        converter,
+        "convert_docx",
+        lambda _path: (
+            captured.update(cascade=True),
+            ("# fake-xml.docx\n_format: docx_\n_p1_ 海丰武汉做箱通知 请速放单 谢谢配合 箱型 4*40HC 目的港 HO CHI MINH\n", {}),
+        )[1],
+    )
+
+    output, _ = converter.convert_doc(str(source))
+
+    assert captured.get("cascade") is True
+    assert "海丰武汉做箱通知" in output
+    assert "_format: docx_" in output
 
 
 def test_doc_uses_textutil_when_libreoffice_is_unavailable(monkeypatch, tmp_path):
@@ -427,3 +496,102 @@ def test_pdf_vision_conversion_rejects_page_truncation(monkeypatch):
 
     assert exc_info.value.code == "pdf_page_limit_exceeded"
     assert exc_info.value.details == {"page_count": 4, "max_pages": 3}
+
+
+def test_word_document_stream_text_reads_fib_range():
+    """FIB fcMin..fcMac 简单区间 UTF-16LE 解码：正常读出、质量不足与越界返回 None。"""
+    body = "做箱通知：FM:\n上海泓枢物流/1\r提单号：0SHA010658".encode("utf-16-le")
+    import struct
+
+    fib = bytearray(0x20)
+    struct.pack_into("<ii", fib, 0x18, 0x200, 0x200 + len(body))
+    stream = bytes(fib) + b"\x00" * (0x200 - len(fib)) + body
+    text = converter._word_document_stream_text(stream)
+    assert text is not None
+    assert "上海泓枢物流/1" in text
+    assert "0SHA010658" in text
+
+    # 区间越界 / 有效字符不足 → None
+    struct.pack_into("<ii", fib, 0x18, 0x200, len(stream) + 100)
+    assert converter._word_document_stream_text(bytes(fib) + body) is None
+    tiny = bytearray(0x40)
+    struct.pack_into("<ii", tiny, 0x18, 0x20, 0x40)
+    tiny.extend("ab".encode("utf-16-le") * 8)  # 16 个字母，低于 20 阈值
+    assert converter._word_document_stream_text(bytes(tiny)) is None
+
+
+def test_effective_body_chars_ignores_structure_lines():
+    """空段占位/结构标题/表格骨架不计入有效正文。"""
+    structural_only = (
+        "# doc.docx\n"
+        "_format: docx_\n"
+        "_p1: (empty)_\n"
+        "## Text boxes\n"
+        "### Text box 1\n"
+        "_source: word/document.xml_\n"
+        "| _row/col_ | A | B |\n"
+        "| --- | --- |\n"
+        "| 1 |  |  |\n"
+    )
+    assert converter._effective_body_chars(structural_only) == 0
+    assert converter._effective_body_chars(structural_only + "_p2_ 做箱通知 FM: 上海泓枢物流\n") > 0
+
+
+def test_doc_ole_fallback_when_converter_loses_body(monkeypatch, tmp_path):
+    """LibreOffice 丢失正文（只剩结构行）时自动 OLE 兑底，并附带复核 issue。"""
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"legacy-word")
+
+    monkeypatch.setattr(converter, "_find_soffice", lambda: "/usr/bin/soffice")
+
+    def fake_run(command, **_kwargs):
+        outdir = Path(command[command.index("--outdir") + 1])
+        (outdir / "legacy.docx").write_bytes(b"fake-docx")
+
+    monkeypatch.setattr(converter.subprocess, "run", fake_run)
+    # 模拟 LibreOffice 丢正文：转换产物只有结构行，无有效字符
+    monkeypatch.setattr(
+        converter,
+        "convert_docx",
+        lambda _path: ("# legacy.docx\n_format: docx_\n_p1: (empty)_\n", {"coverage": {"complete": True}}),
+    )
+    monkeypatch.setattr(
+        converter,
+        "_doc_text_from_ole",
+        lambda _path: "做箱通知\nFM:\n繁星/小赵/小杨\n0SHA010658",
+    )
+
+    markdown, report = converter.convert_doc(str(source))
+
+    assert "_format: doc_" in markdown
+    assert "_p2_ FM:" in markdown
+    assert "繁星/小赵/小杨" in markdown
+    assert "0SHA010658" in markdown
+    codes = [issue["code"] for issue in report["issues"]]
+    assert "doc_ole_fallback_used" in codes
+
+
+def test_doc_scan_hint_when_all_converters_lose_body(monkeypatch, tmp_path):
+    """LibreOffice 与 OLE 兑底均无有效正文：诚实返回 SCAN_OR_IMAGE_HINT，不再静默输出空结果。"""
+    source = tmp_path / "legacy.doc"
+    source.write_bytes(b"legacy-word")
+
+    monkeypatch.setattr(converter, "_find_soffice", lambda: "/usr/bin/soffice")
+
+    def fake_run(command, **_kwargs):
+        outdir = Path(command[command.index("--outdir") + 1])
+        (outdir / "legacy.docx").write_bytes(b"fake-docx")
+
+    monkeypatch.setattr(converter.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        converter,
+        "convert_docx",
+        lambda _path: ("# legacy.docx\n_format: docx_\n_p1: (empty)_\n", {"coverage": {"complete": True}}),
+    )
+    monkeypatch.setattr(converter, "_doc_text_from_ole", lambda _path: None)
+
+    markdown, report = converter.convert_doc(str(source))
+
+    assert markdown.startswith("SCAN_OR_IMAGE_HINT:")
+    assert "转换丢失正文" in markdown
+    assert report is None

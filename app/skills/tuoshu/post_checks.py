@@ -737,6 +737,20 @@ def _source_container_types(source_text: str | None) -> list[str]:
         value = normalize_container_type(match.group(0))
         if value not in values:
             values.append(value)
+    # 数量+箱型写法（1X20'GP / 2*40HC / 3×40HQ）：箱型段前是数量与乘号，
+    # 裸 token 匹配因前边界（字母数字）失败，需按此格式单独提取
+    quantity_pattern = re.compile(
+        r"(?<![A-Za-z0-9])"
+        r"\d+\s*[Xx*×]\s*"
+        + _CONTAINER_TYPE_TOKEN
+        + r"(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    for match in quantity_pattern.finditer(decoded):
+        box_type = re.sub(r"^\d+\s*[Xx*×]\s*", "", match.group(0))
+        value = normalize_container_type(box_type)
+        if value not in values:
+            values.append(value)
     return values
 
 
@@ -754,6 +768,8 @@ def _preserve_container_types(
         expected_types = list(source_types)
     else:
         expected_types = [None] * len(containers)
+    # 原文完全没有任何箱型 token：模型编造的已知箱型同样无据，置空待人工
+    source_types_absent = not source_types
     for index, container in enumerate(containers):
         if not isinstance(container, dict):
             continue
@@ -765,6 +781,17 @@ def _preserve_container_types(
                 code="missing_container_type",
                 field=f"containers[{index}].type",
                 message="缺少箱型，需人工确认",
+            )
+            continue
+        if source_types_absent:
+            # 宁空勿错：原文无箱型依据时不留模型编造值
+            container["type"] = None
+            _append_issue(
+                issues,
+                code="container_type_ungrounded",
+                field=f"containers[{index}].type",
+                message="箱型在原文中无任何依据，已置空待人工填入",
+                source_values=[value],
             )
             continue
         preserved = normalize_container_type(value)
