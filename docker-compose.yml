@@ -1,6 +1,5 @@
 services:
   skill-api:
-    build: .
     image: ${SKILL_API_IMAGE:-111.229.178.2:5000/jxt-skill-api:latest}
     container_name: skill-api
     restart: unless-stopped
