@@ -26,7 +26,7 @@ from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, create_model
 
-from app import access_log, rate_limit
+from app import access_log, rate_limit, third_party_log
 from app.config import settings
 from app.core import registry
 from app.core.skill_base import SkillBase, SkillMeta
@@ -70,7 +70,15 @@ _skill_executor = ThreadPoolExecutor(
 _inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 # 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
-_SKIP_ACCESS_LOG_PATHS = {"/logs", "/api/logs", "/favicon.ico", "/bill-import", "/bill-import-help"}
+_SKIP_ACCESS_LOG_PATHS = {
+    "/logs",
+    "/api/logs",
+    "/third-party-logs",
+    "/api/third-party-logs",
+    "/favicon.ico",
+    "/bill-import",
+    "/bill-import-help",
+}
 
 # 鉴权豁免路径：健康检查、OpenAPI 文档与日志/账单上传页面本身（页面无数据）；
 # /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
@@ -85,6 +93,7 @@ _AUTH_FREE_PATHS = frozenset(
         "/openapi.json",
         "/favicon.ico",
         "/logs",
+        "/third-party-logs",
         "/bill-import",
         "/bill-import-help",
         "/orders/bill/import",
@@ -611,6 +620,41 @@ def request_logs_page() -> FileResponse:
     """内置的请求日志查看页面。"""
     static_dir = Path(__file__).resolve().parent / "static"
     return FileResponse(static_dir / "logs.html")
+
+
+@app.get("/api/third-party-logs", tags=["meta"])
+def list_third_party_logs(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    message: str | None = Query(default=None),
+    endpoint: str | None = Query(default=None),
+    status: int | None = Query(default=None, ge=100, le=599),
+    status_min: int | None = Query(default=None, ge=100, le=599),
+    status_max: int | None = Query(default=None, ge=100, le=599),
+    level: str | None = Query(default=None),
+) -> dict:
+    """第三方接口调用日志列表（时间倒序），支持按事件/端点/状态码/级别过滤。
+
+    数据源为 http_client 落盘的 third-party-YYYY-MM-DD.jsonl（内存缓冲查询），
+    含请求/响应体摘要（body_preview，含业务 PII）——与 /api/logs 同级别鉴权。
+    """
+    return third_party_log.query(
+        limit=limit,
+        offset=offset,
+        message=message,
+        endpoint=endpoint,
+        status=status,
+        status_min=status_min,
+        status_max=status_max,
+        level=level,
+    )
+
+
+@app.get("/third-party-logs", include_in_schema=False)
+def third_party_logs_page() -> FileResponse:
+    """内置的第三方接口调用日志查看页面（页面无数据，鉴权豁免；数据接口需 Key）。"""
+    static_dir = Path(__file__).resolve().parent / "static"
+    return FileResponse(static_dir / "third_party_logs.html")
 
 
 @app.get("/bill-import", include_in_schema=False)

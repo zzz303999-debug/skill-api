@@ -12,6 +12,7 @@ from app.config import settings
 from app.errors import SkillAPIError
 from app.logging_conf import get_logger
 
+from .http_client import post_json, unpack_json
 from .schema import OrderApiResponse
 
 log = get_logger(__name__)
@@ -35,9 +36,10 @@ def publish_create_order(
         "roomId": room_id,
     }
     try:
-        response = httpx.post(
+        response = post_json(
             settings.order_api_url,
-            json=payload,
+            payload,
+            name="publishCreateOrder",
             timeout=settings.order_api_timeout_seconds,
         )
     except (httpx.TimeoutException, httpx.RequestError) as exc:
@@ -53,10 +55,11 @@ def publish_create_order(
             "order API returned an HTTP error",
             details={
                 "status_code": response.status_code,
-                "upstream_response": response.text[:2000],
+                "upstream_response": unpack_json(response.text),
             },
         )
     try:
+        # 顶层 NaN/Infinity 由 unpack_json 递归清洗为 None（防 JSONResponse 500）
         raw = response.json()
     except ValueError as exc:
         raise OrderUpstreamError(
@@ -97,11 +100,7 @@ def publish_create_order(
             details={
                 "upstream_code": parsed.code,
                 "upstream_message": parsed.msg,
-                "upstream_response": (
-                    json.dumps(raw, ensure_ascii=False, indent=2)[:2000]
-                    if not isinstance(raw, str)
-                    else raw[:2000]
-                ),
+                "upstream_response": unpack_json(raw),
             },
         )
     log.info("order_created", extra={"upstream_code": parsed.code})
