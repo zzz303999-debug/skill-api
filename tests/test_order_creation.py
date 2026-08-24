@@ -57,6 +57,20 @@ def test_sample_text_is_parsed_verbatim():
         # 完整年月日（含中文写法）→ 归一为 YYYY-MM-DD
         ("2026-07-20", "2026-07-20", None),
         ("2026年7月20日", "2026-07-20", None),
+        # 年月日 + 中文时间尾巴（月/日单数字）→ 拆日期 + 时间描述
+        ("2026-08-2 8点到厂", "2026-08-02", "8点到厂"),
+        ("2026-08-02 8点到厂", "2026-08-02", "8点到厂"),
+        ("2026年8月2日 8点到厂", "2026-08-02", "8点到厂"),
+        ("2026-8-2", "2026-08-02", None),
+        # 数字粘连尾巴（OCR 噪声）→ 不产出脏 b_date（原文归时间描述）
+        ("2026-08-2030", None, "2026-08-2030"),
+        ("2026-08-0208:00", None, "2026-08-0208:00"),
+        # 非法日历日期（格式合法但日历不合法）→ 不产出脏数据
+        ("2026-13-40", None, None),
+        ("2026-13-40 8点到厂", None, None),
+        # 既有格式零回归
+        ("2026-07-20 08:00", "2026-07-20", "08:00:00"),
+        ("7月20日 8点", f"{date.today().year}-07-20", "8点"),
         # 缺年份中文日期 → 按当前年份补全（动态年份，避免跨年测试失败）
         ("7月20日", f"{date.today().year}-07-20", None),
         ("12月5日", f"{date.today().year}-12-05", None),
@@ -95,6 +109,35 @@ def test_build_order_data_requires_bill_and_shipper():
         build_order_data(OrderTextExtraction())
 
     assert caught.value.details["missing_fields"] == ["order_num1", "c_title"]
+
+
+@pytest.mark.parametrize(
+    "box_value,expected",
+    [
+        # 带数量两种写法保持原语义
+        ("1*20GP", [{"b_type": "20GP", "box_num": 1}]),
+        ("2x40HQ", [{"b_type": "40HQ", "box_num": 2}]),
+        ("40HQ*3", [{"b_type": "40HQ", "box_num": 3}]),
+        # 仅箱型未写数量 → 默认箱量 1
+        ("20GP", [{"b_type": "20GP", "box_num": 1}]),
+        ("40HQ", [{"b_type": "40HQ", "box_num": 1}]),
+        # 混写：带数量条目中的箱型不重复计入
+        ("1*20GP+40HQ", [{"b_type": "20GP", "box_num": 1}, {"b_type": "40HQ", "box_num": 1}]),
+        ("20GP+2*40HQ", [{"b_type": "20GP", "box_num": 1}, {"b_type": "40HQ", "box_num": 2}]),
+        # 同箱型混写：位置不重叠的裸箱型按 1 计入并累加
+        ("1*20GP+20GP", [{"b_type": "20GP", "box_num": 2}]),
+        # 零数量条目视为无效并忽略（兜底不得复活）
+        ("0*20GP", []),
+        ("20GP*0", []),
+        ("20GPx0", []),
+        # 数字前缀/后缀不产生幽灵箱型（100GP 中的 00GP、20GP2 的粘连）
+        ("100GP", []),
+        ("20GP2", []),
+    ],
+)
+def test_parse_box_quantity_defaults_to_one(box_value, expected):
+    extracted, _meta = extract_order_text(f"提单号：KMTCSHAP950393；箱型箱量：{box_value}")
+    assert [item.model_dump() for item in extracted.box] == expected
 
 
 def test_create_from_text_extracts_then_publishes(monkeypatch):
@@ -264,10 +307,12 @@ def test_publish_passes_through_full_upstream_error(monkeypatch):
     assert caught.value.details == {
         "upstream_code": "204",
         "upstream_message": "no: userId",
-        "upstream_response": (
-            '{\n  "code": "204",\n  "msg": "no: userId",\n  "data": [\n'
-            '    {\n      "sn": "EX26040001"\n    }\n  ]\n}'
-        ),
+        # upstream_response 为结构化对象（嵌套 JSON 已展开，响应序列化时自然多行）
+        "upstream_response": {
+            "code": "204",
+            "msg": "no: userId",
+            "data": [{"sn": "EX26040001"}],
+        },
     }
 
 

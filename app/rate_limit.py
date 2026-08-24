@@ -67,7 +67,7 @@ class SlidingWindowLimiter:
 # ---- 路径分类：heavy（LLM/转换密集型）/ light（日志查询）/ None（不限） ----
 
 _HEAVY_PATH_PREFIXES = ("/orders", "/skills/")
-_LIGHT_PATH_PREFIXES = ("/api/logs",)
+_LIGHT_PATH_PREFIXES = ("/api/logs", "/api/third-party-logs")
 _FREE_PATHS = frozenset(
     {
         "/healthz",

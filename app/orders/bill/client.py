@@ -25,6 +25,7 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
+from ..http_client import post_form, unpack_json
 from .imported_registry import get_imported_registry, lock_for, normalize
 from .schema import BillOrder
 
@@ -236,7 +237,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             f"{step} returned an HTTP error: {response.status_code}",
             details={
                 "status_code": response.status_code,
-                "upstream_response": response.text[:2000],
+                "upstream_response": unpack_json(response.text),
             },
         )
     try:
@@ -261,7 +262,7 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
+                "upstream_response": unpack_json(raw),
             },
         )
     data_list = raw.get("data")
@@ -284,9 +285,10 @@ def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     """
     form = build_add_work_form(order_data)
     try:
-        response = httpx.post(
+        response = post_form(
             settings.jxt_addwork_url,
-            data=form,
+            form,
+            name="AddWork",
             headers={"sk": sk},
             timeout=settings.jxt_timeout_seconds,
         )
@@ -360,7 +362,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             f"order API returned an HTTP error: {response.status_code}",
             details={
                 "status_code": response.status_code,
-                "upstream_response": response.text[:2000],
+                "upstream_response": unpack_json(response.text),
             },
         )
     try:
@@ -387,7 +389,7 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
+                "upstream_response": unpack_json(raw),
             },
         )
     data_list = raw.get("data")
@@ -424,9 +426,10 @@ def submit_canonical(sk: str, order) -> dict[str, Any]:
             extra={"bl_no": order.bl_no, "warnings": warnings},
         )
     try:
-        response = httpx.post(
+        response = post_form(
             settings.jxt_addwork_url,
-            data=form,
+            form,
+            name="AddWork-canonical",
             headers={"sk": sk},
             timeout=settings.jxt_timeout_seconds,
         )

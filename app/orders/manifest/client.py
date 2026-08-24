@@ -17,6 +17,8 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
+from ..http_client import post_json
+
 log = get_logger(__name__)
 
 _ERROR_DESCRIPTION = "舱单系统拒绝了请求或不可达，请稍后重试"
@@ -94,9 +96,10 @@ def submit_manifest(payload: dict, sk: str) -> dict:
     error（不抛），调用方据此隔离失败单。
     """
     try:
-        response = httpx.post(
+        response = post_json(
             settings.jxt_manifest_addbill_url,
-            json=payload,
+            payload,
+            name="addBill",
             headers={"sk": sk},
             timeout=settings.jxt_timeout_seconds,
         )

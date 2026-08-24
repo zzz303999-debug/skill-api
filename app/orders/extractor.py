@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 from pydantic import ValidationError
@@ -47,6 +47,10 @@ _BOX_PATTERNS = (
     re.compile(r"(?P<qty>\d+)\s*[*xX×]\s*(?P<type>\d{2}[A-Za-z]+)"),
     re.compile(r"(?P<type>\d{2}[A-Za-z]+)\s*[*xX×]\s*(?P<qty>\d+)"),
 )
+# 纯箱型无数量（如 ``20GP``）：位置未被带数量条目覆盖时默认箱量 1；
+# (?<!\d) 拒绝数字前缀（如 100GP 中的 00GP），(?!\dA-Za-z) 拒绝字母数字
+# 粘连后缀（如 OCR 丢失乘号的 20GP2/20GPx0），避免从粘连文本制造幽灵箱型
+_BOX_TYPE_ONLY_RE = re.compile(r"(?<!\d)\d{2}[A-Za-z]+(?![\dA-Za-z])")
 
 # 日期：YYYY-MM-DD（与 document.py 的校验口径一致）
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -58,6 +62,8 @@ def _split_loading_value(value: str) -> tuple[str | None, str | None]:
     """拆分做箱时间值：
 
     - 完整年月日（可带时间，如 `2026-07-20 08:00`）→ (b_date YYYY-MM-DD, 时间部分)
+    - 年+月+日 + 中文时间尾巴（如 `2026-08-2 8点到厂` / `2026年8月2日 8点到厂`）
+      → (b_date 归一 YYYY-MM-DD, 时间尾巴原样)
     - 缺年份中文日期（如 `7月20日`，可带时间尾巴如 `8点`）→ (b_date 按当前年补全, 时间部分)
     - 纯时间描述（如 `早上8点`/`9:00`/`下午2点`）→ (None, b_date_time_start 原文)
     - 无法识别 → (None, None)
@@ -75,7 +81,29 @@ def _split_loading_value(value: str) -> tuple[str | None, str | None]:
         return date_part, time_part
     normalized = normalize_date_value(text, allow_time=False)
     if isinstance(normalized, str) and _DATE_RE.fullmatch(normalized):
+        # 格式合法后仍需日历校验（normalize 失败时原样返回可能碰巧命中格式，
+        # 如 2026-13-40），非法日期不产出脏数据
+        try:
+            datetime.strptime(normalized, "%Y-%m-%d")
+        except ValueError:
+            return None, None
         return normalized, None
+    # 年+月+日（月/日可单数字，分隔符 -/./／/年） + 中文时间尾巴（如
+    # `2026-08-2 8点到厂`）：日期段归一为 YYYY-MM-DD，剩余时间描述归
+    # b_date_time_start；正常 ISO 日期已在上面分支返回，到这里必然带尾巴
+    match = re.match(
+        r"\s*(\d{4})\s*(?:年\s*|[./-]\s*)(\d{1,2})(?!\d)\s*(?:月\s*|[./-]\s*)(\d{1,2})(?!\d)\s*日?",
+        text,
+    )
+    if match:
+        try:
+            b_date = (
+                date(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
+            )
+        except ValueError:
+            return None, None
+        rest = text[match.end():].strip()
+        return b_date, rest or None
     # 缺年份的中文日期（如 7月20日，可带时间尾巴如 8点/上午8:00）：
     # 日期段按当前年份补全，剩余时间描述归 b_date_time_start
     match = re.match(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日?", text)
@@ -127,23 +155,35 @@ def _parse_boxes(value: str | None) -> list[BoxItem]:
 
     两种 pattern（数量*箱型 / 箱型*数量）都会被匹配，按原文出现顺序输出；
     同一箱型多次出现时数量累加。箱量为 0 或负数的条目视为无效并忽略，
-    避免把 OCR 噪声或非法数量带进订单。
+    避免把 OCR 噪声或非法数量带进订单（其占位区间同样覆盖兜底，不得复活）。
+
+    仅写箱型未写数量（如 ``20GP``）时默认箱量为 1；位置已被带数量条目
+    （含无效数量）覆盖的箱型不重复计入，位置不重叠的裸箱型按 1 计入并累加
+    （如 ``1*20GP+20GP`` → 20GP×2）。
     """
     if not value:
         return []
-    found: list[tuple[int, str, int]] = []
+    found: list[tuple[int, int, str, int]] = []
+    covered: list[tuple[int, int]] = []
     for pattern in _BOX_PATTERNS:
         for match in pattern.finditer(value):
+            # 无论数量是否有效都占位：无效条目（0/负数）不得被兜底以箱量 1 复活
+            covered.append((match.start(), match.end()))
             try:
                 qty = int(match.group("qty"))
             except ValueError:
                 continue
             if qty < 1:
                 continue
-            found.append((match.start(), match.group("type"), qty))
+            found.append((match.start(), match.end(), match.group("type"), qty))
+    # 纯箱型兜底：位置未被任何带数量条目覆盖时按箱量 1 计入
+    for match in _BOX_TYPE_ONLY_RE.finditer(value):
+        if any(start <= match.start() < end for start, end in covered):
+            continue
+        found.append((match.start(), match.end(), match.group(0), 1))
     quantities: dict[str, int] = {}
     order: list[str] = []
-    for _position, b_type, qty in sorted(found, key=lambda item: item[0]):
+    for _position, _end, b_type, qty in sorted(found, key=lambda item: item[0]):
         if b_type not in quantities:
             order.append(b_type)
             quantities[b_type] = 0

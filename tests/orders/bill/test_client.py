@@ -393,7 +393,8 @@ class TestAddWork:
         assert error["description"] == "订单系统拒绝了请求或不可达，请稍后重试"
         assert error["details"]["upstream_code"] == "204"
         assert error["details"]["upstream_message"] == "添加失败"
-        assert "添加失败" in error["details"]["upstream_response"]
+        # upstream_response 为结构化对象（嵌套 JSON 已展开）
+        assert error["details"]["upstream_response"] == {"code": "204", "msg": "添加失败"}
 
     def test_http_error_and_non_json(self, urls, monkeypatch):
         monkeypatch.setattr(

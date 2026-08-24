@@ -7,7 +7,20 @@ from collections import deque
 import pytest
 
 import app.access_log as access_log
+import app.third_party_log as third_party_log
 from app.config import settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_third_party_log(tmp_path, monkeypatch):
+    """所有测试的第三方调用日志重定向到临时目录并重置内存缓冲。"""
+    monkeypatch.setattr(third_party_log, "_log_dir_override", tmp_path / "logs")
+    monkeypatch.setattr(
+        third_party_log,
+        "_entries",
+        deque(maxlen=third_party_log._MAX_MEMORY_ENTRIES),
+    )
+    monkeypatch.setattr(third_party_log, "_loaded", False)
 
 
 @pytest.fixture(autouse=True)

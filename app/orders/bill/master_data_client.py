@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import httpx
@@ -23,6 +22,7 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
+from ..http_client import post_form, unpack_json
 from .master_data import (
     KIND_BAILOR,
     KIND_CLIENT,
@@ -195,7 +195,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
             f"{kind_label(kind)} create API returned an HTTP error: {response.status_code}",
             details={
                 "status_code": response.status_code,
-                "upstream_response": response.text[:2000],
+                "upstream_response": unpack_json(response.text),
             },
         )
     try:
@@ -228,7 +228,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                     "details": {
                         "upstream_code": raw.get("code"),
                         "upstream_message": msg,
-                        "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
+                        "upstream_response": unpack_json(raw),
                     },
                 },
             }
@@ -237,7 +237,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
             details={
                 "upstream_code": raw.get("code"),
                 "upstream_message": raw.get("msg"),
-                "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
+                "upstream_response": unpack_json(raw),
             },
         )
     data = raw.get("data")
@@ -263,7 +263,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
                 "message": "已添加但响应未返回主键",
                 "details": {
                     "primary_key": _PRIMARY_KEY_MAP[kind],
-                    "upstream_response": json.dumps(raw, ensure_ascii=False, indent=2)[:2000],
+                    "upstream_response": unpack_json(raw),
                 },
             },
         }
@@ -293,9 +293,10 @@ def create_archives(
                 )
                 continue
             try:
-                response = httpx.post(
+                response = post_form(
                     url,
-                    data=form,
+                    form,
+                    name=f"archive-{kind}",
                     headers={"sk": sk},
                     timeout=settings.jxt_timeout_seconds,
                 )
