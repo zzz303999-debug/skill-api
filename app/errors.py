@@ -43,6 +43,11 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "order_text_parse_failed": "文本订单解析结果校验失败，请检查输入文本格式",
     "order_upstream_error": "订单系统拒绝了请求或不可达，请稍后重试",
     "duplicate_bill": "账单已全部创建过，本次未录入",
+    # ---- 舱单 ----
+    "unknown_manifest_family": "舱单未识别，请使用支持的舱单",
+    "manifest_order_not_ready": "舱单必填信息不完整，无法录入，请补充后重试",
+    "manifest_box_missing": "舱单未识别到箱型箱量，无法录入，请检查文件后重试",
+    "manifest_multi_bl_no": "舱单文件包含多个提单号，无法录入，请拆分文件后重试",
     # ---- 限流 ----
     "rate_limited": "请求过于频繁，已被限流，请稍后重试",
     "server_busy": "服务繁忙（并发处理任务已满），请稍后重试",
@@ -132,3 +137,10 @@ class DuplicateBillError(SkillAPIError):
 
     http_status = 409
     code = "duplicate_bill"
+
+
+class UnknownManifestFamilyError(SkillAPIError):
+    """400：舱单模板未识别（非托书/SI 布局）。"""
+
+    http_status = 400
+    code = "unknown_manifest_family"
