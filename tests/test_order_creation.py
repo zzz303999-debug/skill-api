@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.main import app
 from app.orders.client import publish_create_order
-from app.orders.extractor import _split_loading_value, extract_order_text
+from app.orders.extractor import (
+    _split_loading_value,
+    _split_vessel_voyage,
+    extract_order_text,
+)
 from app.orders.mapper import OrderNotReadyError, build_order_data
 from app.orders.schema import OrderTextExtraction
 
@@ -49,6 +53,49 @@ def test_sample_text_is_parsed_verbatim():
     assert order_data["b_end_port"] == "KRPUS"
     assert order_data["b_open_ship_time"] == "2026-07-26"
     assert order_data["data"] == [{"b_order_num": "KMTCSHAP950393"}]
+
+
+@pytest.mark.parametrize(
+    "value,expected_name,expected_num",
+    [
+        # VOY 前缀（既有形态，回归）
+        ("ZHONG GU YING KOU V.2605N", "ZHONG GU YING KOU", "2605N"),
+        # 斜杠分隔（既有形态，回归）
+        ("MSC CRAPOLLA/QB633W", "MSC CRAPOLLA", "QB633W"),
+        ("MAERSK SARNIA/752E", "MAERSK SARNIA", "752E"),
+        # 末尾独立 token 兜底：数字开头航次
+        ("MAERSK SARNIA 752E", "MAERSK SARNIA", "752E"),
+        ("EVER GIVEN 2617N", "EVER GIVEN", "2617N"),
+        # 末尾独立 token 兜底：MSC 式（字母+数字+字母）
+        ("MSC CRAPOLLA QB633W", "MSC CRAPOLLA", "QB633W"),
+        # 无航次形态：整串归船名，不误伤
+        ("CMA CGM ALEXANDER VON HUMBOLDT", "CMA CGM ALEXANDER VON HUMBOLDT", None),
+        ("MSC CRAPOLLA", "MSC CRAPOLLA", None),
+    ],
+)
+def test_split_vessel_voyage(value, expected_name, expected_num):
+    name, num = _split_vessel_voyage(value)
+    assert name == expected_name
+    assert num == expected_num
+
+
+def test_extract_vessel_voyage_plain_space_separated():
+    """生产案例：船名航次合写无 VOY 前缀/斜杠（MSC CRAPOLLA QB633W）→ 拆出航次。"""
+    text = (
+        "门点地址：江苏省昆山市巴城镇石牌东泰丰路68号；"
+        "做箱时间：2026-08-26 09:00；"
+        "船名航次：MSC CRAPOLLA QB633W；"
+        "提单号：177FZEZES711236；"
+        "箱型箱量：20GPx1；"
+        "托运人/公司名称：上海集行供应链管理有限公司"
+    )
+    extracted, meta = extract_order_text(text)
+    assert meta == {"extractor": "explicit_labels", "value_mode": "verbatim"}
+    assert extracted.b_ship_name == "MSC CRAPOLLA"
+    assert extracted.b_ship_num == "QB633W"
+    order_data = build_order_data(extracted)
+    assert order_data["b_ship_name"] == "MSC CRAPOLLA"
+    assert order_data["b_ship_num"] == "QB633W"
 
 
 @pytest.mark.parametrize(

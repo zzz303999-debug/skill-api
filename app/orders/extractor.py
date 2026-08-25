@@ -140,6 +140,12 @@ def parse_source_fields(text: str) -> dict[str, str]:
     return result
 
 
+# 末尾独立 token 的航次形态（船名航次合写无分隔符时的兜底拆分）：
+# - 数字开头 + 字母结尾（2617N / 752E / 043E）
+# - 字母开头 + 数字 + 字母结尾（MSC 式，如 QB633W）
+_VOYAGE_TOKEN_RE = re.compile(r"^(?:\d{2,}[A-Z]|[A-Z]{1,3}\d{2,}[A-Z])$")
+
+
 def _split_vessel_voyage(value: str) -> tuple[str | None, str | None]:
     match = re.fullmatch(r"(.+?)\s+(?:V\.?|VOY\.?)\s*([A-Za-z0-9-]+)", value, re.IGNORECASE)
     if match:
@@ -147,6 +153,12 @@ def _split_vessel_voyage(value: str) -> tuple[str | None, str | None]:
     parts = [part.strip() for part in re.split(r"[/／]", value, maxsplit=1)]
     if len(parts) == 2:
         return parts[0] or None, parts[1] or None
+    # 末尾独立 token 为航次形态（无 VOY 前缀/斜杠，如 `MSC CRAPOLLA QB633W`）：
+    # 仅拆最后一个 token（船名本身可含多 token，如 `CMA CGM ALEXANDER VON HUMBOLDT`，
+    # 其末尾 token 不匹配航次形态则不动），前部归船名
+    tokens = value.strip().split()
+    if len(tokens) >= 2 and _VOYAGE_TOKEN_RE.match(tokens[-1]):
+        return " ".join(tokens[:-1]).strip() or None, tokens[-1]
     return value, None
 
 
