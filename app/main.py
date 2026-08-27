@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import FastAPI, File, Form, Query, Request, Response, UploadFile
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, create_model
 
 from app import access_log, rate_limit, third_party_log
@@ -33,7 +35,6 @@ from app.core.skill_base import SkillBase, SkillMeta
 from app.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
-    DuplicateBillError,
     ServiceBusyError,
     SkillAPIError,
 )
@@ -48,7 +49,7 @@ from app.orders import (
     parse_source_fields,
     publish_create_order,
 )
-from app.orders.bill import BillParseResult, build_result
+from app.orders.bill import BillImportResponse, build_result
 from app.orders.manifest import ManifestParseResult, build_manifest_result
 
 setup_logging()
@@ -138,6 +139,29 @@ def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
     return host, forwarded
 
 
+# ---- 统一响应外壳（{code, msg, data}）----
+# 账单录入（/orders/bill/import）错误场景先行适配：调用方全场景统一取
+# code/msg/data 三字段（code 机器可读、msg 可直接展示的中文说明、data 为
+# 补充详情），不再区分成功/业务失败/请求错误结构。其余接口保持
+# {error: {code, message, description, details}} 结构不变（v2.2 起）。
+_UNIFIED_RESPONSE_PATHS = frozenset({"/orders/bill/import"})
+
+
+def _use_unified_response(path: str) -> bool:
+    """该路径的错误响应是否使用统一外壳 {code, msg, data}。
+
+    去尾斜杠后匹配（审查修正 2026-08-27）：中间件/422 处理器先于路由执行，
+    尾斜杠请求（307 重定向前）若不归一，会回退旧 {error:...} 结构，
+    同接口两种错误结构并存。
+    """
+    return path.rstrip("/") in _UNIFIED_RESPONSE_PATHS
+
+
+def _unified_error_body(code: str, msg: str, details: dict | None = None) -> dict:
+    """构造统一外壳错误体：code 机器可读、msg 可直接展示、details 并入 data。"""
+    return {"code": code, "msg": msg, "data": details or None}
+
+
 @app.middleware("http")
 async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
     """请求限流：按客户端 IP 对 heavy/light 档接口滑动窗口计数。
@@ -162,6 +186,17 @@ async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
             "description": ERROR_CODE_DESCRIPTIONS["rate_limited"],
             "details": {"retry_after_seconds": math.ceil(retry_after)},
         }
+        seconds = math.ceil(retry_after)
+        if _use_unified_response(request.url.path):
+            return JSONResponse(
+                status_code=429,
+                content=_unified_error_body(
+                    "rate_limited",
+                    ERROR_CODE_DESCRIPTIONS["rate_limited"],
+                    {"retry_after_seconds": seconds},
+                ),
+                headers={"Retry-After": str(seconds)},
+            )
         return rate_limit.build_rate_limited_response(retry_after)
     return await call_next(request)
 
@@ -195,7 +230,9 @@ async def _auth_middleware(request: Request, call_next: Callable) -> Any:
     """
     if not settings.api_key:
         return await call_next(request)
-    if request.url.path in _AUTH_FREE_PATHS:
+    # 去尾斜杠匹配（2026-08-27 审查修正）：尾斜杠请求（307 重定向前经中间件）
+    # 若不归一会被误判为非豁免路径 → 401；与错误外壳归一口径一致
+    if request.url.path.rstrip("/") in _AUTH_FREE_PATHS:
         return await call_next(request)
     # 常量时间比较，避免时序侧信道泄露 api_key 信息
     auth = request.headers.get("authorization", "")
@@ -214,16 +251,21 @@ async def _auth_middleware(request: Request, call_next: Callable) -> Any:
         "description": ERROR_CODE_DESCRIPTIONS["unauthorized"],
         "details": None,
     }
-    return JSONResponse(
-        status_code=401,
-        content={
+    content = (
+        _unified_error_body("unauthorized", ERROR_CODE_DESCRIPTIONS["unauthorized"])
+        if _use_unified_response(request.url.path)
+        else {
             "error": {
                 "code": "unauthorized",
                 "message": "invalid or missing API key",
                 "description": ERROR_CODE_DESCRIPTIONS["unauthorized"],
                 "details": None,
             }
-        },
+        }
+    )
+    return JSONResponse(
+        status_code=401,
+        content=content,
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -301,8 +343,9 @@ def _summarize_import_response(text: str) -> str | None:
     保留：文件/结算区间/行数/单数/create_order、建单统计 summary、meta 中
     模板命中/引擎/未映射表头（截断）与基础资料计数；丢弃 orders /
     canonical_orders 全量明细与 upstream 回显——排查定位用摘要足矣，
-    完整明细可从客户端响应重新获取。非 JSON 或非对象响应返回 None，
-    调用方保持原文（摘要失败不回退原始大 JSON 的兜底）。
+    完整明细可从客户端响应重新获取。响应统一外壳（code/msg/data）时
+    先摘出 code/msg（业务码与展示文案排查直接可见）再解包业务层；非 JSON
+    或非对象响应返回 None，调用方保持原文（摘要失败不回退原始大 JSON 的兜底）。
     """
     try:
         data = json.loads(text)
@@ -310,10 +353,21 @@ def _summarize_import_response(text: str) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    out: dict[str, Any] = {
-        k: data.get(k)
-        for k in ("file", "bill_period", "total_rows", "order_count", "create_order")
-    }
+    code, msg = None, None
+    if "data" in data and isinstance(data["data"], dict) and "code" in data:
+        # 统一外壳：先摘出 code/msg，再解包业务数据层
+        code, msg = data.get("code"), data.get("msg")
+        data = data["data"]
+    out: dict[str, Any] = {}
+    if code is not None or msg is not None:
+        out["code"] = code
+        out["msg"] = msg
+    out.update(
+        {
+            k: data.get(k)
+            for k in ("file", "bill_period", "total_rows", "order_count", "create_order")
+        }
+    )
     if data.get("summary") is not None:
         out["summary"] = data["summary"]
     meta = data.get("meta") or {}
@@ -351,8 +405,8 @@ def _summarize_response_for_log(path: str, text: str) -> str | None:
     """按 access_log_summarize_paths 配置对匹配路径的 JSON 响应做摘要。
 
     非匹配路径或摘要失败返回 None，调用方保留原始响应文本（响应截断标记
-    语义不变）。仅作用于成功响应（status < 400）；错误响应本身较小且是
-    排查重点，不摘要。
+    语义不变）。仅作用于成功响应（status < 400）与 409 统一外壳响应；
+    其余错误响应本身较小且是排查重点，不摘要。
     """
     needles = [
         p.strip() for p in settings.access_log_summarize_paths.split(",") if p.strip()
@@ -420,17 +474,23 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
             "description": ERROR_CODE_DESCRIPTIONS["payload_too_large"],
             "details": {"max_bytes": max_bytes},
         }
-        return JSONResponse(
-            status_code=413,
-            content={
+        content = (
+            _unified_error_body(
+                "payload_too_large",
+                ERROR_CODE_DESCRIPTIONS["payload_too_large"],
+                {"max_bytes": max_bytes},
+            )
+            if _use_unified_response(request.url.path)
+            else {
                 "error": {
                     "code": "payload_too_large",
                     "message": "request body too large",
                     "description": ERROR_CODE_DESCRIPTIONS["payload_too_large"],
                     "details": {"max_bytes": max_bytes},
                 }
-            },
+            }
         )
+        return JSONResponse(status_code=413, content=content)
     except Exception:
         raise
     finally:
@@ -440,7 +500,9 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         response_summarized = False
         response_full = None
         response_full_truncated = False
-        if response_text is not None and status_code < 400:
+        # 409 统一外壳响应（重复上传）同样走摘要：保留 code/msg/summary/meta，
+        # 避免全量 orders 明细落日志（2026-08-26 审查修正）
+        if response_text is not None and (status_code < 400 or status_code == 409):
             summarized = _summarize_response_for_log(request.url.path, response_text)
             if summarized is not None:
                 response_full = response_text
@@ -486,7 +548,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
 
 
 @app.exception_handler(SkillAPIError)
-async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONResponse:
+async def _skill_api_error_handler(request: Request, exc: SkillAPIError) -> JSONResponse:
     log.warning(
         "skill_api_error",
         extra={
@@ -496,24 +558,71 @@ async def _skill_api_error_handler(_: Request, exc: SkillAPIError) -> JSONRespon
             "details": exc.details,
         },
     )
-    _.state.error_code = exc.code
+    request.state.error_code = exc.code
     # 完整错误详情（含中文说明）透传访问日志，供审计导出错误信息
-    _.state.error_detail = {
+    request.state.error_detail = {
         "code": exc.code,
         "message": exc.message,
         "description": exc.description,
         "details": exc.details,
     }
-    return JSONResponse(
-        status_code=exc.http_status,
-        content={
+    content = (
+        _unified_error_body(exc.code, exc.description, exc.details)
+        if _use_unified_response(request.url.path)
+        else {
             "error": {
                 "code": exc.code,
                 "message": exc.message,
                 "description": exc.description,
                 "details": exc.details,
             }
-        },
+        }
+    )
+    return JSONResponse(status_code=exc.http_status, content=content)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """请求参数校验失败（422）：统一外壳路径输出 {code, msg, data}（msg 直接
+    可展示，data 携带完整字段错误明细）；其余路径保持 FastAPI 默认
+    {"detail": [...]} 结构不变。errors 统一经 jsonable_encoder（Pydantic v2
+    的 value_error 类 ctx 含异常实例，直接透传会 422 退化为 500）。"""
+    if not _use_unified_response(request.url.path):
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
+    return JSONResponse(
+        status_code=422,
+        content=_unified_error_body(
+            "bad_request",
+            ERROR_CODE_DESCRIPTIONS["bad_request"],
+            {"errors": jsonable_encoder(exc.errors())},
+        ),
+    )
+
+
+@app.exception_handler(Exception)
+async def _generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """未包装异常兜底（审查修正 2026-08-27）：统一外壳路径（/orders/bill/import）
+    返回 {code, msg, data}（msg 可直接展示），避免调用方在意外异常（httpx
+    超时/解析器内部错误等）下拿到 FastAPI 默认 {"detail": ...} 破坏三字段契约；
+    其余路径保持默认 {"detail": "Internal Server Error"} 行为不变。路由级
+    404/405 由 Starlette 专用处理器处理不经过此处（统一路径 404/405 不可达，
+    尾斜杠已 307 归一）。
+    """
+    if not _use_unified_response(request.url.path):
+        return JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+    log.error("unhandled_error", extra={"exc": f"{exc.__class__.__name__}: {exc}"})
+    request.state.error_code = "internal_error"
+    request.state.error_detail = {
+        "code": "internal_error",
+        "message": str(exc),
+        "description": ERROR_CODE_DESCRIPTIONS["internal_error"],
+        "details": None,
+    }
+    return JSONResponse(
+        status_code=500,
+        content=_unified_error_body("internal_error", ERROR_CODE_DESCRIPTIONS["internal_error"]),
     )
 
 
@@ -829,15 +938,16 @@ async def parse_order_document(
 
 @app.post(
     "/orders/bill/import",
-    response_model=BillParseResult,
+    response_model=BillImportResponse,
     tags=["orders"],
     summary="Import a competitor bill and optionally create orders",
 )
 async def import_bill(
     file: Annotated[UploadFile, File()],
     request: Request,
+    response: Response,
     create_order: bool = Form(default=False),
-) -> BillParseResult:
+) -> BillImportResponse:
     """上传竞品应收对账单（.xls/.xlsx/.xlsm），解析归集后返回订单预览。
 
     create_order 缺省 false（只预览不下单）；显式传 true 时逐单创建订单
@@ -846,11 +956,13 @@ async def import_bill(
     响应附 orders[].create_result 与 summary；create 模式缺 sk → 400 bad_request。
     表头识别/格式校验/坏文件等由 parse_bill 覆盖，错误统一走全局异常处理；
     请求自动记录访问日志（文件名/大小/耗时/状态码）。
-    create 模式全部命中成功单注册表（本次无新建）时返回 409 duplicate_bill，
-    避免调用方把「已创建过」误判为成功（details 携带已创建业务编号）。
-    箱型白名单（v1.3）：preview 与 create 统一执行文件级校验——任一单含 TMS
-    白名单外标准代码箱型（如 40GOH）→ 全部未决单拒绝（unknown_box_type，
-    返回「系统没有此箱型，请联系客服」），不调下游；无强制提交通道。
+
+    响应统一外壳 {code, msg, data}（对齐 TMS 通道口径，2026-08-25）：
+    - code="200" msg="添加成功"：preview 成功 / create 有新建（可含部分失败，明细在 data.summary）
+    - code="204" msg="添加失败"：create 全部失败（无新建）
+    - code="409" msg="账单已全部创建过"（HTTP 409）：create 全部命中成功单注册表
+    - HTTP 错误（400/401/413/422/429/503 等）同样套统一外壳：code 为机器可读
+      错误码、msg 为中文说明（可直接展示）、data 为详情（原 details）
     """
     sk = (request.headers.get("sk") or "").strip()
     if create_order and not sk:
@@ -879,27 +991,70 @@ async def import_bill(
             sk=sk,
         )
     )
-    # 去重语义（v1.3）：create 模式全部命中（skipped>0 且 created=0）→ 409，
-    # 便于调用方/监控区分「已存在」与「成功创建」；部分跳过（有新建）仍 200，
-    # 明细在 summary（skipped/created/success_sns）
+    # 统一响应外壳（code/msg/data，对齐 TMS 通道口径）：
+    # - create 全部命中注册表（skipped>0 且 created=0）→ 409（业务码 "409"）
+    # - create 有新建（含部分失败）→ "200"；全部失败（无新建）→ "204"
+    # - preview → "200"
     if create_order and result.summary:
-        if result.summary["skipped"] > 0 and result.summary["created"] == 0:
-            success_sns = result.summary["success_sns"] or []
-            raise DuplicateBillError(
-                "all bills already created; nothing new was created",
-                details={
-                    "success_sns": result.summary["success_sns"],
-                    "summary": result.summary,
-                    # 对齐 create 模式 upstream 结构（code/msg/data），
-                    # 便于调用方统一按 upstream.code 判断业务结果
-                    "upstream": {
-                        "code": "409",
-                        "msg": "账单已全部创建过",
-                        "data": [{"sn": sn} for sn in success_sns],
-                    },
-                },
+        # 409 语义（v2.2 修正）：仅当全部单均为重复上传（skipped 占满且无失败/新建）
+        # 才判 409——skipped 与 failed（箱型拒绝/下游失败）混合时本次存在被拒单，
+        # 不应报「账单已全部创建过」，走 204 + 具体失败原因（如箱型不符文案）
+        if (
+            result.summary["skipped"] > 0
+            and result.summary["failed"] == 0
+            and result.summary["created"] == 0
+        ):
+            # 审计透传（409 直接返回不经过异常处理器）：error_code 保持旧口径
+            # duplicate_bill（2026-08-27 审查修正：改为 "409" 会让按旧码匹配的
+            # 监控/告警静默失效）；外壳 code 仍为 "409" 不冲突。
+            request.state.error_code = "duplicate_bill"
+            request.state.error_detail = {
+                "code": "duplicate_bill",
+                "message": "账单已全部创建过，本次未录入",
+                "description": "账单已全部创建过，本次未录入",
+                "details": {"summary": result.summary},
+            }
+            response.status_code = 409
+            # 409 data 精简（审查修正 2026-08-27）：全量 orders/canonical_orders
+            # 明细使 820 单响应 ≈1.5MB（前端 JSON.stringify 灌 DOM、日志同步落盘）；
+            # 重复上传是提示场景，前端只消费 data.summary.success_sns，明细丢弃。
+            slim = result.model_copy(update={"orders": [], "canonical_orders": []})
+            return BillImportResponse(code="409", msg="账单已全部创建过", data=slim)
+        if result.summary["created"] > 0:
+            code, msg = "200", "添加成功"
+        else:
+            # 全部失败：优先取箱型白名单拦截的具体原因（文件级拦截，返回
+            # 「系统没有此箱型：<箱型>，请联系客服」等具体文案，而非笼统「添加失败」）
+            box_msg = next(
+                (
+                    d.get("error_message")
+                    for d in result.summary["failed_details"]
+                    if d.get("error_code") == "unknown_box_type"
+                ),
+                None,
             )
-    return result
+            code, msg = "204", box_msg or "添加失败"
+    else:
+        code, msg = "200", "请求成功"
+        # preview 模式整批箱型被拒（审查修正 2026-08-27）：summary 为 None 走
+        # 本分支，若全部未决单被 _reject_unknown_box_types 标记，msg 应给出
+        # 具体原因而非笼统「请求成功」，避免调用方误判为可下单；code 保持
+        # "200"（preview 未产生下游动作，语义不冲突）。
+        if not create_order:
+            box_msg = next(
+                (
+                    (o.create_result or {}).get("error", {}).get("message")
+                    for o in (*result.orders, *result.canonical_orders)
+                    if (o.create_result or {})
+                    .get("error", {})
+                    .get("code")
+                    == "unknown_box_type"
+                ),
+                None,
+            )
+            if box_msg:
+                msg = box_msg
+    return BillImportResponse(code=code, msg=msg, data=result)
 
 
 @app.post(

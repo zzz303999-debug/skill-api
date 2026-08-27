@@ -195,6 +195,23 @@ class BillParseResult(BaseModel):
     )
 
 
+class BillImportResponse(BaseModel):
+    """账单导入统一响应外壳（对齐 TMS 通道 code/msg/data 口径）。
+
+    - code：业务码（字符串）——"200"=成功/部分成功；"204"=全部失败；"409"=重复上传；
+      错误场景（400/401/413/422/429/503 等）为机器可读错误码（bad_request 等）
+    - msg：业务信息（成功/失败描述；错误场景为可直接展示的中文说明）
+    - data：业务数据（原 BillParseResult 全部字段原样放入；错误场景为原 details）
+    HTTP 错误场景同样套本外壳（v2.2 起），不再返回 error 结构。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    code: str = Field(description="业务码：200=成功/部分成功；204=全部失败；409=重复上传")
+    msg: str = Field(description="业务信息（成功/失败描述）")
+    data: BillParseResult = Field(description="业务数据（原响应全部字段）")
+
+
 # ---- 标准业务订单模型（CanonicalOrder，TMS 业务订单接入，见《字段映射表》§1） ----
 
 

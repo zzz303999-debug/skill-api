@@ -336,8 +336,10 @@ def test_bill_import_response_summarized_for_log():
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["order_count"] == 1  # 客户端响应完整（明细不受摘要影响）
-    assert "canonical_orders" in body
+    # 统一响应外壳（code/msg/data）：客户端响应完整（明细不受摘要影响）
+    assert body["code"] == "200" and body["msg"] == "请求成功"
+    assert body["data"]["order_count"] == 1
+    assert "canonical_orders" in body["data"]
     entry = _items(
         client.get("/api/logs", params={"path": "/orders/bill/import"}).json()
     )[0]
@@ -345,6 +347,8 @@ def test_bill_import_response_summarized_for_log():
     assert entry["response_truncated"] is False
     summary = json.loads(entry["response"])
     # 摘要保留排查关键字段，丢弃大明细
+    assert summary["code"] == "200"  # 统一外壳业务码保留（排查直接可见）
+    assert summary["msg"] == "请求成功"
     assert summary["file"] == "audit-bill.xlsx"
     assert summary["order_count"] == 1
     assert summary["total_rows"] == 1
@@ -354,6 +358,56 @@ def test_bill_import_response_summarized_for_log():
     assert "canonical_orders" not in summary
     assert "orders" not in summary
     assert "upstream" not in summary
+
+
+def test_bill_import_409_summarized_for_log(monkeypatch):
+    """409（create 全 skipped）同样走日志摘要：code=409 保留、明细不入摘要、
+    审计 error_code 保持旧口径 duplicate_bill（审查修正 2026-08-27 补测）。"""
+    import json
+
+    import app.main as main_module
+    from app.orders.bill import BillParseResult
+
+    summary = {
+        "total": 1,
+        "success": 1,
+        "failed": 0,
+        "skipped": 1,
+        "created": 0,
+        "success_sns": ["EX26080042"],
+        "failed_details": [],
+    }
+
+    def fake_build_result(**kwargs):
+        return BillParseResult(
+            file=kwargs["filename"],
+            total_rows=1,
+            order_count=1,
+            create_order=True,
+            summary=summary,
+            meta={},
+        )
+
+    monkeypatch.setattr(main_module, "build_result", fake_build_result)
+    client = TestClient(app)
+    resp = client.post(
+        "/orders/bill/import",
+        files={"file": ("dup-bill.xlsx", b"x", "application/octet-stream")},
+        data={"create_order": "true"},
+        headers={"sk": "sk-1"},
+    )
+    assert resp.status_code == 409
+    entry = _items(
+        client.get("/api/logs", params={"path": "/orders/bill/import"}).json()
+    )[0]
+    assert entry["response_summarized"] is True
+    assert entry["error_code"] == "duplicate_bill"  # 审计列保持旧口径（审查修正）
+    summary_log = json.loads(entry["response"])
+    assert summary_log["code"] == "409"
+    assert summary_log["msg"] == "账单已全部创建过"
+    assert summary_log["summary"]["skipped"] == 1
+    assert "orders" not in summary_log
+    assert "canonical_orders" not in summary_log
 
 
 def test_bill_import_summarize_disabled_when_paths_empty(monkeypatch):

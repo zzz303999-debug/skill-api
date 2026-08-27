@@ -133,9 +133,13 @@ def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate
     - 客户：customer_name（归一名）；
     - 工厂：door_point 名 + load_address 地址（复合键；名缺失不构成候选）；
     - 司机+车辆：driver_name + plate_no（组合键；司机名缺失不构成候选）。
+    已标记的单（create_result 非 None：去重 skipped / 箱型拒绝等）不构成候选
+    （2026-08-26 防御：即使调用方误传被拒单也不建档）。
     """
     candidates: list[MasterDataCandidate] = []
     for order in orders:
+        if getattr(order, "create_result", None) is not None:
+            continue  # 已标记（skipped/被拒）的单不建档
         if order.customer_name:
             candidates.append(
                 MasterDataCandidate(

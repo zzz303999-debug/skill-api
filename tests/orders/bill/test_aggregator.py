@@ -35,8 +35,9 @@ class TestRealBill:
         ]
         assert o.order_data["shou"] == [{"运费": {"money": 3100.0}}]
         assert o.order_data["driver"][0]["get_ys_zj"] == 3100.0
-        assert len(o.order_data["data"]) == 2
-        assert all(d["b_order_num"] == "CNSHA493890" for d in o.order_data["data"])
+        # data 收敛为 1 条货物明细（2026-08-26 实测修正：N 条相同明细导致
+        # TMS 按明细重复计入费用总额；row_count 仍为原始行数 2）
+        assert o.order_data["data"] == [{"b_order_num": "CNSHA493890"}]
         assert o.order_data["driver"][0]["b_date"] == "2015-09-01"
         assert o.order_data["month"] == "2015-09"
 
@@ -242,3 +243,31 @@ class TestConstructed:
             [BillRow(seq="1", c_title="辛", order_num1="TESTBL10006", b_type="40HQ")], PERIOD_2015
         )[0]
         assert "c_note" not in o2.order_data
+
+    def test_multi_plate_cleaned_and_in_c_note(self):
+        """多车牌：浮点尾巴清洗（9486.0→9486），组内多车牌并入 c_note，首行入 driver。"""
+        rows = [
+            BillRow(seq="1", c_title="卯", order_num1="TESTBL10012", b_type="40HQ", d_num="9486.0"),
+            BillRow(seq="2", c_title="卯", order_num1="TESTBL10012", b_type="40HQ", d_num="7399.0"),
+            BillRow(seq="3", c_title="卯", order_num1="TESTBL10012", b_type="40HQ", d_num="9002.0"),
+        ]
+        o = go(rows, PERIOD_2015)[0]
+        assert o.order_data["driver"][0]["d_num"] == "9486"
+        assert o.order_data["c_note"] == "车牌：9486,7399,9002"
+
+    def test_single_plate_cleaned_no_c_note_segment(self):
+        """单车牌：清洗浮点尾巴，不追加 c_note 车牌段（备注保持原样）。"""
+        o = go(
+            [BillRow(seq="1", c_title="辰", order_num1="TESTBL10013", b_type="40HQ", d_num="9486.0")],
+            PERIOD_2015,
+        )[0]
+        assert o.order_data["driver"][0]["d_num"] == "9486"
+        assert "c_note" not in o.order_data
+
+    def test_text_plate_unchanged(self):
+        """文字车牌（沪A12345）不受清洗影响。"""
+        o = go(
+            [BillRow(seq="1", c_title="巳", order_num1="TESTBL10014", b_type="40HQ", d_num="沪A12345")],
+            PERIOD_2015,
+        )[0]
+        assert o.order_data["driver"][0]["d_num"] == "沪A12345"

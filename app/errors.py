@@ -29,12 +29,12 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "empty_batch": "批量接口未收到任何文件，请至少上传一个文件",
     "too_many_files": "批量上传文件数量超过限制，请分批处理",
     "unsupported_image_content": "图片内容不是支持的格式（jpg/png/bmp/tiff/gif/webp），请转换后重试",
-    "file_format_mismatch": "文件扩展名与实际内容格式不符，请检查文件是否正确",
+    "file_format_mismatch": "附件格式不匹配，请上传竞品应收对账单格式的附件，或联系人工客服",
     "too_many_rows": "数据量过大，联系人工客服",
-    "header_mapping_rejected": "账单表头 AI 映射未通过校验（必映射字段缺失/重复映射/抽样不达标），请人工确认表头或补充模板",
+    "header_mapping_rejected": "账单表头无法识别或缺少必填列（箱型/箱量），请联系人工客服",
     "skill_not_found": "请求的技能不存在，请检查接口路径",
     # ---- 文档转换 ----
-    "convert_error": "文档转换失败：文件可能已损坏或格式不受支持，请转换格式后重试",
+    "convert_error": "附件解析失败，文件可能已损坏或格式不受支持，请联系人工客服",
     "pdf_page_limit_exceeded": "PDF 页数超过单次处理上限，请拆分后重试",
     "pdf_parse_failed": "PDF 解析失败：文件可能已损坏或加密，请检查文件",
     "empty_converted_content": "文档转换后无有效内容，文件可能为空白或纯图片扫描件",
@@ -42,7 +42,6 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "order_not_ready": "订单必填信息不完整，无法下单，请补充字段后重试",
     "order_text_parse_failed": "文本订单解析结果校验失败，请检查输入文本格式",
     "order_upstream_error": "订单系统拒绝了请求或不可达，请稍后重试",
-    "duplicate_bill": "账单已全部创建过，本次未录入",
     # ---- 舱单 ----
     "unknown_manifest_family": "舱单未识别，请使用支持的舱单",
     "manifest_order_not_ready": "舱单必填信息不完整，无法录入，请补充后重试",
@@ -127,16 +126,6 @@ class ParseError(SkillAPIError):
 
     http_status = 502
     code = "parse_error"
-
-
-class DuplicateBillError(SkillAPIError):
-    """409：竞品账单 create 模式重复上传且全部命中成功单注册表（无新建）。
-
-    details 携带 success_sns（已创建的业务编号）与 summary，供调用方直接排查。
-    """
-
-    http_status = 409
-    code = "duplicate_bill"
 
 
 class UnknownManifestFamilyError(SkillAPIError):

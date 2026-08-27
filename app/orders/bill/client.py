@@ -149,7 +149,8 @@ def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
     - data[N] 7 子键（b_order_num 实际值，j/m/t/hh/mt/note 恒空）、
       driver[N] 14 键全部恒发
     - shou 单条目形态（抓包 2026-08-11）：所有费用挂 shou[0] 下不同费用名键，
-      每费用名 6 属性键（money 实际金额，price_id/price_type/is_profit/dai_dian/note 恒空）
+      每费用名 6 属性键（money 实际金额，price_id/price_type/is_profit/dai_dian/note 恒空）；
+      有费用时补发通道级 shou[0][note]（2026-08-25 测试环境实证：缺键 204 拒单）
     - box[N][b_type/box_num] 按实际内容，box[N][note] 恒空
     - 固定值：type=1 / appendCost=true / o_id="" / img_data=[] / img_data_id=[] /
       multiple_tare=[] / duo_get[0][duo_get_hj_zj]=0.00 / cost[0][supplier_hj_zj]=0.00
@@ -185,6 +186,7 @@ def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
         for key in _DRIVER_KEYS:
             _put_value(flat, f"driver[{i}][{key}]", entry.get(key))
 
+    shou_emitted = False
     for _i, entry in enumerate(order_data.get("shou", []) or []):
         if not isinstance(entry, dict):
             continue
@@ -194,6 +196,12 @@ def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
             # 抓包形态：所有费用挂 shou[0] 单条目下（不同费用名作键）
             for key in _SHOU_KEYS:
                 _put_value(flat, f"shou[0][{name}][{key}]", spec.get(key))
+            shou_emitted = True
+    if shou_emitted:
+        # 通道级 note 恒发（2026-08-25 测试环境 live 实证：缺键 204 拒单
+        # Undefined index: note，WorkOut.php:1460；对齐标准通道 T13 口径——
+        # 生产多余键无害：PHP 控制器硬读键名，缺键报错、多余忽略）
+        flat["shou[0][note]"] = ""
 
     return flat
 

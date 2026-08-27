@@ -347,15 +347,18 @@ def build_result(
                     "error": None,
                 }
 
-    # 未决单（去重后待处理）：preview 时未预判，即全量
-    pending = [o for o in canonical_orders if o.create_result is None]
-
     # 文件级箱型白名单校验（2026-08-18 用户拍板）：preview 与 create 统一执行，
     # 任一单含非法箱型（标准代码形态不在白名单，如 40GOH）→ 全部未决单拒绝，
     # 不调下游（置于费目自举/建档之前，被拒文件零副作用）；无强制提交通道。
     # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
     all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
     _reject_unknown_box_types(all_pending)
+
+    # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
+    # 2026-08-26 修正——必须在校验后重算，校验被拒单 create_result 已标记
+    # （非 None），自然排除，费目自举/建档只对可录单执行（被拒文件零下游副作用）；
+    # 校验前快照会让被拒单仍进入建档/自举（实测 AddCarClient 被误调）
+    pending = [o for o in canonical_orders if o.create_result is None]
 
     fee_reconciliation = None
     if pending and output.canonical_rows is not None:

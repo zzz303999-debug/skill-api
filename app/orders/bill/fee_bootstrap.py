@@ -158,6 +158,9 @@ def run_fee_bootstrap(orders, *, create_order: bool, sk: str = "") -> dict[str, 
     config = load_bootstrap_config()
     if not config.get("enabled"):
         return None
+    # 防御（2026-08-26）：跳过已标记的单（去重 skipped / 箱型拒绝），
+    # 被拒单不参与费目自举（避免被拒文件仍触发 AddCarPrice 建档）
+    orders = [o for o in orders if getattr(o, "create_result", None) is None]
     missing = _collect_missing(orders)
     if not missing:
         return None

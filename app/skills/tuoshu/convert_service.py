@@ -100,6 +100,9 @@ def detect_image_mime(file_bytes: bytes, filename: str) -> tuple[str, str]:
         raise BadRequestError(
             "image extension does not match file content",
             code="file_format_mismatch",
+            # 显式 description（2026-08-27 审查修正）：errors.py 全局码文案已改
+            # 为竞品账单专属（「请上传竞品应收对账单格式」），托书域必须覆盖
+            description="图片格式与文件扩展名不匹配，请上传正确格式的图片",
             details={
                 "file": Path(filename).name,
                 "extension": suffix,
@@ -177,6 +180,8 @@ def validate_document_content(file_bytes: bytes, filename: str) -> str:
         raise BadRequestError(
             "file extension does not match file content",
             code="file_format_mismatch",
+            # 显式 description（2026-08-27 审查修正）：覆盖全局码的账单专属文案
+            description="附件格式不匹配，请上传正确的文档格式（PDF/Word/图片）",
             details={
                 "file": Path(filename).name,
                 "extension": ext,

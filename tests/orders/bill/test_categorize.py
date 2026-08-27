@@ -154,6 +154,19 @@ class TestFourCategoryAggregation:
         assert order.driver_phone == "13800000000"
         assert order.row_count == 2  # 两行数据行全部归入同一票
 
+    def test_multi_plate_cleaned_into_remark(self, mixed_template, tmp_path):
+        """多车牌：浮点尾巴清洗（9486.0→9486）+ 并入 remark；单车牌不追加。"""
+        rows = [
+            [1, "客户甲", "门点A", "王师傅", "9486.0", "OOLU12345678", "40HQ*2", "13800000000",
+             100.0, 6.0, 50.0, None, 80.0, None, 30.0, None],
+            [2, None, None, None, "7399.0", "OOLU12345678", "20GP", None,
+             150.0, None, None, None, None, None, None, None],
+        ]
+        _, orders = parse_mixed(build_mixed_bill_bytes(MIXED_HEADERS, rows), tmp_path)
+        order = orders[0]
+        assert order.plate_no == "9486"
+        assert order.remark == "车牌：9486,7399"
+
     def test_financial_information_channels(self, mixed_bill, tmp_path):
         """财务信息：费用按通道归集（应收→shou/应付→pay/车辆成本→cost），
         跨行同名累加，未映射费目归并 other。"""

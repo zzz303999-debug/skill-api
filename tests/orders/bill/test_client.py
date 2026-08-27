@@ -42,7 +42,9 @@ ORDER_DATA = {
     "factory_name": "安吉洁美",
     "factory_bei": "安吉",
     "month": "2018-01",
-    "data": [{"b_order_num": "OOLU4044379500"}, {"b_order_num": "OOLU4044379500"}],
+    # data 收敛为 1 条货物明细（2026-08-26 实测修正：N 条相同 b_order_num 导致
+    # TMS 按明细重复计入费用总额；row_count 由 aggregator 保留原始行数）
+    "data": [{"b_order_num": "OOLU4044379500"}],
     "box": [{"b_type": "40GP", "box_num": 6}],
     "driver": [
         {
@@ -97,7 +99,8 @@ EXPECTED_FLAT = {
     "factory_id": "",
     "b_factory_not": "",
     "b_tare": "",
-    # 明细（data 7 子键：b_order_num 实际值，j/m/t/hh/mt/note 恒空）
+    # 明细（data 7 子键：b_order_num 实际值，j/m/t/hh/mt/note 恒空；
+    # data 恒 1 条货物明细契约，2026-08-26 修正）
     "data[0][b_order_num]": "OOLU4044379500",
     "data[0][j]": "",
     "data[0][m]": "",
@@ -105,13 +108,6 @@ EXPECTED_FLAT = {
     "data[0][hh]": "",
     "data[0][mt]": "",
     "data[0][note]": "",
-    "data[1][b_order_num]": "OOLU4044379500",
-    "data[1][j]": "",
-    "data[1][m]": "",
-    "data[1][t]": "",
-    "data[1][hh]": "",
-    "data[1][mt]": "",
-    "data[1][note]": "",
     "box[0][b_type]": "40GP",
     "box[0][box_num]": "6",
     "box[0][note]": "",
@@ -131,7 +127,9 @@ EXPECTED_FLAT = {
     "driver[0][pay_yf_zj]": "0.0",
     "driver[0][note]": "",
     # 应收费用（抓包形态：单条目多费用名，全挂 shou[0]；money 实际金额，
-    # price_id/price_type/is_profit/dai_dian/note 恒空）
+    # price_id/price_type/is_profit/dai_dian/note 恒空；有费用时补发通道级
+    # shou[0][note]——2026-08-25 测试环境实证：缺键 204 拒单 Undefined index: note）
+    "shou[0][note]": "",
     "shou[0][运费][money]": "2100.0",
     "shou[0][运费][price_id]": "",
     "shou[0][运费][price_type]": "",
@@ -216,6 +214,7 @@ class TestFlatten:
         assert flat["driver[0][pay_yf_zj]"] == "0.0"
         assert flat["c_id"] == ""  # 恒发空串
         assert flat["note"] == ""  # 订单级备注，恒发空串
+        assert "shou[0][note]" not in flat  # 无费用单不发 shou 通道（含通道级 note）
         # 超集键集：order_data 没有的键也发送（空串），不再跳过
         for key in ("c_sn", "factory_name", "factory_bei", "c_note", "month", "b_ship_name"):
             assert flat[key] == ""
@@ -259,6 +258,8 @@ class TestFlatten:
         assert flat["box[0][box_num]"] == "2"
         assert flat["shou[0][运费][money]"] == "100.0"
         assert flat["shou[0][待时费][money]"] == "50.0"
+        # 有费用时补发通道级 note（2026-08-25 测试环境实证：缺键 204 拒单）
+        assert flat["shou[0][note]"] == ""
 
     def test_shou_attribute_keys(self):
         """shou[0] 单条目属性键：money 实际金额，price_id/price_type/is_profit/

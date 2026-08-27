@@ -705,6 +705,8 @@ def parse_manifest(file_bytes: bytes) -> ManifestParseOutput:
         raise BadRequestError(
             "manifest is not a .xlsx file (magic bytes mismatch)",
             code="file_format_mismatch",
+            # 显式 description（2026-08-27 审查修正）：覆盖全局码的账单专属文案
+            description="附件格式不匹配，请上传 .xlsx 格式的舱单文件",
             details={"expected": ".xlsx", "magic": file_bytes[:4].hex()},
         )
     try:

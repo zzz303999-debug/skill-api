@@ -15,6 +15,7 @@ from .schema import (
     RECEIVABLE_FEE_COLUMNS,
     REQUIRED_FIELDS,
     REQUIRED_HEADERS,
+    BillImportResponse,
     BillOrder,
     BillParseResult,
     BillPeriod,
@@ -58,5 +59,6 @@ __all__ = [
     "ContainerInfo",
     "FeeItem",
     "FeeReconcile",
+    "BillImportResponse",
     "to_canonical",
 ]

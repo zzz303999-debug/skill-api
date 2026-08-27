@@ -654,8 +654,14 @@
       var data = null;
       try { data = await res.json(); } catch (e) { /* 非 JSON 响应 */ }
 
-      if (res.ok && data && !data.error) {
-        renderResult(data);
+      if (res.ok && data && !data.error && (data.code === "200" || data.code === undefined)) {
+        // v2.2 统一外壳：成功时业务数据在 data.data；兼容旧后端成功响应（无 code 键），
+        // 避免后端先上线/HTML 缓存窗口期把成功误渲染为「导入失败」（审查修正 2026-08-27）
+        renderResult(data.code === "200" ? data.data : data);
+      } else if (data && !data.error && data.code === "204") {
+        // 业务全部失败：仍渲染失败明细，标题显示具体原因（msg 可直接展示）
+        renderResult(data.data);
+        showResult("err", "导入失败", '<span class="err-desc">' + esc(data.msg || "添加失败") + "</span>");
       } else {
         showError(res.status, data);
       }
@@ -756,9 +762,11 @@
     }
 
     if (row.create_result) {
+      // error 为对象（code/message/description/details），tooltip 展示 message（可直接读）
+      var errMsg = (row.create_result.error && row.create_result.error.message) || "";
       status = row.create_result.success
         ? '<span class="badge ok" title="业务编号：' + esc(row.create_result.sn || "") + '">成功</span>'
-        : '<span class="badge err" title="' + esc(row.create_result.error || "") + '">失败</span>';
+        : '<span class="badge err" title="' + esc(errMsg) + '">失败</span>';
     } else {
       status = '<span class="badge pending">待创建</span>';
     }
@@ -786,17 +794,19 @@
 
   /* ---------- 错误渲染 ---------- */
   function showError(status, data) {
+    // v2.2 统一外壳 {code, msg, data}（账单录入错误场景）；兼容旧 {error: {...}} 结构
     var err = (data && data.error) || {};
-    var code = err.code || (status ? "HTTP " + status : "网络错误");
-    var desc = err.description || err.message || "发生未知错误，请稍后重试";
+    var code = err.code || (data && data.code) || (status ? "HTTP " + status : "网络错误");
+    var desc = err.description || err.message || (data && data.msg) || "发生未知错误，请稍后重试";
+    var details = err.details || (data && data.data) || null;
 
     $("#statGrid").innerHTML = "";
     $("#tableBody").innerHTML = "";
     $("#tableWrap").style.display = "none";
 
-    // 409 重复导入：琥珀警示 + 已创建单号
-    if (code === "duplicate_bill") {
-      var d = err.details || {};
+    // 409 重复导入：琥珀警示 + 已创建单号（统一外壳 code="409"，明细在 data.summary）
+    if (code === "409" || code === "duplicate_bill") {
+      var d = (details && details.summary) || details || {};
       var sns = d.success_sns || [];
       var listHtml = sns.length
         ? "<div class=\"detail-block\">本次未创建新订单，以下业务编号此前已创建成功：" +
@@ -808,8 +818,8 @@
     }
 
     var detailsHtml = "";
-    if (err.details) {
-      detailsHtml = '<div class="detail-block">技术详情：<pre>' + esc(JSON.stringify(err.details, null, 2)) + "</pre></div>";
+    if (details) {
+      detailsHtml = '<div class="detail-block">技术详情：<pre>' + esc(JSON.stringify(details, null, 2)) + "</pre></div>";
     }
     $("#detailBlock").innerHTML = detailsHtml;
     showResult("err", "导入失败", '<span class="err-desc">' + esc(desc) + '</span><br><code>' + esc(code) + "</code>");

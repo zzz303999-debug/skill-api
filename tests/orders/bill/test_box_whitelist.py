@@ -153,6 +153,12 @@ class TestCheckUnknown:
         """40GOH（标准形态、不在白名单）→ 拦截。"""
         assert whitelist_module.check_unknown_box_types(["40GOH"]) == ["40GOH"]
 
+    def test_20hq_40rt_confirmed_invalid(self):
+        """20HQ/40RT 经用户确认非法（2026-08-26）→ 拦截且不在白名单。"""
+        assert whitelist_module.check_unknown_box_types(["20HQ", "40RT"]) == ["20HQ", "40RT"]
+        assert "20HQ" not in whitelist_module.load_box_types()
+        assert "40RT" not in whitelist_module.load_box_types()
+
     def test_whitelisted_codes_pass(self):
         """白名单内代码（含补充项）→ 放行。"""
         assert whitelist_module.check_unknown_box_types(

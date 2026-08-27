@@ -23,6 +23,7 @@ master_data:
     driver: DRV
   # 建档端点（逆推规范 §14 端点表，2026-08-14 补齐 6/6）：建档族在 s3.jxt56.com，
   # 与订单 tms.jxt56.com 不同宿主——client 按全量 URL 直发（不拼 base、不写死 host）。
+  # 2026-08-27：已切回生产 s3（此前 08-25~26 测试期临时切 test-s3，生产部署前必须为 s3）。
   # bailor_create 保持 TODO：委托人为本阶段只计数不建档。
   # driver_create 2026-08-14 实证启用：正确端点是 /Car/CarDriver/AddCarDriver
   # （与客户/工厂/车辆同族），抓包实测 bailor_title/bailor_id 可空（提交成功），

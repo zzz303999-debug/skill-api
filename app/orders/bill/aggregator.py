@@ -338,6 +338,28 @@ def _unique_values(rows: list[BillRow], field: str) -> list[str]:
     return seen
 
 
+def _clean_plate_no(value) -> str | None:
+    """车牌清洗：Excel 数字单元格浮点尾巴（9486.0 → 9486），其余原样。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if _FLOAT_TAIL_RE.match(text):
+        return text.split(".")[0]
+    return text
+
+
+def _unique_plate_values(rows: list[BillRow]) -> list[str]:
+    """组内非空车牌去重（清洗浮点尾巴后，保持出现顺序），供 c_note 段拼接。"""
+    seen: list[str] = []
+    for row in rows:
+        value = _clean_plate_no(row.d_num)
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
 def _box_entries(rows: list[BillRow]) -> tuple[list[dict], bool]:
     """box 归集：同箱型累加，按首次出现顺序；返回 (条目, 是否有箱型原文)。
 
@@ -414,7 +436,8 @@ def _fee_entries(rows: list[BillRow]) -> tuple[list[dict], float]:
 
 
 def _build_c_note(rows: list[BillRow], other_dates: list[str]) -> str | None:
-    """c_note 拼接（§5.1 顺序）：客户编号→业务类型→箱号→车队→备注→应付备注→其他做箱日期。
+    """c_note 拼接（§5.1 顺序）：客户编号→业务类型→箱号→车队→车牌（仅多车牌）→
+    备注→应付备注→其他做箱日期。
 
     各段组内非空去重值按序 "," 连接，段间 "；" 分隔，空段跳过；备注/应付备注直拼无前缀。
     """
@@ -431,6 +454,11 @@ def _build_c_note(rows: list[BillRow], other_dates: list[str]) -> str | None:
     fleets = _unique_values(rows, "fleet")
     if fleets:
         segments.append("车队：" + ",".join(fleets))
+    # 多车牌段（2026-08-26）：driver[0][d_num] 单值只能记首行车牌，组内多个
+    # 不同车牌（清洗浮点尾巴后）并入备注防丢失；单车牌不追加（备注保持原样）
+    plate_nos = _unique_plate_values(rows)
+    if len(plate_nos) > 1:
+        segments.append("车牌：" + ",".join(plate_nos))
     remarks = _unique_values(rows, "remark")
     if remarks:
         segments.append(",".join(remarks))
@@ -464,7 +492,7 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
     b_back_address = _first_nonempty(ordered, "b_back_address")
     d_name = _first_nonempty(ordered, "d_name")
     d_phone = _first_nonempty(ordered, "d_phone")
-    d_num = _first_nonempty(ordered, "d_num")
+    d_num = _clean_plate_no(_first_nonempty(ordered, "d_num"))
 
     # box：同箱型累加；无箱型原文才视为缺失（不做格式校验）
     box_entries, has_valid_box = _box_entries(ordered)
@@ -498,11 +526,18 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
         missing_reasons[MISSING_BOX] = REASON_NOT_FOUND
 
     # order_data：必填项缺失显式置 None/[]，不填空串/0；非必填空值省略键
+    # 注意：data 恒为 1 条货物明细（2026-08-26 实测修正：N 条相同 b_order_num 导致
+    # TMS 按明细重复计入费用总额；row_count 保留原始行数，柜级信息由 box[]/driver[0] 承载）
     order_data: dict = {
         "order_num1": bl_no,
         "type": 1,
         "c_title": c_title,
-        "data": [{"b_order_num": bl_no} for _ in ordered],
+        # data 收敛为 1 条货物明细（2026-08-26 实测修正）：TMS 按 data 条数展开
+        # 订单明细并把费用挂到每条明细——N 条相同 b_order_num 导致费用总额
+        # （如运费 6450）被每条重复计入；对齐标准通道 data[0] 货物明细语义
+        # （payload.py 只发 data[0]，TMS 实测可下单）。柜级差异信息（箱型/车牌）
+        # 分别由 box[] 聚合与 driver[0] 承载，data 无需逐行展开。
+        "data": [{"b_order_num": bl_no}],
         "box": box_entries,
         "driver": [{"pay_yf_zj": 0.0}],
     }
@@ -784,6 +819,24 @@ def _build_canonical(
     if not month and group:
         month = _pick_month(group[0])
     fees, fee_reconcile = _aggregate_fees(group, template)
+
+    # 车牌清洗（Excel 数字单元格浮点尾巴 9486.0 → 9486，与旧链路同口径）；
+    # 组内多个不同车牌（driver 单值只能记首行）并入 remark 防丢失（2026-08-26）
+    if values.get("plate_no"):
+        values["plate_no"] = _clean_plate_no(values["plate_no"])
+    plate_nos = [
+        p
+        for p in (_clean_plate_no(row.get("plate_no")) for row in group)
+        if p
+    ]
+    unique_plates: list[str] = []
+    for p in plate_nos:
+        if p not in unique_plates:
+            unique_plates.append(p)
+    if len(unique_plates) > 1:
+        suffix = "车牌：" + ",".join(unique_plates)
+        remark = values.get("remark")
+        values["remark"] = f"{remark}；{suffix}" if remark else suffix
 
     order = CanonicalOrder(
         bl_no=bl_no or values.get("bl_no"),

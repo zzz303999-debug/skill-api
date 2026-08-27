@@ -618,10 +618,14 @@ class TestGoldenBootstrap:
         not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
     )
     def test_qiuyi_preview_planned_only(self):
-        """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。"""
-        path = FAMILIES_DIR / "qiuyi" / "2019-01到2019-12上海秋怡应收对账单.xls"
+        """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。
+
+        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
+        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
+        """
+        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2019 样本缺失")
+            pytest.skip("秋怡 2017 样本缺失")
         from app.orders.bill import build_result
 
         result = build_result(filename=path.name, file_bytes=path.read_bytes())
@@ -637,10 +641,14 @@ class TestGoldenBootstrap:
         not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
     )
     def test_qiuyi_create_dropped_to_zero(self, monkeypatch):
-        """create（真实导入）：建档成功 → dropped 归零 + 费用全部回填（1901 → 0）。"""
-        path = FAMILIES_DIR / "qiuyi" / "2019-01到2019-12上海秋怡应收对账单.xls"
+        """create（真实导入）：建档成功 → dropped 归零 + 费用全部回填。
+
+        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
+        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
+        """
+        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2019 样本缺失")
+            pytest.skip("秋怡 2017 样本缺失")
         import app.orders.bill.client as client_module
         from helpers import FakeResponse
 
