@@ -28,7 +28,7 @@ def test_upload_limit(monkeypatch):
 
     # 传输层硬限制优先：Content-Length 超限直接 413，不进入 handler
     assert response.status_code == 413
-    assert response.json()["error"]["code"] == "payload_too_large"
+    assert response.json()["code"] == "payload_too_large"
 
 
 def test_empty_upload_is_rejected_before_conversion():
@@ -38,7 +38,18 @@ def test_empty_upload_is_rejected_before_conversion():
     )
 
     assert response.status_code == 400
-    assert response.json()["error"]["code"] == "empty_file"
+    assert response.json()["code"] == "empty_file"
+
+
+def test_extract_missing_file_field_returns_unified_422():
+    """缺 file 字段 → 422 套统一外壳（code=bad_request，data.errors 带字段明细）。"""
+    response = client.post("/skills/tuoshu/extract")
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == "bad_request"
+    assert body["msg"]
+    assert body["data"]["errors"]
+    assert any(e["loc"] == ["body", "file"] for e in body["data"]["errors"])
 
 
 def test_batch_extract_calls_keyword_only_skill(monkeypatch):
@@ -106,22 +117,26 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
+    # 统一响应外壳：{code, msg, data}，data 内 {skill, version, result, meta, content}
+    assert body["code"] == "200"
+    assert body["msg"] == "解析成功"
     data = body["data"]
-    assert body["content"] == "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
-    assert body["meta"]["model"] == "fake"
-    assert body["meta"]["usage"] is None
-    assert body["meta"]["conversion_status"] == "converted"
-    assert body["meta"]["source_bytes"] == len(b"fake-docx")
-    assert body["meta"]["content_chars"] == len(body["content"])
-    assert len(body["meta"]["source_sha256"]) == 64
-    assert len(body["meta"]["content_sha256"]) == 64
-    assert "carrier" in data and "承运人" not in data
-    assert data["carrier"] == "HMM"
-    assert data["factory"]["name"] == "某门点"
-    assert data["containers"][0]["remark"] == "博特装柜"
-    assert data["raw_text_snippet"].startswith("提单号：HLCUSHA12345678")
+    assert data["content"] == "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
+    assert data["meta"]["model"] == "fake"
+    assert data["meta"]["usage"] is None
+    assert data["meta"]["conversion_status"] == "converted"
+    assert data["meta"]["source_bytes"] == len(b"fake-docx")
+    assert data["meta"]["content_chars"] == len(data["content"])
+    assert len(data["meta"]["source_sha256"]) == 64
+    assert len(data["meta"]["content_sha256"]) == 64
+    result = data["result"]
+    assert "carrier" in result and "承运人" not in result
+    assert result["carrier"] == "HMM"
+    assert result["factory"]["name"] == "某门点"
+    assert result["containers"][0]["remark"] == "博特装柜"
+    assert result["raw_text_snippet"].startswith("提单号：HLCUSHA12345678")
 
-    rendered = format_to_chat_text(data)
+    rendered = format_to_chat_text(result)
     assert "船公司: HMM（接口原始值）" in rendered
     assert "船公司: HLC（接口原始值）" not in rendered
     assert "做箱工厂: 某门点" in rendered
@@ -621,7 +636,7 @@ def test_multipart_within_batch_limit_reaches_handler(monkeypatch):
     )
     # multipart 整包（≈700B）< 200×10=2000，不应被传输层 413 误伤
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "file_too_large"
+    assert resp.json()["code"] == "file_too_large"
 
 
 def test_server_busy_returns_503(monkeypatch):
@@ -640,7 +655,7 @@ def test_server_busy_returns_503(monkeypatch):
         files={"file": ("a.txt", b"hi", "text/plain")},
     )
     assert resp.status_code == 503
-    assert resp.json()["error"]["code"] == "server_busy"
+    assert resp.json()["code"] == "server_busy"
 
 
 def test_payload_too_large_chunked_rejected_at_transport_layer(monkeypatch):
