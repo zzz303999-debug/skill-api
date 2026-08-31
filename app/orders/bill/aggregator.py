@@ -1,10 +1,10 @@
-"""竞品账单「按提单号归集」：一票多柜合并为 BillOrder。
+"""竞品账单「一行一票」：每条数据行独立为 BillOrder（2026-08-31 业务拍板）。
 
-对齐《竞品账单导入接口文档》v1.0 §2.3/§5.1/§5.2。只做归集，不组装响应：
+对齐《竞品账单导入接口文档》一行一票口径。只做归集，不组装响应：
 - 尾部非数据行（seq 非数字）过滤，顺手收集对账锚点（合计行/合计大写行/总箱型箱量行）
 - 提单号清洗（去空格/连字符/浮点尾巴）与合法性校验
-- 同号合并一单、空/非法提单号行单独成组
-- box 同型累加、driver 首非空、费用同费累加、c_note 拼接、必填缺失标记
+- 每行自成一组，不再按提单号合并同号多行（TMS 允许同提单号多条订单）
+- box 同型累加（行内多箱型）、driver 取本行、费用本行金额、c_note 本行拼接、必填缺失标记
 - reconciliation：用账单自带锚点校验归集结果（只报告不拦截）；费用双锚点
 """
 
@@ -313,12 +313,6 @@ def clean_order_num(raw: str | None) -> tuple[str | None, str | None]:
     return None, REASON_INVALID_FORMAT
 
 
-def _min_seq(group: list[BillRow]) -> float:
-    """组内最小序号（seq 非数字视为无穷大，排在末尾）。"""
-    seqs = [float(r.seq) for r in group if _SEQ_RE.match((r.seq or "").strip())]
-    return min(seqs) if seqs else float("inf")
-
-
 def _first_nonempty(rows: list[BillRow], field: str) -> str | None:
     """组内第一条非空字段值（按 seq 序）。"""
     for row in rows:
@@ -471,7 +465,7 @@ def _build_c_note(rows: list[BillRow], other_dates: list[str]) -> str | None:
 
 
 def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
-    """组（同提单号 或 单独一行）→ BillOrder。"""
+    """单行 → BillOrder（一行一票；group 恒含 1 行）。"""
     ordered = sorted(
         group,
         key=lambda r: (
@@ -493,6 +487,10 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
     d_name = _first_nonempty(ordered, "d_name")
     d_phone = _first_nonempty(ordered, "d_phone")
     d_num = _clean_plate_no(_first_nonempty(ordered, "d_num"))
+    # 箱号取本行原文（去空白），行序号清洗浮点尾巴——二者供去重组合键使用
+    raw_container = _first_nonempty(ordered, "container_no")
+    container_no = raw_container.strip() if raw_container else None
+    row_seq = _clean_group_key(ordered[0].seq)
 
     # box：同箱型累加；无箱型原文才视为缺失（不做格式校验）
     box_entries, has_valid_box = _box_entries(ordered)
@@ -574,7 +572,9 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
     return BillOrder(
         order_num1=bl_no,
         c_title=c_title,
-        container_count=len(ordered),
+        container_no=container_no,
+        row_seq=row_seq,
+        container_count=sum(b["box_num"] for b in box_entries),
         row_count=len(ordered),
         missing_fields=missing_fields,
         missing_reasons=missing_reasons,
@@ -584,24 +584,14 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
 
 
 def group_orders(rows: list[BillRow], period: BillPeriod) -> AggregationOutput:
-    """按提单号归集：清洗成功的同号合并一单；空/非法提单号行每行单独成组。
+    """一行一票：每条数据行独立成单，不再按提单号合并同号多行。
 
+    2026-08-31 业务拍板（TMS 允许同提单号多条订单，去重键改为提单号+箱号）。
     返回 AggregationOutput（orders + reconciliation 账单锚点对账，只报告不拦截）；
-    输出按组内最小 seq 排序（保持账单出现顺序）；组内行按 seq 升序保证 data[] 顺序。
+    输出保持账单行序；空/非法提单号行同样独立成单并标记缺失。
     """
     data_rows, fee_total, box_total, uppercase_total = _collect_anchors(rows)
-    by_bl_no: dict[str, list[BillRow]] = {}
-    standalone: list[list[BillRow]] = []
-    for row in data_rows:
-        cleaned, _ = clean_order_num(row.order_num1)
-        if cleaned is None:
-            standalone.append([row])
-        else:
-            by_bl_no.setdefault(cleaned, []).append(row)
-
-    groups: list[list[BillRow]] = list(standalone) + list(by_bl_no.values())
-    groups.sort(key=_min_seq)
-    orders = [_build_order(group, period) for group in groups]
+    orders = [_build_order([row], period) for row in data_rows]
     return AggregationOutput(
         orders=orders,
         reconciliation=_build_reconciliation(orders, fee_total, box_total, uppercase_total),
@@ -610,7 +600,7 @@ def group_orders(rows: list[BillRow], period: BillPeriod) -> AggregationOutput:
 
 # ---- 标准字段归集（TMS 通道，模板配置驱动；见《字段映射表》§4） ----
 
-# 归集后组内取「首行非空」的单值字段（CanonicalOrder 标量字段，剔除聚合/元信息；
+# 单行组取值字段（CanonicalOrder 标量字段，剔除聚合/元信息；
 # bl_no 保留在单值集内——构造时单独清洗浮点尾巴后作为提单号）
 _SINGLE_FIELDS: tuple[str, ...] = tuple(
     name
@@ -625,6 +615,8 @@ _SINGLE_FIELDS: tuple[str, ...] = tuple(
         "row_count",
         "fees",
         "fee_reconcile",
+        # 行序号不入单值集：行 dict 键名为 seq，构造时单独清洗赋值（去重键兜底段）
+        "row_seq",
     }
 )
 
@@ -703,34 +695,14 @@ def group_canonical(
     template: dict,
     period: BillPeriod | None = None,
 ) -> list[CanonicalOrder]:
-    """标准字段行按模板 group_key 归集 → CanonicalOrder 列表（TMS 通道）。
+    """标准字段行一行一票 → CanonicalOrder 列表（TMS 通道）。
 
-    归集键配置化：group_key.primary（默认 bl_no），primary 缺失时回落 fallback
-    （无业务编号家族按 bl_no）；双键都缺失的行单独成组。同组多行的箱信息
-    聚合为 containers、多箱型聚合为 box_groups；必填（bl_no/box_groups）缺失
-    登记 missing_fields，不阻塞。输出按组内首行出现顺序排列。
+    2026-08-31 业务拍板：每条数据行独立成单，不再按模板 group_key 归集
+    （配置废弃不再读取）；TMS 允许同提单号多条订单。每行的箱信息聚合为
+    containers/box_groups、费用为行级金额；必填（bl_no/box_groups）缺失
+    登记 missing_fields，不阻塞。输出保持账单行序。
     """
-    group_key = template.get("group_key", {}) or {}
-    primary = group_key.get("primary") or "bl_no"
-    fallback = group_key.get("fallback")
-
-    by_key: dict[str, list[dict]] = {}
-    standalone: list[list[dict]] = []
-    for row in rows:
-        key = _clean_group_key(row.get(primary))
-        if key is None and fallback:
-            key = _clean_group_key(row.get(fallback))
-        if key is None:
-            standalone.append([row])
-        else:
-            by_key.setdefault(key, []).append(row)
-
-    groups: list[list[dict]] = list(standalone) + list(by_key.values())
-    orders: list[CanonicalOrder] = []
-    for group in groups:
-        order = _build_canonical(group, template, period)
-        orders.append(order)
-    return orders
+    return [_build_canonical([row], template, period) for row in rows]
 
 
 def _aggregate_fees(
@@ -802,7 +774,7 @@ def _merge_fee_note(fee: FeeItem, name) -> None:
 def _build_canonical(
     group: list[dict], template: dict, period: BillPeriod | None
 ) -> CanonicalOrder:
-    """组（同归集键 或 单独一行）→ CanonicalOrder。"""
+    """单行 → CanonicalOrder（一行一票；group 恒含 1 行）。"""
     template_id = template.get("template_id", "")
     # 单值字段：组内首行非空（行序即账单出现顺序）
     values: dict[str, object] = {}
@@ -846,6 +818,8 @@ def _build_canonical(
         fees=fees,
         fee_reconcile=fee_reconcile,
         source_template=template_id,
+        # 行序号（清洗浮点尾巴）：去重键的行序号兜底段（无箱号时）
+        row_seq=_clean_group_key(group[0].get("seq")) if group else None,
         row_count=len(group),
         **{k: v for k, v in values.items() if k != "bl_no"},
     )

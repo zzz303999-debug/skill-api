@@ -188,23 +188,24 @@ class TestAggregation:
     """归集断言：一票多箱聚合（秋怡）与 bl_no 兜底归集（军羽）。"""
 
     def test_qiuyi_multi_container_aggregation(self):
-        """秋怡同提单号多行 → containers 聚合 + 同箱型数量累加（实测 KMTCSHA8365615=4 箱）。"""
+        """秋怡同提单号多行 → 一行一票多单（KMTCSHA8365615=4 行 → 4 单各 1 箱）。"""
         _, orders = _parse_family("qiuyi", "2016-01到2016-12上海秋怡应收对账单.xls")
-        multi = {o.bl_no: o for o in orders if len(o.containers) > 1}
-        assert len(multi) >= 299  # 实测一票多箱组数
-        target = multi["KMTCSHA8365615"]
-        assert len(target.containers) == 4
-        assert target.box_groups[0].b_type == "40HQ"
-        assert target.box_groups[0].box_num == 4
-        assert target.missing_fields == []
+        assert all(len(o.containers) <= 1 for o in orders)  # 一行一票：无跨行箱聚合
+        group = [o for o in orders if o.bl_no == "KMTCSHA8365615"]
+        assert len(group) == 4
+        for o in group:
+            assert o.box_groups[0].b_type == "40HQ"
+            assert o.box_groups[0].box_num == 1
+            assert o.missing_fields == []
 
     def test_junyu_group_by_bl_no(self):
-        """军羽无业务编号：group_key.primary=bl_no 兜底归集（462 行 → 220 单）。"""
+        """军羽无业务编号：一行一票（462 行 → 462 单，不再按 bl_no 归集）。"""
         out, orders = _parse_family("junyu", "2020-10上海军羽应收对账单.xls")
-        assert len(orders) < len(out.canonical_rows)
-        target = next(o for o in orders if o.bl_no == "SITGSHHPH601607")
-        assert len(target.containers) == 4
-        assert target.box_groups[0].b_type == "20GP" and target.box_groups[0].box_num == 4
+        assert len(orders) == len(out.canonical_rows)
+        group = [o for o in orders if o.bl_no == "SITGSHHPH601607"]
+        assert len(group) == 4
+        for o in group:
+            assert o.box_groups[0].b_type == "20GP" and o.box_groups[0].box_num == 1
 
 
 class TestTonghuanViaJinxin:
@@ -224,7 +225,7 @@ class TestTonghuanViaJinxin:
         from app.orders.bill.schema import to_canonical
 
         orders = group_orders(out.rows, out.period).orders
-        assert len(orders) == 820  # 与金科信 golden 基线一致
+        assert len(orders) == 1090  # 一行一票：单数=数据行数（golden 基线）
         canonical = to_canonical(orders[0])
         assert canonical.bl_no == "SHSB52129400"
         assert canonical.source_template == "jinxin_v1"

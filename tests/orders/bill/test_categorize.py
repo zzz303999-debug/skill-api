@@ -57,7 +57,6 @@ def _mixed_template() -> dict:
         "header": {"row_anchor": "序号", "two_row": False},
         "data": {"row_filter": "seq_numeric"},
         "required": ["bl_no", "box_type_qty"],
-        "group_key": {"primary": "bl_no", "fallback": "biz_no"},
         "columns": {
             "seq": "序号",
             "customer_name": "客户名称",
@@ -140,22 +139,27 @@ class TestFourCategoryAggregation:
     """四类归集整合：一条 Excel 数据线同时产出四类数据，无遗漏、无错分。"""
 
     def test_business_information(self, mixed_bill, tmp_path):
-        """业务信息：订单主字段（提单号/箱型箱量/客户/门点/司机/车牌）。"""
+        """业务信息：一行一票 → 两行同号各自成单（首行主字段+箱型，次行仅提单号+箱型）。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
-        assert len(orders) == 1
+        assert len(orders) == 2
         order = orders[0]
         assert order.bl_no == "OOLU12345678"
-        # 一票两箱：40HQ*2 + 20GP 聚合（保出现序）
-        assert [(g.b_type, g.box_num) for g in order.box_groups] == [("40HQ", 2), ("20GP", 1)]
+        assert [(g.b_type, g.box_num) for g in order.box_groups] == [("40HQ", 2)]
         assert order.customer_name == "客户甲"
         assert order.door_point == "门点A"
         assert order.driver_name == "王师傅"
         assert order.plate_no == "沪A12345"
         assert order.driver_phone == "13800000000"
-        assert order.row_count == 2  # 两行数据行全部归入同一票
+        assert order.row_count == 1
+        # 次行：仅提单号+箱型（其余列空，不继承首行值；客户缺失登记不阻塞）
+        second = orders[1]
+        assert second.bl_no == "OOLU12345678"
+        assert [(g.b_type, g.box_num) for g in second.box_groups] == [("20GP", 1)]
+        assert second.row_count == 1
+        assert "customer_name" in second.missing_fields
 
     def test_multi_plate_cleaned_into_remark(self, mixed_template, tmp_path):
-        """多车牌：浮点尾巴清洗（9486.0→9486）+ 并入 remark；单车牌不追加。"""
+        """多车牌：浮点尾巴清洗（9486.0→9486）按行生效；一行一票无跨行车牌 remark 段。"""
         rows = [
             [1, "客户甲", "门点A", "王师傅", "9486.0", "OOLU12345678", "40HQ*2", "13800000000",
              100.0, 6.0, 50.0, None, 80.0, None, 30.0, None],
@@ -163,17 +167,16 @@ class TestFourCategoryAggregation:
              150.0, None, None, None, None, None, None, None],
         ]
         _, orders = parse_mixed(build_mixed_bill_bytes(MIXED_HEADERS, rows), tmp_path)
-        order = orders[0]
-        assert order.plate_no == "9486"
-        assert order.remark == "车牌：9486,7399"
+        assert [o.plate_no for o in orders] == ["9486", "7399"]
+        assert all(o.remark is None for o in orders)  # 单行不再拼接「车牌：」段
 
     def test_financial_information_channels(self, mixed_bill, tmp_path):
         """财务信息：费用按通道归集（应收→shou/应付→pay/车辆成本→cost），
-        跨行同名累加，未映射费目归并 other。"""
+        一行一票各行独立，未映射费目归并 other。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         fees = {(f.channel, f.code): f for f in orders[0].fees}
-        # 应收：运费跨行累加 100+150；待时费 50；高速费未映射 → to_other
-        assert fees[("shou", "freight")].money == 250
+        # 首行应收：运费 100；待时费 50；高速费未映射 → to_other
+        assert fees[("shou", "freight")].money == 100
         assert fees[("shou", "waiting")].money == 50
         assert fees[("shou", "other")].money == 6
         assert fees[("shou", "other")].note == "高速费"  # 原名进 note（payload 拼 ¥金额）
@@ -183,6 +186,9 @@ class TestFourCategoryAggregation:
         assert fees[("cost", "hijack")].money == 30
         # 无错分：业务字段不进入费用、费用不进入业务字段
         assert {f.channel for f in orders[0].fees} == {"shou", "pay", "cost"}
+        # 次行应收：仅运费 150（不跨行累加）
+        second = {(f.channel, f.code): f for f in orders[1].fees}
+        assert second[("shou", "freight")].money == 150
 
     def test_basic_information_candidates(self, mixed_bill, tmp_path):
         """基础信息：客户/工厂/司机三类候选无遗漏（订单侧字段 → 档案候选）。"""
@@ -210,10 +216,10 @@ class TestFourCategoryAggregation:
         ]
 
     def test_record_count_conserved(self, mixed_bill, tmp_path):
-        """记录数守恒：2 行数据 → 1 票订单（row_count=2），四类输出同源。"""
+        """记录数守恒：2 行数据 → 2 票订单（一行一票，row_count=1），四类输出同源。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
-        assert len(orders) == 1 and orders[0].row_count == 2
-        assert orders[0].bl_no is not None
+        assert len(orders) == 2 and all(o.row_count == 1 for o in orders)
+        assert all(o.bl_no == "OOLU12345678" for o in orders)
         assert orders[0].fees  # 费用归集与业务归集共用同一数据行集合
 
 
@@ -230,8 +236,8 @@ class TestFieldMapping:
         order = orders[0]
         apply_price_map(order.fees)
         form, _ = build_order_payload(order)
-        # 应收 shou：运费 250（跨行累加）/ 待时费 50 / 其它费 6
-        assert form["shou[0][运费][money]"] == "250.00"
+        # 应收 shou：运费 100（本行）/ 待时费 50 / 其它费 6
+        assert form["shou[0][运费][money]"] == "100.00"
         assert form["shou[0][运费][price_id]"] == "820"
         assert form["shou[0][待时费][money]"] == "50.00"
         assert form["shou[0][待时费][price_id]"] == "90001"
@@ -247,8 +253,8 @@ class TestFieldMapping:
         assert form["shou[0][note]"] == "高速费 ¥6.00"
         assert form["pay[0][note]"] == ""
         assert form["cost[0][note]"] == ""
-        # 合计回写：driver[0] 应收/应付合计 + cost[0] 成本合计
-        assert form["driver[0][get_ys_zj]"] == "306.00"
+        # 合计回写：driver[0] 应收/应付合计 + cost[0] 成本合计（首行 100+50+6）
+        assert form["driver[0][get_ys_zj]"] == "156.00"
         assert form["driver[0][pay_yf_zj]"] == "80.00"
         assert form["cost[0][supplier_hj_zj]"] == "30.00"
         # 业务字段同步落点（合并提交同一 form）
@@ -279,7 +285,7 @@ class TestBoundaries:
         rows.insert(1, [None] * len(MIXED_HEADERS))  # 两数据行之间插全空行
         bill = build_mixed_bill_bytes(MIXED_HEADERS, rows)
         _, orders = parse_mixed(bill, tmp_path)
-        assert len(orders) == 1 and orders[0].row_count == 2
+        assert len(orders) == 2 and all(o.row_count == 1 for o in orders)
 
     def test_missing_columns_flagged(self, tmp_path, mixed_template):
         """缺列（客户名称/箱型箱量/司机手机缺失）→ missing_fields 登记，不阻塞。"""
@@ -296,13 +302,13 @@ class TestBoundaries:
         assert any(f.code == "freight" for f in order.fees)  # 费用列不受缺业务列影响
 
     def test_dirty_bl_no_cleaned(self, tmp_path, mixed_template):
-        """脏数据：提单号前后空格 → 清洗后正常归集（不产生新组/不丢单）。"""
+        """脏数据：提单号前后空格 → 清洗后同号成单（一行一票两单，清洗不丢单）。"""
         rows = mixed_rows()
         rows[0][5] = "  OOLU12345678  "
         bill = build_mixed_bill_bytes(MIXED_HEADERS, rows)
         _, orders = parse_mixed(bill, tmp_path)
-        assert len(orders) == 1
-        assert orders[0].bl_no == "OOLU12345678"
+        assert len(orders) == 2
+        assert all(o.bl_no == "OOLU12345678" for o in orders)
 
 
 # ---- two_row 双行表头回归（openpyxl 空区块单元格不得产生「None.列名」前缀） ----
@@ -388,7 +394,7 @@ class TestTwoRowRegression:
         bill = build_two_row_bill_bytes(MIXED_HEADERS, mixed_rows())
         output, orders = parse_mixed(bill, tmp_path)
         assert output.template_match.level == "L1"  # 列名行指纹命中（区块行不参与指纹）
-        assert len(orders) == 1
+        assert len(orders) == 2
         order = orders[0]
         assert order.bl_no == "OOLU12345678"
         assert order.customer_name == "客户甲"
@@ -396,20 +402,23 @@ class TestTwoRowRegression:
         assert order.driver_name == "王师傅"
         assert order.plate_no == "沪A12345"
         assert order.driver_phone == "13800000000"
-        assert [(g.b_type, g.box_num) for g in order.box_groups] == [("40HQ", 2), ("20GP", 1)]
-        assert order.row_count == 2
+        assert [(g.b_type, g.box_num) for g in order.box_groups] == [("40HQ", 2)]
+        assert order.row_count == 1
 
     def test_fee_channels_via_merged_sections(self, tmp_path, two_row_template):
-        """费用区合并区块名 → 四通道费用正确归属（与单行模板同口径）。"""
+        """费用区合并区块名 → 四通道费用正确归属（与单行模板同口径，各行独立）。"""
         bill = build_two_row_bill_bytes(MIXED_HEADERS, mixed_rows())
         _, orders = parse_mixed(bill, tmp_path)
         fees = {(f.channel, f.code): f for f in orders[0].fees}
-        assert fees[("shou", "freight")].money == 250
+        assert fees[("shou", "freight")].money == 100
         assert fees[("shou", "waiting")].money == 50
         assert fees[("shou", "other")].money == 6
         assert fees[("pay", "fuel")].money == 80
         assert fees[("cost", "hijack")].money == 30
         assert {f.channel for f in orders[0].fees} == {"shou", "pay", "cost"}
+        # 次行应收：仅运费 150（不跨行累加）
+        second_fees = {(f.channel, f.code): f for f in orders[1].fees}
+        assert second_fees[("shou", "freight")].money == 150
 
     def test_no_none_unmatched_headers(self, tmp_path, two_row_template):
         """未识别表头告警不含 "None" 假列（空区块/空表头单元格不再上报）。"""
@@ -505,15 +514,16 @@ class TestE2EMock:
 
         monkeypatch.setattr(client_module.httpx, "post", fake_post)
 
-        # 第一次上传：四类链路全部触发
+        # 第一次上传：四类链路全部触发（一行一票：两行 → 两单）。
+        # 同号无箱号行按行序号兜底成键（#1/#2），两行各自录入（2026-08-31 拍板）
         result = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert result.summary == {
-            "total": 1,
-            "success": 1,
+            "total": 2,
+            "success": 2,
             "failed": 0,
             "skipped": 0,
-            "created": 1,
-            "success_sns": ["EX1"],
+            "created": 2,
+            "success_sns": ["EX1", "EX1"],
             "failed_details": [],
         }
         # 基础建档（依赖序：客户 → 工厂 → 车辆 → 司机）
@@ -526,16 +536,17 @@ class TestE2EMock:
             {"code": "other", "tms_name": "其它费", "price_id": 88801},
             {"code": "waiting", "tms_name": "待时费", "price_id": 88802},
         ]
-        # 订单创建：AddWork 恰 1 次，请求体含业务 + 四通道费用
-        assert state["addwork"] == 1
+        # 订单创建：AddWork 每单恰 1 次（行序号兜底键，两行各自录入），
+        # 请求体含业务 + 四通道费用（首行）
+        assert state["addwork"] == 2
         form = addwork_forms[0]
         assert form["data[0][b_order_num]"] == "OOLU12345678"
-        assert form["shou[0][运费][money]"] == "250.00"
+        assert form["shou[0][运费][money]"] == "100.00"
         assert form["shou[0][待时费][price_id]"] == "88802"
         assert form["shou[0][其它费][price_id]"] == "88801"
         assert form["pay[0][油费][money]"] == "80.00"
         assert form["cost[0][打劫费][money]"] == "30.00"
-        assert form["driver[0][get_ys_zj]"] == "306.00"
+        assert form["driver[0][get_ys_zj]"] == "156.00"
         # 建档请求体：客户/工厂（依赖前置 client_id）/车辆/司机（带 truck_id）
         archive_kinds = [a[0] for a in state["archives"]]
         assert archive_kinds == ["price", "price", "client", "factory", "truck", "driver"]
@@ -553,14 +564,14 @@ class TestE2EMock:
         counts_after_first = dict(get_store().snapshot())
         second = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert second.summary == {
-            "total": 1,
-            "success": 1,
+            "total": 2,
+            "success": 2,
             "failed": 0,
-            "skipped": 1,
+            "skipped": 2,
             "created": 0,
-            "success_sns": ["EX1"],
+            "success_sns": ["EX1", "EX1"],
             "failed_details": [],
         }
-        assert state["addwork"] == 1  # 不重复下单
+        assert state["addwork"] == 2  # 不重复下单
         assert len(state["archives"]) == 6  # 不重复建档（自举/基础档案均零新增）
         assert get_store().snapshot() == counts_after_first  # 计数不被重导推高

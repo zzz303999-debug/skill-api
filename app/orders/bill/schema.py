@@ -137,12 +137,18 @@ class BillRow(BaseModel):
 
 
 class BillOrder(BaseModel):
-    """按提单号归集后的订单（一票一单）解析结果。"""
+    """一行一票（每条账单行独立一单）的解析结果。"""
 
     model_config = ConfigDict(extra="ignore")
 
     order_num1: str | None = Field(None, description="提单号（订单号）；缺失/非法时为 null")
     c_title: str | None = Field(None, description="客户名称；缺失时为 null")
+    container_no: str | None = Field(
+        None, description="本行箱号（去空白）；供去重组合键（提单号+箱号）使用"
+    )
+    row_seq: str | None = Field(
+        None, description="本行序号（浮点尾巴清洗后）；去重键的行序号兜底段（无箱号时）"
+    )
     container_count: int = Field(default=0, description="该订单柜数")
     row_count: int = Field(default=0, description="该订单原始账单行数")
     missing_fields: list[str] = Field(default_factory=list, description="未提取到字段名")
@@ -172,7 +178,7 @@ class BillParseResult(BaseModel):
     file: str = Field(description="上传文件名")
     bill_period: str | None = Field(None, description="结算区间 YYYY-MM-DD~YYYY-MM-DD")
     total_rows: int = Field(default=0, description="识别到的数据行数（一柜一行）")
-    order_count: int = Field(default=0, description="归集后的订单数（按提单号合并）")
+    order_count: int = Field(default=0, description="订单数（一行一票，等于数据行数）")
     create_order: bool = Field(default=False, description="回显本次开关取值")
     orders: list[BillOrder] = Field(default_factory=list)
     canonical_orders: list[CanonicalOrder] = Field(
@@ -332,6 +338,9 @@ class CanonicalOrder(BaseModel):
     )
     # ---- 元信息 ----
     missing_fields: list[str] = Field(default_factory=list, description="缺失字段清单（必填缺失行）")
+    row_seq: str | None = Field(
+        None, description="本行序号（清洗后）；去重键的行序号兜底段（无箱号时）"
+    )
     unmapped_note: str | None = Field(
         None,
         description="未映射到 TMS 表单的标准字段说明（如 TMS「客户」字段键未确认前，客户名称只进报告不进表单），预览/对账报告可见",
@@ -405,6 +414,10 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
     canonical = CanonicalOrder(
         bl_no=order.order_num1 or _first_nonempty(data, "order_num1"),
         box_groups=box_groups,
+        # 一行一票：本行箱号结构化进 containers（去重组合键取值处）
+        containers=(
+            [ContainerInfo(container_no=order.container_no)] if order.container_no else []
+        ),
         customer_name=order.c_title or _first_nonempty(data, "c_title"),
         customer_no=_first_nonempty(data, "c_sn"),
         customer_contact=_first_nonempty(data, "c_name"),

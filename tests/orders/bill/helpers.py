@@ -16,10 +16,11 @@ REAL_XLS = GOLDEN_DIR / "2015-01到2015-12上海通寰应收对账单.xls"
 REBUILT_XLSX = GOLDEN_DIR / "2015-01到2015-12上海通寰应收对账单-rebuilt.xlsx"
 PERIOD_2015 = BillPeriod(start="2015-01-01", end="2015-12-31")
 
-# 真实账单基线（2026-08 探查确认）：1094 原始行 → 尾部 4 行过滤 → 1090 数据行 → 820 单
+# 真实账单基线（2026-08 探查确认）：1094 原始行 → 尾部 4 行过滤 → 1090 数据行；
+# 一行一票（2026-08-31 业务拍板）：单数 = 数据行数
 REAL_RAW_ROWS = 1094
 REAL_TOTAL_ROWS = 1090
-REAL_ORDER_COUNT = 820
+REAL_ORDER_COUNT = REAL_TOTAL_ROWS
 
 
 class FakeResponse:

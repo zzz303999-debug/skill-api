@@ -114,6 +114,8 @@ class TestOverview:
         assert set(dumped["orders"][0]) == {
             "order_num1",
             "c_title",
+            "container_no",
+            "row_seq",
             "container_count",
             "row_count",
             "missing_fields",

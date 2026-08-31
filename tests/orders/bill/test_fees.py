@@ -245,7 +245,7 @@ class TestFeeReconcile:
         assert rec.ok is True
 
     def test_to_other_note_merged(self):
-        """同码多原名 → note 去重拼接（保留出现顺序）。"""
+        """to_other 原名 note：一行一票下各行独立成单，note 不再跨行拼接。"""
         rows = _fee_rows()
         rows.append(
             {
@@ -257,8 +257,12 @@ class TestFeeReconcile:
             }
         )
         orders = group_canonical(rows, {"fees": _FEES_CFG}, None)
-        other = next(f for f in orders[0].fees if f.code == "other")
-        assert other.note == "高速费,掏箱费"
+        # 一行一票：两行同号 → 两单，各行 to_other 原名各自进 note
+        assert len(orders) == 2
+        notes = [
+            next(f.note for f in o.fees if f.code == "other") for o in orders
+        ]
+        assert sorted(notes) == ["掏箱费", "高速费"]
 
 
 class TestNegativeFee:

@@ -59,7 +59,11 @@ def _pick_month(order: CanonicalOrder) -> str | None:
 
 
 def _build_note(order: CanonicalOrder) -> str | None:
-    """b_note：备注 + 业务编号/业务类型备查（竞品编号 TMS 无直接字段，拼入备注）。"""
+    """备注 + 业务编号/业务类型备查（竞品编号 TMS 无直接字段，拼入备注）。
+
+    结果同时发 b_note 与 c_note（2026-08-31 用户拍板双发）：TMS 界面「业务备注」
+    落点未实证，双发零风险（PHP 控制器硬读键名，多余键无害、缺键才 204）。
+    """
     segments: list[str] = []
     remark = _first(order.remark)
     if remark:
@@ -158,7 +162,9 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
       TMS「客户」字段正确落点，自由文本可保存；
     - `c_name`=客户联系人：实证渲染为 UI「联系人」；
     - `c_id` 恒发空串：PHP 控制器硬读（c_title 非空即读 c_id，缺键 204 拒单，
-      Undefined index: c_id，2026-08-13 实测）；c_phone/c_note 同旧链路超集恒发。
+      Undefined index: c_id，2026-08-13 实测）；c_phone 同旧链路超集恒发；
+    - `c_note` 与 `b_note` 双发同内容（2026-08-31 用户拍板：TMS 界面「业务备注」
+      落点未实证，双发零风险——PHP 控制器硬读键名，多余键无害）
     """
     warnings: list[str] = []
     month = _pick_month(order)
@@ -198,7 +204,9 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
         "c_name": order.customer_contact or "",
         "c_phone": order.contact_phone or "",
         "c_sn": order.customer_no or "",
-        "c_note": "",
+        # c_note 与 b_note 双发同内容（2026-08-31 用户拍板：TMS 界面「业务备注」
+        # 落点未实证，双发零风险——PHP 控制器硬读键名，多余键无害）
+        "c_note": note or "",
         "c_id": _archive_id(order, "client"),
         # 门点：已建档工厂回填 factory_id + b_factory_address_msg（T20；请求侧键位
         # 未实证，先按同键发，验证单确认——多发键安全，缺键才 204）；未建档维持文本

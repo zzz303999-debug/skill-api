@@ -197,8 +197,9 @@ class TestDedupSkE2E:
         assert body["code"] == "200" and body["msg"] == "添加成功"
         assert body["data"]["summary"]["created"] == 2  # 存量记录不再拦截
         assert body["data"]["summary"]["skipped"] == 0
-        # 旧记录保留在 legacy 槽位（可审计），新记录按 owner 维度并存
+        # 旧纯提单号键保留 legacy 槽位（可审计）；新组合键（提单号+箱号）按 owner 维度并存
         snapshot = imported_registry.get_imported_registry().snapshot()
-        for owners in snapshot.values():
-            assert "legacy" in owners
-            assert owner_key("sk-X") in owners
+        assert "legacy" in snapshot["OOLU10000001"]
+        assert "legacy" in snapshot["OOLU10000002"]
+        assert owner_key("sk-X") in snapshot["OOLU10000001|TCLU1"]
+        assert owner_key("sk-X") in snapshot["OOLU10000002|TCLU2"]

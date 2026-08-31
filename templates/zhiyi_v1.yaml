@@ -22,15 +22,11 @@ fee_boundary: section_header
 required:
 - bl_no
 - box_type_qty
-# 实测：biz_no 为行级编号每行唯一（16070002-1/2…），同提单号多行才是同一票多箱；
-# 归集键以 bl_no 为主（与设计初稿 primary=biz_no 冲突，实测为准），biz_no 兜底
-group_key:
-  primary: bl_no
-  fallback: biz_no
 year_source:
 - filename
 - settlement_row
 columns:
+  seq: 序号  # 一行一票去重键行序号兜底段（无箱号行）
   order_date: 日期
   biz_no: 业务编号
   customer_name: 客户名称

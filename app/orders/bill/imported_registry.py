@@ -1,13 +1,17 @@
-"""竞品账单导入「成功单注册表」：(提单号, sk) → 首次创建回执（重复上传去重）。
+"""竞品账单导入「成功单注册表」：(提单号+箱号, sk) → 首次创建回执（重复上传去重）。
 
 方案一（2026-08-31 起按 sk 维度）：同一提单号对同一上传人（sk）只允许创建
 成功一次——同一 sk 重复上传时已成功单跳过（create_result 标记 skipped），
 失败单不登记、可修正后重导；不同 sk（不同操作员）各自可导入同一账单
 （生产误拦修正：此前全局按提单号拦截，A 创建后 B 无法导入）。
 
+一行一票（2026-08-31 业务拍板）：同提单号多行各自成单，去重键改为
+**提单号+箱号组合键**（`dedup_key`）；行无箱号时退化为纯提单号（历史行为）。
+历史登记的纯提单号键保留：对无箱号行继续生效，对含箱号行自然失配。
+
 - 存储：{storage_dir}/imported_orders.json（单文件 JSON；进程内锁 + 临时文件原子替换，
   复用 master_data_store/fee_registry 的持久化模式——JSON + 进程锁 + 原子写，
-  无 SQLite/DB 设施）；结构 data[bl_no] = {owner_key: {sn, source_sha256, created_at}}；
+  无 SQLite/DB 设施）；结构 data[dedup_key] = {owner_key: {sn, source_sha256, created_at}}；
 - owner_key：sha256(sk) 前 16 hex（不落盘 sk 原文）；旧版全局条目（顶层含 sn）
   加载时迁移至 "legacy" 槽位（真实 key 为 hex 不会撞名）——legacy 不匹配任何
   sk，存量记录保留可审计且不再拦截（生产误拦数据由此自然解封）；
@@ -15,9 +19,8 @@
   不登记，保证修正后重导失败单不被误拦）；
 - 键规范化 normalize()：strip 首尾空白 + upper 统一大小写（假设下游 TMS 不区分
   提单号大小写；若下游敏感，改为仅 strip）；
-- 并发：per-bl_no 锁 lock_for(bl_no) 供编排层包住「查重→提交→登记」临界区——
-  同提单号跨请求串行化（check-then-act 原子化），不同提单号互不阻塞
-  （历史账单按提单号串行导入，冲突率≈0）；
+- 并发：组合键锁 lock_for 供编排层包住「查重→提交→登记」临界区——
+  同键跨请求串行化（check-then-act 原子化），不同键互不阻塞；
 - 局限：单进程部署有效（同 master_data 计数存储）；文件只增不减，清理方式为
   删除文件全量重置（运维操作）；sk 为会话 token，同账号重新登录后 sk 变化
   → 去重按会话维度生效（换号/重登可重导，属本方案既定语义）；下游「已创建
@@ -59,6 +62,35 @@ def normalize(bl_no: str | None) -> str | None:
     if not bl_no:
         return bl_no
     return str(bl_no).strip().upper()
+
+
+# 组合键分隔符：真实提单号/箱号字符集（字母数字）不含该字符，解析无歧义；
+# 行序号段加 "#" 前缀（纯数字箱号与行序号键不撞车）
+_CONTAINER_SEP = "|"
+_SEQ_PREFIX = "#"
+
+
+def dedup_key(
+    bl_no: str | None, container_no: str | None = None, fallback: str | None = None
+) -> str | None:
+    """去重组合键：提单号+箱号（一行一票，2026-08-31）；行序号兜底；末档纯提单号。
+
+    - 有箱号 → ``提单号|箱号``；
+    - 无箱号有行序号（fallback）→ ``提单号|#行序号``（2026-08-31 用户拍板：
+      金科信等无箱号模板同号多行各自成键，保证每行都能录入且同文件重传可拦）；
+    - 双缺 → 纯提单号（历史行为）。
+    两段各自 normalize（strip + upper）；提单号缺失 → None（不构成键）。
+    """
+    bl = normalize(bl_no)
+    if not bl:
+        return None
+    box = normalize(container_no)
+    if box:
+        return f"{bl}{_CONTAINER_SEP}{box}"
+    seq = normalize(fallback)
+    if seq:
+        return f"{bl}{_CONTAINER_SEP}{_SEQ_PREFIX}{seq}"
+    return bl
 
 
 class ImportedOrderRegistry:
@@ -126,9 +158,15 @@ class ImportedOrderRegistry:
         with self._lock:
             self._data = self._load()
 
-    def lookup(self, bl_no: str, owner: str) -> dict[str, Any] | None:
-        """(提单号, owner) → 首次创建回执（未登记/空键 → None）。键自动规范化。"""
-        key = normalize(bl_no)
+    def lookup(
+        self,
+        bl_no: str,
+        owner: str,
+        container_no: str | None = None,
+        fallback: str | None = None,
+    ) -> dict[str, Any] | None:
+        """(组合键, owner) → 首次创建回执（未登记/空键 → None）。键自动规范化。"""
+        key = dedup_key(bl_no, container_no, fallback)
         if not key or not owner:
             return None
         with self._lock:
@@ -142,13 +180,15 @@ class ImportedOrderRegistry:
         owner: str,
         sn: str | None = None,
         source_sha256: str | None = None,
+        container_no: str | None = None,
+        fallback: str | None = None,
     ) -> dict[str, Any]:
         """登记创建成功单（首次 sn + 来源文件哈希 + 时间）；返回最新记录。
 
-        只在提交成功后调用（本模块不判断成败）；同 (bl_no, owner) 重复登记
+        只在提交成功后调用（本模块不判断成败）；同 (组合键, owner) 重复登记
         以首次为准（sn 不回退，幂等）；不同 owner 各自独立登记。
         """
-        key = normalize(bl_no)
+        key = dedup_key(bl_no, container_no, fallback)
         if not key:
             raise ValueError("bl_no is required for register")
         if not owner:
@@ -178,16 +218,18 @@ class ImportedOrderRegistry:
             self._save()
 
 
-# ---- per-bl_no 并发锁：编排层包住「查重→提交→登记」临界区 ----
+# ---- 组合键并发锁：编排层包住「查重→提交→登记」临界区 ----
 
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
 
 @contextmanager
-def lock_for(bl_no: str) -> Iterator[None]:
-    """按提单号取互斥锁（上下文管理器）：同键串行化，异键互不阻塞。"""
-    key = normalize(bl_no)
+def lock_for(
+    bl_no: str, container_no: str | None = None, fallback: str | None = None
+) -> Iterator[None]:
+    """按去重组合键取互斥锁（上下文管理器）：同键串行化，异键互不阻塞。"""
+    key = dedup_key(bl_no, container_no, fallback)
     with _LOCKS_GUARD:
         lock = _LOCKS.setdefault(key or "", threading.Lock())
     with lock:
