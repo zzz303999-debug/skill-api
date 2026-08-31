@@ -217,14 +217,14 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
         # exists_external 后不再重试（无查询接口无法取 id，订单继续文本提交）
         msg = str(raw.get("msg") or "")
         if _is_duplicate_message(msg):
-            log.info("master_data_duplicate_external", extra={"kind": kind, "message": msg})
+            log.info("master_data_duplicate_external", extra={"kind": kind, "upstream_message": msg})
             return {
                 "success": False,
                 "archive_id": None,
                 "duplicate": True,
                 "error": {
                     "code": "master_data_duplicate",
-                    "message": msg,
+                    "upstream_message": msg,
                     "details": {
                         "upstream_code": raw.get("code"),
                         "upstream_message": msg,

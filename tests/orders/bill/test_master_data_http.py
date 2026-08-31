@@ -213,6 +213,28 @@ class TestClientCreate:
         rec = get_store().get(KIND_CLIENT, client_key("锦煦"))
         assert rec and rec.get("exists_external") is True and rec.get("archive_id") is None
 
+    def test_duplicate_branch_logging_extra_key_safe(
+        self, md_config, fake_http, real_archives, monkeypatch
+    ):
+        """「已存在」分支日志 extra 不得使用 LogRecord 保留键 message（2026-08-31
+        生产 500 回归：makeRecord 检查 extra 键直接 KeyError 冒泡到请求）。
+
+        强制 INFO 生效路径：pytest 默认 root WARNING 会短路 INFO 日志（isEnabledFor
+        为 False 不进入 makeRecord），不强制则该缺陷测不出来（历史假阴性）。
+        """
+        md_config(_md_cfg(threshold=1))
+        fake_http(
+            lambda url, **kw: FakeResponse(
+                {"code": "204", "msg": "客户名已存在,无法继续添加。"}
+            )
+        )
+        monkeypatch.setattr(md_client_module.log, "isEnabledFor", lambda level: True)
+        report = run_master_data(
+            [_make_order(door=None, driver=None)], create_order=True, sk="sk-token"
+        )
+        ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
+        assert ext and "已存在" in ext[0]["message"]
+
     def test_failure_no_primary_key_marks_external(self, md_config, fake_http, real_archives):
         """成功但无主键（data:[] 实证形态）→ exists_external（防重复建档）。"""
         md_config(_md_cfg(threshold=1))
