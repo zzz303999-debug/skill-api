@@ -23,7 +23,8 @@ lift:        { tms_name: 上下车费, price_id: null }
 port_misc:   { tms_name: 港杂费,   price_id: null }
 tax:         { tms_name: 税金,     price_id: null, import: false }  # 不录入仅对账，price_id 非必需
 other:       { tms_name: 其它费,   price_id: null }     # 硬依赖：to_other 归并目标，存在性+id 待确认
-deduction:    { tms_name: 扣除费,   price_id: null }     # T27a 负向扣减项（仅赢辉应付区），null → 自举建档
+deduction:    { tms_name: 扣除费,   price_id: null }     # T27a 负向扣减项（ 仅赢辉应付区），null → 自举建档
+crane:        { tms_name: 吊机费,   price_id: null }     # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）
 
 # 费目自举（T24/T25，2026-08-14 定论）：测试环境价格表全量仅 7 费目，15 个标准费目与
 # 「其它费」均不存在——缺失费目码在导入命中时懒创建（建档接口见逆推规范 §8）。

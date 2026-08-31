@@ -314,14 +314,28 @@ def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     return _parse_create_response(response, step="AddWork")
 
 
-def _register_imported(bl_no: str, owner: str, sn, source_sha256: str | None) -> None:
-    """登记创建成功单（去重注册表，owner=sk 哈希）；登记失败仅记日志，不冒泡。
+def _register_imported(
+    bl_no: str,
+    owner: str,
+    sn,
+    source_sha256: str | None,
+    container_no: str | None = None,
+    fallback: str | None = None,
+) -> None:
+    """登记创建成功单（去重注册表组合键，owner=sk 哈希）；登记失败仅记日志，不冒泡。
 
     单已真实创建，登记失败（磁盘满/权限等）不应使响应变失败——丢失记录的
     后果是重导可能重复下单（见 imported_registry 模块 docstring）。
     """
     try:
-        get_imported_registry().register(bl_no, owner, sn=sn, source_sha256=source_sha256)
+        get_imported_registry().register(
+            bl_no,
+            owner,
+            sn=sn,
+            source_sha256=source_sha256,
+            container_no=container_no,
+            fallback=fallback,
+        )
     except Exception as exc:  # noqa: BLE001 - 防御：登记失败不使成功单变失败
         log.warning(
             "imported_register_failed",
@@ -353,14 +367,24 @@ def create_orders(orders: list[BillOrder], sk: str, source_sha256: str | None = 
         if not bl:
             order.create_result = submit(sk, order.order_data or {})
             continue
-        with lock_for(bl):
-            rec = get_imported_registry().lookup(bl, owner)
+        box = order.container_no  # 一行一票：去重键=提单号+箱号（无箱号退化为行序号）
+        with lock_for(bl, container_no=box, fallback=order.row_seq):
+            rec = get_imported_registry().lookup(
+                bl, owner, container_no=box, fallback=order.row_seq
+            )
             if rec:
                 order.create_result = _skipped_result(rec.get("sn"))
                 continue
             order.create_result = submit(sk, order.order_data or {})
             if order.create_result.get("success"):
-                _register_imported(bl, owner, order.create_result.get("sn"), source_sha256)
+                _register_imported(
+                    bl,
+                    owner,
+                    order.create_result.get("sn"),
+                    source_sha256,
+                    container_no=box,
+                    fallback=order.row_seq,
+                )
 
 
 def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
@@ -474,11 +498,24 @@ def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -
         if not bl:
             order.create_result = submit_canonical(sk, order)
             continue
-        with lock_for(bl):
-            rec = get_imported_registry().lookup(bl, owner)
+        # 一行一票：去重键=提单号+箱号（取首个结构化箱号；无箱号退化为行序号）
+        box = next(
+            (c.container_no for c in (order.containers or []) if c.container_no), None
+        )
+        with lock_for(bl, container_no=box, fallback=order.row_seq):
+            rec = get_imported_registry().lookup(
+                bl, owner, container_no=box, fallback=order.row_seq
+            )
             if rec:
                 order.create_result = _skipped_result(rec.get("sn"))
                 continue
             order.create_result = submit_canonical(sk, order)
             if order.create_result.get("success"):
-                _register_imported(bl, owner, order.create_result.get("sn"), source_sha256)
+                _register_imported(
+                    bl,
+                    owner,
+                    order.create_result.get("sn"),
+                    source_sha256,
+                    container_no=box,
+                    fallback=order.row_seq,
+                )

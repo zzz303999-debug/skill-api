@@ -669,14 +669,21 @@ class TestGoldenBootstrap:
         assert bootstrap["failed"] == []
         assert bootstrap["created"]  # 实测 14 码：other/yangshan/pre_inport/drop_box 等
         assert reports.get("price_null_dropped") == []  # 1901 条降级 → 0
-        # 全量费用回填：非 excluded 项 price_id 均非空（当批正常录入）
+        # 全量费用回填：非 excluded 项 price_id 均非空（当批正常录入的单）；
+        # 空提单号行标记 missing_bl_no 不录入，不参与自举/回填（一行一票口径）
         null_prices = [
             (o.bl_no, f.code)
             for o in result.canonical_orders
+            if o.bl_no
             for f in o.fees
             if not f.excluded and f.price_id is None
         ]
         assert null_prices == []
+        assert all(
+            (o.create_result or {}).get("error", {}).get("code") == "missing_bl_no"
+            for o in result.canonical_orders
+            if not o.bl_no
+        )
         # registry 与建档清单一致（登记即命中）
         registered = {
             c["code"]: c["price_id"]

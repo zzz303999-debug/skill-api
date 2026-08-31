@@ -17,12 +17,11 @@ fee_boundary: column_range
 required:
 - bl_no
 - box_type_qty
-group_key:
-  primary: bl_no
 year_source:
 - filename
 - settlement_row
 columns:
+  seq: 序号  # 一行一票去重键行序号兜底段（无箱号行）
   customer_name: 客户名称
   customer_no: 客户编号
   door_point: 门点

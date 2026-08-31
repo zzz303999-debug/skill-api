@@ -40,6 +40,20 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _order_dedup_parts(order) -> tuple[str | None, str | None]:
+    """订单去重键段 (箱号, 行序号)：canonical 取结构化箱号 + row_seq，
+    旧链路 BillOrder 取 container_no + row_seq；箱号缺失时键退化为行序号兜底
+    （提单号|#seq），双缺再退化纯提单号（见 imported_registry.dedup_key）。"""
+    container_no = None
+    for container in getattr(order, "containers", None) or []:
+        if getattr(container, "container_no", None):
+            container_no = container.container_no
+            break
+    if container_no is None:
+        container_no = getattr(order, "container_no", None)
+    return container_no, getattr(order, "row_seq", None)
+
+
 def _build_fee_reports(output, orders: list, create_order: bool, sk: str = "") -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
@@ -328,10 +342,12 @@ def build_result(
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
-    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号, sk) 维度）：
-    # create 模式先查同一 sk 已成功提单号，命中即标记 skipped（只查不登；登记在
-    # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。计数/自举/
-    # 费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
+    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号+箱号, sk) 维度）：
+    # create 模式先查同一 sk 已成功组合键，命中即标记 skipped（只查不登；登记在
+    # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。
+    # 一行一票（2026-08-31 业务拍板）：提单号必填，缺失行直接标记失败不录入
+    # （不调下游、不进建档/自举 pending），计入 failed_details 由人工核对。
+    # 计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
     if create_order:
         from .imported_registry import get_imported_registry, normalize, owner_key
 
@@ -341,7 +357,21 @@ def build_result(
             bl = normalize(
                 getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
             )
-            if bl and (rec := _imported.lookup(bl, _owner)):
+            if not bl:
+                order.create_result = {
+                    "success": False,
+                    "skipped": False,
+                    "sn": None,
+                    "error": {
+                        "code": "missing_bl_no",
+                        "message": "提单号缺失，未录入",
+                        "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
+                        "details": {},
+                    },
+                }
+                continue
+            box, seq = _order_dedup_parts(order)
+            if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
                 order.create_result = {
                     "success": True,
                     "skipped": True,

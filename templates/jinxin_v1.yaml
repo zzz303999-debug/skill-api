@@ -20,8 +20,6 @@ required:
 - order_num1
 - c_title
 - b_type
-group_key:
-  primary: bl_no
 year_source:
 - filename
 - settlement_row

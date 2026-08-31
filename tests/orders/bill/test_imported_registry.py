@@ -1,7 +1,7 @@
 """成功单注册表测试：register/lookup/snapshot/clear、损坏容错、键规范化
-（strip + upper）、per-bl_no 锁同键互斥异键并行（重复上传去重方案一，
-2026-08-31 起按 (提单号, sk) 维度：同 owner 幂等、异 owner 放行、
-旧版全局条目迁移 legacy 槽位不再拦截）。"""
+（strip + upper）、组合键去重（提单号+箱号，行序号兜底）、per-key 锁同键
+互斥异键并行（重复上传去重方案一，2026-08-31 起按 (组合键, sk) 维度：
+同 owner 幂等、异 owner 放行、旧版全局条目迁移 legacy 槽位不再拦截）。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import pytest
 
 from app.orders.bill.imported_registry import (
     ImportedOrderRegistry,
+    dedup_key,
     lock_for,
     normalize,
     owner_key,
@@ -146,6 +147,58 @@ class TestRegistry:
         reg = ImportedOrderRegistry(path)
         assert reg.snapshot() == {"OOLU1": {}}
         assert reg.lookup("OOLU1", OWNER_A) is None
+
+
+class TestDedupKey:
+    """一行一票组合键（2026-08-31）：提单号+箱号；行序号兜底；末档纯提单号。"""
+
+    def test_container_segment(self):
+        """有箱号 → 提单号|箱号（两段各自规范化）。"""
+        assert dedup_key(" oolu123 ", " tclu1 ") == "OOLU123|TCLU1"
+
+    def test_row_seq_fallback(self):
+        """无箱号有行序号 → 提单号|#行序号（# 前缀与纯数字箱号键不撞车）。
+
+        序号段 normalize 仅 strip+upper；浮点尾巴由归集层 row_seq 清洗后传入。
+        """
+        assert dedup_key("OOLU123", None, "1.0") == "OOLU123|#1.0"
+        assert dedup_key("oolu123", None, " 2 ") == "OOLU123|#2"
+        assert dedup_key("OOLU123", None, "2") != dedup_key("OOLU123", None, "1")
+        # 纯数字箱号键（无 #）与行序号键（有 #）互异
+        assert dedup_key("OOLU123", "2") != dedup_key("OOLU123", None, "2")
+
+    def test_bare_bl_no_when_both_missing(self):
+        """箱号与行序号双缺 → 纯提单号（历史行为）。"""
+        assert dedup_key("OOLU123") == "OOLU123"
+        assert dedup_key("OOLU123", None, None) == "OOLU123"
+        assert dedup_key("OOLU123", "") == "OOLU123"
+
+    def test_missing_bl_no_no_key(self):
+        assert dedup_key(None, "TCLU1") is None
+        assert dedup_key("", None, "1") is None
+
+    def test_same_bl_different_containers_isolated(self, registry):
+        """同提单号不同箱号各自成键：一行一票多柜互不拦截（登记/查询隔离）。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1", container_no="TCLU1")
+        registry.register("OOLU1", OWNER_A, sn="EX2", container_no="TCLU2")
+        assert registry.lookup("OOLU1", OWNER_A, container_no="TCLU1")["sn"] == "EX1"
+        assert registry.lookup("OOLU1", OWNER_A, container_no="TCLU2")["sn"] == "EX2"
+        # 无键段查询（纯提单号）不命中含箱号键
+        assert registry.lookup("OOLU1", OWNER_A) is None
+
+    def test_same_bl_seq_fallback_isolated(self, registry):
+        """无箱号同号多行：行序号兜底成键，各行独立登记/命中。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1", fallback="1")
+        registry.register("OOLU1", OWNER_A, sn="EX2", fallback="2")
+        assert registry.lookup("OOLU1", OWNER_A, fallback="1")["sn"] == "EX1"
+        assert registry.lookup("OOLU1", OWNER_A, fallback="2")["sn"] == "EX2"
+        assert registry.lookup("OOLU1", OWNER_A, fallback="3") is None
+
+    def test_reupload_same_key_hit(self, registry):
+        """同组合键重复登记幂等（first-write-wins）→ 重传同键命中被拦。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1", container_no="TCLU1")
+        registry.register("OOLU1", OWNER_A, sn="EX9", container_no="TCLU1")
+        assert registry.lookup("OOLU1", OWNER_A, container_no="TCLU1")["sn"] == "EX1"
 
 
 class TestLockFor:

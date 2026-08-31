@@ -24,11 +24,13 @@ lift:        { tms_name: 上下车费, price_id: null }
 port_misc:   { tms_name: 港杂费,   price_id: null }
 tax:         { tms_name: 税金,     price_id: null, import: false }
 other:       { tms_name: 其它费,   price_id: null }
+crane:       { tms_name: 吊机费,   price_id: null }      # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）
 
-# 费目自举（T24/T25）：生产默认关闭——价格表由运维管控，自举属越权行为，需显式开启。
-# 结构与 test 环境一致（结构同步便于运维开启后直接生效）；endpoint_key 复用 master_data endpoints。
+# 费目自举（T24/T25）：生产默认关闭——价格表由 运维管控，自举属越权行为，需显式开启。
+# 2026-08-31 用户拍板：开启生产自举（懒创建 + registry 幂等 + 204 已存在标记外部
+# exists_external 不再重试 + 失败降级不阻塞下单，风险受控）；结构已与 test 对齐。
 fee_bootstrap:
-  enabled: false
+  enabled: true
   endpoint_key: price_create
   create_defaults:
     sn_prefix: AUTO

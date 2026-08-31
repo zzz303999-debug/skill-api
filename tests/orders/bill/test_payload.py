@@ -70,7 +70,7 @@ class TestBuildOrderForm:
         assert form["c_title"] == "德清华凯"  # customer_name
         assert form["c_name"] == "张经理"  # customer_contact
         assert form["c_sn"] == "SED161509"  # customer_no
-        assert form["c_id"] == "" and form["c_note"] == ""  # 控制器硬读键恒发空串
+        assert form["c_id"] == ""  # 控制器硬读键恒发（未建档恒空）
         assert form["factory_name"] == "德清和普"  # door_point
         assert form["driver[0][b_date]"] == "2016-07-26"  # work_date
         assert form["driver[0][b_get_address]"] == "提箱点A"  # pickup_point
@@ -86,6 +86,23 @@ class TestBuildOrderForm:
         assert form["b_lock"] == "SN888"  # 首箱封号
         assert "业务编号：16070002-1" in form["b_note"]  # biz_no 拼入备查
         assert "业务类型：出口" in form["b_note"]
+
+    def test_note_dual_send_b_note_and_c_note(self):
+        """备注双发（2026-08-31 用户拍板）：c_note 与 b_note 同内容。
+
+        背景：TMS 界面「业务备注」落点未实证（b_note/c_note 哪个被界面消费），
+        双发零风险（PHP 控制器硬读键名，多余键无害）；remark/biz_no/biz_type
+        全部拼入两键。
+        """
+        form, _ = build_order_form(_sample_order())
+        assert form["c_note"] == form["b_note"]
+        assert "备注原文" in form["c_note"]
+        assert "业务编号：16070002-1" in form["c_note"]
+        # 无备注无业务编号时双键同步空串
+        empty = build_order_form(
+            _sample_order(remark=None, biz_no=None, biz_type=None)
+        )[0]
+        assert empty["c_note"] == "" and empty["b_note"] == ""
 
     def test_multi_container_takes_first_and_warns(self):
         """多箱号：b_num 取首箱 + warning（split_per_container 预留，默认 false）。"""
@@ -138,7 +155,7 @@ class TestBuildOrderForm:
         assert form["c_name"] == ""  # customer_contact 缺失 → 空串
         assert form["b_ship_name"] == "" and form["b_ship_num"] == ""
         assert form["data[0][j]"] == "" and form["data[0][m]"] == "" and form["data[0][hh]"] == ""
-        assert form["b_note"] == ""
+        assert form["b_note"] == "" and form["c_note"] == ""  # 无备注双键同步空
         # month 回退 order_date
         assert form["month"] == "2016-07"
 
