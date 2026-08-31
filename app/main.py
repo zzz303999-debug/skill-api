@@ -140,11 +140,13 @@ def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
 
 
 # ---- 统一响应外壳（{code, msg, data}）----
-# 账单录入（/orders/bill/import）错误场景先行适配：调用方全场景统一取
-# code/msg/data 三字段（code 机器可读、msg 可直接展示的中文说明、data 为
-# 补充详情），不再区分成功/业务失败/请求错误结构。其余接口保持
-# {error: {code, message, description, details}} 结构不变（v2.2 起）。
-_UNIFIED_RESPONSE_PATHS = frozenset({"/orders/bill/import"})
+# 已适配路径全场景（成功/业务失败/请求错误）统一取 code/msg/data 三字段
+# （code 机器可读、msg 可直接展示的中文说明、data 为补充详情）：
+# - /orders/bill/import：账单录入（v2.2 起先行适配）
+# - /skills/tuoshu/extract：托书单文件抽取（2026-08-31 适配，data 内为
+#   {skill, version, result, meta, content?}，result 即原 data 抽取结果）
+# 其余接口保持 {error: {code, message, description, details}} 结构不变。
+_UNIFIED_RESPONSE_PATHS = frozenset({"/orders/bill/import", "/skills/tuoshu/extract"})
 
 
 def _use_unified_response(path: str) -> bool:
@@ -783,8 +785,30 @@ def bill_import_help_page() -> FileResponse:
 def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
     """为每个 skill 动态生成一个精确类型的响应模型：
     data 字段的类型 = skill.output_model，这样 OpenAPI 就能显示精确 schema。
+    统一外壳路径（_UNIFIED_RESPONSE_PATHS 内的 skill 接口，当前仅
+    /skills/tuoshu/extract）生成 {code, msg, data} 外壳模型，data 内为
+    {skill, version, result, meta, content?}（result 即原 data 抽取结果）；
+    其余 skill 保持原 {skill, version, data, meta, content?} 结构。
     """
     data_type: Any = skill.output_model if skill.output_model else dict
+    model_name = f"{skill.name.title().replace('-', '')}Response"
+    if f"/skills/{skill.name}/extract" in _UNIFIED_RESPONSE_PATHS:
+        inner_fields: dict[str, Any] = {
+            "skill": (str, skill.name),
+            "version": (str, skill.version),
+            "result": (data_type, ...),
+            "meta": (dict, Field(default_factory=dict)),
+        }
+        if skill.include_content:
+            inner_fields["content"] = (str, ...)
+        inner = create_model(f"{model_name}Data", **inner_fields, __base__=BaseModel)
+        return create_model(
+            model_name,
+            code=(str, ...),
+            msg=(str, ...),
+            data=(inner, ...),
+            __base__=BaseModel,
+        )
     fields: dict[str, Any] = {
         "skill": (str, skill.name),
         "version": (str, skill.version),
@@ -793,11 +817,7 @@ def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
     }
     if skill.include_content:
         fields["content"] = (str, ...)
-    return create_model(
-        f"{skill.name.title().replace('-', '')}Response",
-        **fields,
-        __base__=BaseModel,
-    )
+    return create_model(model_name, **fields, __base__=BaseModel)
 
 
 async def _read_upload(file: UploadFile) -> bytes:
@@ -1119,6 +1139,19 @@ def _make_extract_route(skill: SkillBase):
         content = await _read_upload(file)
         request.state.file_size = len(content)
         out = await _run_skill(skill, content, file.filename or "unnamed")
+        if _use_unified_response(request.url.path):
+            # 统一外壳（当前仅 /skills/tuoshu/extract）：{code, msg, data}，
+            # data 内 {skill, version, result, meta, content?}（result 即原
+            # data 抽取结果），错误场景由全局异常处理器套同一外壳
+            payload = {
+                "skill": skill.name,
+                "version": skill.version,
+                "result": out["result"],
+                "meta": out.get("meta", {}),
+            }
+            if skill.include_content:
+                payload["content"] = out.get("content", "")
+            return {"code": "200", "msg": "解析成功", "data": payload}
         response = {
             "skill": skill.name,
             "version": skill.version,

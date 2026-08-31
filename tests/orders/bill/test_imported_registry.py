@@ -66,6 +66,13 @@ class TestRegistry:
         assert registry.lookup("", OWNER_A) is None
         assert registry.lookup("OOLU1", "") is None
 
+    def test_lookup_returns_copy(self, registry):
+        """lookup 返回副本：调用方修改返回值不得污染注册表内部状态。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1")
+        rec = registry.lookup("OOLU1", OWNER_A)
+        rec["sn"] = "HACKED"
+        assert registry.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
+
     def test_register_idempotent_sn_kept(self, registry):
         """同 (bl_no, owner) 重复登记以首次为准（sn 不回退，并发下后到者不覆盖）。"""
         registry.register("OOLU1", OWNER_A, sn="EX1")
