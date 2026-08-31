@@ -17,8 +17,10 @@ class Settings(BaseSettings):
     )
 
     # 运行环境（test/prod）：决定 config/fee_price_map.{env}.yaml 等按环境隔离的
-    # 配置文件名；环境切换只换文件，代码零环境名/if
-    env: str = "test"
+    # 配置文件名；环境切换只换文件，代码零环境名/if。
+    # validation_alias：环境变量/​.env 键名固定为 APP_ENV（2026-08-31 修复——
+    # 此前无 alias，pydantic-settings 按字段名读 ENV，文档口径 APP_ENV 完全无效）
+    env: str = Field(default="test", validation_alias="APP_ENV")
 
     # API
     api_host: str = "0.0.0.0"

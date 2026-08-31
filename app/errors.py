@@ -31,7 +31,7 @@ ERROR_CODE_DESCRIPTIONS: dict[str, str] = {
     "unsupported_image_content": "图片内容不是支持的格式（jpg/png/bmp/tiff/gif/webp），请转换后重试",
     "file_format_mismatch": "附件格式不匹配，请上传竞品应收对账单格式的附件，或联系人工客服",
     "too_many_rows": "数据量过大，联系人工客服",
-    "header_mapping_rejected": "账单表头无法识别或缺少必填列（箱型/箱量），请联系人工客服",
+    "header_mapping_rejected": "账单缺少必填列（提单号，箱型/箱量），请联系人工客服",
     "skill_not_found": "请求的技能不存在，请检查接口路径",
     # ---- 文档转换 ----
     "convert_error": "附件解析失败，文件可能已损坏或格式不受支持，请联系人工客服",

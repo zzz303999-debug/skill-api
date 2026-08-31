@@ -1,11 +1,13 @@
 # 标准费目码 → TMS 费目/price_id 映射表（生产环境）
 # 结构同 test 环境；生产价格表到位后整表补 price_id，tms_name 以生产价格表为准（名称可能不同）。
 # 缺本文件/加载失败 → 启动 fail fast（不允许裸跑）；补值只改 YAML，零代码。
-freight:     { tms_name: 运费,     price_id: null }
-pre_pick:    { tms_name: 预提费,   price_id: null }
-fuel:        { tms_name: 油费,     price_id: null }
-trip:        { tms_name: 出车费,   price_id: null }
-hijack:      { tms_name: 打劫费,   price_id: null }
+# 2026-08-31 起 5 个实证 id 自 test 表同步（同一 TMS，price_id 全局唯一跨通道通用）：
+# 不补则这 5 项主力费目因自举从未建档（yaml 优先命中）在 registry 无兜底 → 录不进。
+freight:     { tms_name: 运费,     price_id: 820 }     # 实证（下单抓包+EX26081252）
+pre_pick:    { tms_name: 预提费,   price_id: 121744 }  # 实证（跨通道同 id 复用）
+fuel:        { tms_name: 油费,     price_id: 1134 }    # 实证（get/pay/supplier 三通道同现）
+trip:        { tms_name: 出车费,   price_id: 821 }     # 实证
+hijack:      { tms_name: 打劫费,   price_id: 1135 }    # 实证；竞品样本中未出现，先登记防长尾撞上
 waiting:     { tms_name: 待时费,   price_id: null }
 pre_inport:  { tms_name: 预进港,   price_id: null }
 drop_box:    { tms_name: 落箱费,   price_id: null }

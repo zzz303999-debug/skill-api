@@ -569,6 +569,24 @@ class TestCreateOrders:
             "error": None,
         }
 
+    def test_dedup_different_sk_submits_again(self, urls, monkeypatch):
+        """异 sk（不同操作员）重导同一提单号 → 不命中注册表，照常提交（2026-08-31 起）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080001"}]},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080002"}]},
+            ],
+        )
+        first = [make_order()]
+        create_orders(first, "sk-a")
+        assert first[0].create_result["success"] is True
+        second = [make_order()]
+        create_orders(second, "sk-b")
+        assert calls["addwork"] == 2
+        assert second[0].create_result["success"] is True
+        assert second[0].create_result.get("skipped") is None  # 真实新建，非 skipped
+
     def test_dedup_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """失败单不登记：修正后重导照常再次提交（不被误拦）。"""
         calls = self._patch_chain(
@@ -707,6 +725,24 @@ class TestCreateCanonicalOrdersDedup:
             "sn": "EX1",
             "error": None,
         }
+
+    def test_different_sk_same_bl_submits_again(self, urls, monkeypatch):
+        """TMS 通道：异 sk 重导同一提单号 → 照常提交、各自登记（2026-08-31 起）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "200", "data": [{"sn": "EX1", "o_id": "2101"}]},
+                {"code": "200", "data": [{"sn": "EX2", "o_id": "2102"}]},
+            ],
+        )
+        first = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(first, "sk-a")
+        assert first[0].create_result["success"] is True
+        second = [self._make_canonical("OOLU12345678")]
+        create_canonical_orders(second, "sk-b")
+        assert calls["submit"] == 2
+        assert second[0].create_result["success"] is True
+        assert second[0].create_result.get("skipped") is None  # 真实新建，非 skipped
 
     def test_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """TMS 通道：失败单不登记，重导照常提交。"""

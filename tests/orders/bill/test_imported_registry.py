@@ -1,8 +1,11 @@
 """成功单注册表测试：register/lookup/snapshot/clear、损坏容错、键规范化
-（strip + upper）、per-bl_no 锁同键互斥异键并行（重复上传去重方案一）。"""
+（strip + upper）、per-bl_no 锁同键互斥异键并行（重复上传去重方案一，
+2026-08-31 起按 (提单号, sk) 维度：同 owner 幂等、异 owner 放行、
+旧版全局条目迁移 legacy 槽位不再拦截）。"""
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 
@@ -12,7 +15,12 @@ from app.orders.bill.imported_registry import (
     ImportedOrderRegistry,
     lock_for,
     normalize,
+    owner_key,
 )
+
+# 测试用去重维度键（真实链路由 owner_key(sk) 计算，这里固定可读）
+OWNER_A = owner_key("sk-a")
+OWNER_B = owner_key("sk-b")
 
 
 @pytest.fixture()
@@ -30,33 +38,59 @@ class TestNormalize:
         assert normalize("") == ""
 
 
+class TestOwnerKey:
+    def test_deterministic_and_distinct(self):
+        """同 sk 稳定、异 sk 不同（去重维度键的前提）。"""
+        assert owner_key("sk-a") == OWNER_A
+        assert owner_key("sk-a") != OWNER_B
+        assert len(OWNER_A) == 16
+
+    def test_empty_sk_still_hashed(self):
+        """空 sk 也产生稳定键（防御：create 模式 sk 缺失已被上层 400 拦截）。"""
+        assert owner_key("") == owner_key("")
+        assert owner_key("") != OWNER_A
+
+
 class TestRegistry:
     def test_register_and_lookup(self, registry):
-        rec = registry.register("OOLU12345", sn="EX1", source_sha256="abc")
+        rec = registry.register("OOLU12345", OWNER_A, sn="EX1", source_sha256="abc")
         assert rec["sn"] == "EX1"
         assert rec["source_sha256"] == "abc"
         assert rec["created_at"]
         # 查询键大小写/首尾空白不敏感（与登记键规范化一致）
-        found = registry.lookup("  oolu12345 ")
+        found = registry.lookup("  oolu12345 ", OWNER_A)
         assert found["sn"] == "EX1"
 
     def test_lookup_miss(self, registry):
-        assert registry.lookup("NOPE") is None
-        assert registry.lookup("") is None
+        assert registry.lookup("NOPE", OWNER_A) is None
+        assert registry.lookup("", OWNER_A) is None
+        assert registry.lookup("OOLU1", "") is None
 
     def test_register_idempotent_sn_kept(self, registry):
-        """同键重复登记以首次为准（sn 不回退，并发下后到者不覆盖）。"""
-        registry.register("OOLU1", sn="EX1")
-        registry.register("OOLU1", sn="EX2")
-        assert registry.lookup("OOLU1")["sn"] == "EX1"
+        """同 (bl_no, owner) 重复登记以首次为准（sn 不回退，并发下后到者不覆盖）。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1")
+        registry.register("OOLU1", OWNER_A, sn="EX2")
+        assert registry.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
+
+    def test_different_owner_same_bl_allowed(self, registry):
+        """同提单号异 owner 各自独立登记/查询（2026-08-31 起：不同操作员可各导一次）。"""
+        registry.register("OOLU1", OWNER_A, sn="EX1")
+        assert registry.lookup("OOLU1", OWNER_B) is None  # 异 owner 不命中
+        rec_b = registry.register("OOLU1", OWNER_B, sn="EX2")
+        assert rec_b["sn"] == "EX2"  # 异 owner 首登不被 first-write-wins 拦截
+        assert registry.lookup("OOLU1", OWNER_A)["sn"] == "EX1"  # A 的记录不回退
+        snapshot = registry.snapshot()
+        assert set(snapshot["OOLU1"]) == {OWNER_A, OWNER_B}
 
     def test_register_requires_key(self, registry):
         with pytest.raises(ValueError):
-            registry.register("", sn="EX1")
+            registry.register("", OWNER_A, sn="EX1")
+        with pytest.raises(ValueError):
+            registry.register("OOLU1", "", sn="EX1")
 
     def test_snapshot_and_clear(self, registry):
-        registry.register("A1", sn="EX1")
-        registry.register("B2", sn="EX2")
+        registry.register("A1", OWNER_A, sn="EX1")
+        registry.register("B2", OWNER_B, sn="EX2")
         assert set(registry.snapshot()) == {"A1", "B2"}
         registry.clear()
         assert registry.snapshot() == {}
@@ -67,15 +101,44 @@ class TestRegistry:
         path.write_text("{corrupt json", encoding="utf-8")
         reg = ImportedOrderRegistry(path)
         assert reg.snapshot() == {}
-        reg.register("OOLU1", sn="EX1")  # 损坏文件上可继续登记（原子写修复）
-        assert reg.lookup("OOLU1")["sn"] == "EX1"
+        reg.register("OOLU1", OWNER_A, sn="EX1")  # 损坏文件上可继续登记（原子写修复）
+        assert reg.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
 
     def test_reload_from_disk(self, tmp_path):
         """新实例（进程重启语义）加载磁盘登记，跨批次持久化。"""
         path = tmp_path / "imported_orders.json"
-        ImportedOrderRegistry(path).register("OOLU1", sn="EX1")
+        ImportedOrderRegistry(path).register("OOLU1", OWNER_A, sn="EX1")
         reg2 = ImportedOrderRegistry(path)
-        assert reg2.lookup("OOLU1")["sn"] == "EX1"
+        assert reg2.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
+
+    def test_legacy_global_entry_not_blocking(self, tmp_path):
+        """旧版全局条目（顶层含 sn）加载 → 迁移 legacy 槽位，不匹配任何 sk。
+
+        生产误拦解封路径：存量记录保留可审计，但任何 owner 查询都不再命中。
+        """
+        path = tmp_path / "imported_orders.json"
+        path.write_text(
+            json.dumps(
+                {"OOLU1": {"sn": "EX9", "source_sha256": "abc", "created_at": "2026-08-30T00:00:00Z"}}
+            ),
+            encoding="utf-8",
+        )
+        reg = ImportedOrderRegistry(path)
+        assert reg.lookup("OOLU1", OWNER_A) is None
+        assert reg.lookup("OOLU1", OWNER_B) is None
+        # legacy 记录保留在快照中（可审计），且同 owner 首登照常登记
+        owners = reg.snapshot()["OOLU1"]
+        assert owners["legacy"]["sn"] == "EX9"
+        reg.register("OOLU1", OWNER_A, sn="EX1")
+        assert reg.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
+
+    def test_malformed_owner_entry_dropped(self, tmp_path):
+        """新版结构里非对象条目 → 丢弃（对齐旧容错口径）。"""
+        path = tmp_path / "imported_orders.json"
+        path.write_text(json.dumps({"OOLU1": {OWNER_A: "not-a-dict"}}), encoding="utf-8")
+        reg = ImportedOrderRegistry(path)
+        assert reg.snapshot() == {"OOLU1": {}}
+        assert reg.lookup("OOLU1", OWNER_A) is None
 
 
 class TestLockFor:

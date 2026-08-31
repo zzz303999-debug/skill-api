@@ -314,6 +314,25 @@ class TestCreateMode:
         # 路由层转 409；不得误报 204 添加失败）
         assert second.upstream is None
 
+    def test_dedup_different_sk_not_skipped(self, monkeypatch):
+        """异 sk（不同操作员）导入同一账单：不命中注册表，照常创建（2026-08-31 起）。
+
+        去重维度从提单号全局改为 (提单号, sk)：A 创建后 B 导入不再被误拦，
+        各自真实下单、各自登记。
+        """
+        calls = {"addwork": 0}
+        self._fake_ok_chain(monkeypatch, calls)
+        file_bytes = self._junyu_file()
+        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk-a")
+        assert calls["addwork"] == 2
+        other = build_result(
+            filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk-b"
+        )
+        assert other.summary["skipped"] == 0
+        assert other.summary["created"] == 2
+        assert calls["addwork"] == 4  # 异 sk 各自真实下单
+        assert all(not o.create_result.get("skipped") for o in other.canonical_orders)
+
     def test_dedup_failed_not_registered_retry_creates(self, monkeypatch):
         """失败单不登记：重导时失败单正常创建（修正后重导不被误拦）。"""
         calls = {"addwork": 0}

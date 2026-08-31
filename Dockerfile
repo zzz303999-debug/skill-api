@@ -28,6 +28,11 @@ COPY pyproject.toml uv.lock README.md /app/
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app /app/app
+# 运行时配置与账单模板库：fee_price_map 是 fail fast（缺文件直接 500），
+# box_whitelist/master_data 缺失会静默降级（白名单失效/建档禁用），templates
+# 缺失则模板识别全走 LLM——三者都必须随镜像分发（2026-08-31 生产事故根因）
+COPY config /app/config
+COPY templates /app/templates
 RUN uv sync --frozen --no-dev --no-editable
 
 EXPOSE 9000

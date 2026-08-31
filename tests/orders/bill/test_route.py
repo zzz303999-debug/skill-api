@@ -7,9 +7,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import app.orders.bill.ai_header as ai_header_module
 import app.orders.bill.client as client_module
 import app.orders.bill.service as service_module
 from app.config import settings
+from app.errors import ERROR_CODE_DESCRIPTIONS
 from app.main import app
 from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
 
@@ -881,3 +883,88 @@ class TestDedupConflict:
         assert body["data"]["summary"]["created"] == 0
         assert body["data"]["summary"]["skipped"] == REAL_ORDER_COUNT
         assert calls["addwork"] == REAL_ORDER_COUNT  # 重导不再调用下游
+
+
+# ---- AI 表头映射链路集成（L3 未命中 → map_header → 统一外壳 400）----
+# conftest autouse 默认 chat_json 抛 LLMError（回退精确匹配）；此处用例显式
+# monkeypatch 覆盖，验证「AI 映射校验失败 → BadRequestError(header_mapping_rejected)
+# → 路由统一外壳」与「LLM 不可用 → 回退精确匹配 → bad_request」两条贯通链路。
+
+
+def _build_hetero_bill(tmp_path) -> Path:
+    """异构表头账单（模板库不命中，触发 L3 AI 映射）：无箱型列 + 无客户编号列。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["序号", "客户名称", "提单号", "日期"])
+    ws.append([1, "测试客户", "OOLU1234567", "1-5"])
+    ws.append([2, "测试客户", "OOLU7654321", "1-6"])
+    buf = BytesIO()
+    wb.save(buf)
+    path = tmp_path / "hetero-ai.xlsx"
+    path.write_bytes(buf.getvalue())
+    return path
+
+
+def test_header_mapping_rejected_unified_envelope_400(monkeypatch, tmp_path):
+    """AI 映射校验失败（缺必映射字段 box_type_qty）→ 400 统一外壳三字段。
+
+    贯通链路：异构表头 → 模板未命中 → map_header（LLM mock 返回缺字段映射）
+    → 校验闸门拒绝 → BadRequestError(header_mapping_rejected) → 路由统一外壳
+    {code, msg, data}；msg 对照 errors.py 注册表客服文案，不硬编码。
+    """
+    calls = {"n": 0}
+
+    def fake_chat_json(messages, **_kwargs):
+        calls["n"] += 1
+        return (
+            {
+                "header_row": 1,
+                "two_row": False,
+                "fee_boundary": "column_range",
+                "mapping": [
+                    {"col": 1, "target": "ignore"},
+                    {"col": 2, "target": "customer_name"},
+                    {"col": 3, "target": "bl_no"},
+                    {"col": 4, "target": "order_date"},
+                ],
+                "confidence": 0.95,
+            },
+            {"model": "fake", "usage": None},
+        )
+
+    monkeypatch.setattr(ai_header_module, "chat_json", fake_chat_json)
+    path = _build_hetero_bill(tmp_path)
+    with TestClient(app) as client:
+        r = upload(client, path.name, path.read_bytes())
+    assert r.status_code == 400
+    body = r.json()
+    # 统一外壳三字段（v2.2 起错误场景同构）
+    assert set(body) == {"code", "msg", "data"}
+    assert body["code"] == "header_mapping_rejected"
+    assert body["msg"] == ERROR_CODE_DESCRIPTIONS["header_mapping_rejected"]
+    details = body["data"]
+    assert any("box_type_qty" in reason for reason in details["failure_reasons"])
+    assert details["ai_mapping"]["mapping"][2]["target"] == "bl_no"
+    assert details["header_zone"][0].startswith("1 |")
+    assert calls["n"] == 1  # 仅一次 LLM 调用
+
+
+def test_llm_unavailable_falls_back_exact_400(tmp_path):
+    """LLM 不可用 → 回退精确匹配（找不到表头）→ 400 bad_request 而非映射拒绝。
+
+    贯通链路：异构表头 → 模板未命中 → map_header 抛 LLMError（conftest 默认）
+    → parser 回退 _parse_exact → 无「客户编号/提单号」表头行 → 400 bad_request；
+    验证 LLM 故障不产生 500（降级而非崩溃）。
+    """
+    path = _build_hetero_bill(tmp_path)
+    with TestClient(app) as client:
+        r = upload(client, path.name, path.read_bytes())
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "bad_request"
+    assert "required_headers" in body["data"]
+    assert "missing_headers" in body["data"]

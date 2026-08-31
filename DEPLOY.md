@@ -74,6 +74,12 @@ chmod 600 .env
   必须携带 `Authorization: Bearer <API_KEY>` 或 `X-API-Key: <API_KEY>`；
   日志页面 `/logs` 首次访问会提示输入 API Key 并保存在浏览器本地
 - 完整变量清单见第 5 节；不用的功能（订单接口/MinerU）可保留默认值
+- **`APP_ENV` 必须按环境设置（2026-08-31 事故教训）**：决定加载
+  `config/fee_price_map.{env}.yaml`，默认 `test`；生产必须显式设
+  `APP_ENV=prod`，否则费目映射表缺失/错位，账单导入
+  （`/orders/bill/import`）会 500 `internal_error`
+  （fail fast：`fee price map missing`）；
+  同时箱型白名单、建档配置随镜像分发，缺失时会静默降级（见第 12 节）
 
 ### 4.2 方式 A：镜像部署
 
@@ -401,6 +407,7 @@ curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
 
 - 当前版本**无强持久化需求**：存储目录 `/app/storage`（compose 已挂载 `./storage`），用于临时文件与请求日志
 - `STORAGE_KEEP_HOURS=24` 自动清理过期临时文件；请求日志按天分文件（`requests-YYYY-MM-DD.jsonl`），过期文件按日志时间整文件清理
+- `config/`（费目映射/箱型白名单/建档配置）与 `templates/`（账单模板库）随镜像分发（Dockerfile COPY）；`docker-compose.deploy.yml` 另挂载 `./templates` 使 L3 固化模板跨重启持久——**挂载要求部署目录为 git 检出**（templates/ 内容与镜像一致，勿用空目录覆盖）；未挂载场景（如 K8s）容器重启后固化模板丢失，自动回退 AI 映射，功能不坏
 - 建议定期备份：`./storage` 目录 + `.env` 文件
 
 ## 13. 上线验收
@@ -437,6 +444,14 @@ curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
 - 服务已启用 `API_KEY` 鉴权：确认请求头携带 `Authorization: Bearer <API_KEY>` 或 `X-API-Key: <API_KEY>`（`Bearer` 后有空格）
 - 确认 `.env` 中 `API_KEY` 与调用方使用的值一致，修改后需重启容器生效
 - `/healthz` 等豁免路径不受影响（见第 11 节）
+
+### 账单导入返回 500 internal_error
+- 日志搜 `unhandled_error`：若为 `fee price map missing: fee_price_map.<env>.yaml`，
+  即镜像缺 `config/`（2026-08-31 修复前镜像的已知缺陷）或 `.env` 的 `APP_ENV`
+  与镜像内文件不匹配——确认镜像已更新 + `APP_ENV` 设置正确
+- 确认配置齐全：`docker exec <container> ls /app/config /app/templates`；
+  日志出现 `box_whitelist_unavailable`/`templates_dir_missing`/`master_data_config_missing`
+  即对应配置缺失（白名单失效/模板识别退化/建档禁用），按上一条处理
 
 ### 调用超时
 - LLM 抽取本身耗时 10-60s 属正常

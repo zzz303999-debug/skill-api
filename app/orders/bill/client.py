@@ -9,10 +9,12 @@
 - 任何情况不自动重试（防重复下单）；单失败不影响后续订单
 - 超时/网络异常 → 该单 error（order_upstream_error），不中断整批
 - missing_fields 非空的单照常提交（本服务不拦截）
-- 重复上传去重（成功单注册表）：提交前查 imported_registry（per-bl_no 锁包住
-  「查重→提交→登记」临界区），命中 → skipped（不调下游，sn 回显首次创建）；
-  提交成功才登记（登记失败仅日志不冒泡）；无提单号单不查不登照常提交；
-  service 层预判已标记 skipped 的单直接跳过（create_result 非 None）
+- 重复上传去重（成功单注册表，2026-08-31 起按 (提单号, sk) 维度）：同一 sk 重导
+  已成功单 → skipped（不调下游，sn 回显首次创建）；不同 sk 各自可导（生产
+  误拦修正）。提交前查 imported_registry（per-bl_no 锁包住「查重→提交→登记」
+  临界区，owner=sk 哈希不落盘 token 原文）；提交成功才登记（登记失败仅日志
+  不冒泡）；无提单号单不查不登照常提交；service 层预判已标记 skipped 的单
+  直接跳过（create_result 非 None）
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from app.config import settings
 from app.logging_conf import get_logger
 
 from ..http_client import post_form, unpack_json
-from .imported_registry import get_imported_registry, lock_for, normalize
+from .imported_registry import get_imported_registry, lock_for, normalize, owner_key
 from .schema import BillOrder
 
 log = get_logger(__name__)
@@ -312,14 +314,14 @@ def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
     return _parse_create_response(response, step="AddWork")
 
 
-def _register_imported(bl_no: str, sn, source_sha256: str | None) -> None:
-    """登记创建成功单（去重注册表）；登记失败仅记日志，不冒泡。
+def _register_imported(bl_no: str, owner: str, sn, source_sha256: str | None) -> None:
+    """登记创建成功单（去重注册表，owner=sk 哈希）；登记失败仅记日志，不冒泡。
 
     单已真实创建，登记失败（磁盘满/权限等）不应使响应变失败——丢失记录的
     后果是重导可能重复下单（见 imported_registry 模块 docstring）。
     """
     try:
-        get_imported_registry().register(bl_no, sn=sn, source_sha256=source_sha256)
+        get_imported_registry().register(bl_no, owner, sn=sn, source_sha256=source_sha256)
     except Exception as exc:  # noqa: BLE001 - 防御：登记失败不使成功单变失败
         log.warning(
             "imported_register_failed",
@@ -343,6 +345,7 @@ def create_orders(orders: list[BillOrder], sk: str, source_sha256: str | None = 
     if not orders:
         return
     submit = add_work
+    owner = owner_key(sk)
     for order in orders:
         if order.create_result is not None:
             continue  # service 层预判已标记 skipped → 直接跳过
@@ -351,13 +354,13 @@ def create_orders(orders: list[BillOrder], sk: str, source_sha256: str | None = 
             order.create_result = submit(sk, order.order_data or {})
             continue
         with lock_for(bl):
-            rec = get_imported_registry().lookup(bl)
+            rec = get_imported_registry().lookup(bl, owner)
             if rec:
                 order.create_result = _skipped_result(rec.get("sn"))
                 continue
             order.create_result = submit(sk, order.order_data or {})
             if order.create_result.get("success"):
-                _register_imported(bl, order.create_result.get("sn"), source_sha256)
+                _register_imported(bl, owner, order.create_result.get("sn"), source_sha256)
 
 
 def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
@@ -463,6 +466,7 @@ def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -
     """
     if not orders:
         return
+    owner = owner_key(sk)
     for order in orders:
         if order.create_result is not None:
             continue  # service 层预判已标记 skipped → 直接跳过
@@ -471,10 +475,10 @@ def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -
             order.create_result = submit_canonical(sk, order)
             continue
         with lock_for(bl):
-            rec = get_imported_registry().lookup(bl)
+            rec = get_imported_registry().lookup(bl, owner)
             if rec:
                 order.create_result = _skipped_result(rec.get("sn"))
                 continue
             order.create_result = submit_canonical(sk, order)
             if order.create_result.get("success"):
-                _register_imported(bl, order.create_result.get("sn"), source_sha256)
+                _register_imported(bl, owner, order.create_result.get("sn"), source_sha256)

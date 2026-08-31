@@ -328,18 +328,20 @@ def build_result(
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
-    # 重复上传去重预判（成功单注册表，方案一）：create 模式先查已成功提单号，
-    # 命中即标记 skipped（只查不登；登记在提交成功后由 client 完成）。计数/自举/
+    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号, sk) 维度）：
+    # create 模式先查同一 sk 已成功提单号，命中即标记 skipped（只查不登；登记在
+    # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。计数/自举/
     # 费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
     if create_order:
-        from .imported_registry import get_imported_registry, normalize
+        from .imported_registry import get_imported_registry, normalize, owner_key
 
         _imported = get_imported_registry()
+        _owner = owner_key(sk)
         for order in (*canonical_orders, *orders):
             bl = normalize(
                 getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
             )
-            if bl and (rec := _imported.lookup(bl)):
+            if bl and (rec := _imported.lookup(bl, _owner)):
                 order.create_result = {
                     "success": True,
                     "skipped": True,

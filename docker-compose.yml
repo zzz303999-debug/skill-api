@@ -15,6 +15,9 @@ services:
         condition: service_healthy
     volumes:
       - ./storage:/app/storage
+      # L3 固化模板持久化（与 docker-compose.deploy.yml 同口径）：依赖部署
+      # 目录为 git 检出，勿用空目录覆盖
+      - ./templates:/app/templates
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
       interval: 30s
