@@ -96,3 +96,21 @@ def _col_index(letter: str) -> int:
 def go(rows, period):
     """group_orders 便捷包装：只取 orders（reconciliation 由对账测试单独验证）。"""
     return group_orders(rows, period).orders
+
+
+def inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
+    """注入临时费目映射表（真实表 deepcopy + 覆盖指定码 price_id）。
+
+    锁定「null → 自举建档 / 降级」场景：2026-09-01 起真实表全量补实证 id，
+    相关机制测试改由配置注入驱动，与真实配置值解耦（monkeypatch teardown
+    自动恢复函数；缓存由各文件 fixture 重置）。
+    """
+    import copy
+
+    from app.orders.bill import fee_price_map
+
+    real = copy.deepcopy(fee_price_map.load_price_map())
+    for code, pid in overrides.items():
+        entry = real.setdefault(code, {"tms_name": code, "price_id": pid, "import": True})
+        entry["price_id"] = pid
+    monkeypatch.setattr(fee_price_map, "load_price_map", lambda: real)

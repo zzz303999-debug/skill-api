@@ -31,7 +31,7 @@ from app.orders.bill.fee_price_map import apply_price_map
 from app.orders.bill.fee_registry import get_registry
 from app.orders.bill.master_data import collect_candidates
 from app.orders.bill.payload import build_order_payload
-from helpers import FakeResponse
+from helpers import FakeResponse, inject_price_map
 
 # ---- 最小混合类别模板（单行表头 + fees.ranges 区块分界，仿赢辉家族） ----
 
@@ -202,8 +202,9 @@ class TestFourCategoryAggregation:
         assert by_kind["driver"].phone == "13800000000"
         assert by_kind["driver"].plate == "沪A12345"
 
-    def test_fee_column_bootstrap_planned(self, mixed_bill, tmp_path):
+    def test_fee_column_bootstrap_planned(self, mixed_bill, tmp_path, monkeypatch):
         """费用栏目：缺失费目码进自举计划（有 price_id 的费目不重复建）。"""
+        inject_price_map(monkeypatch, {"other": None, "waiting": None})
         _, orders = parse_mixed(mixed_bill, tmp_path)
         planned = run_fee_bootstrap(orders, create_order=False)
         assert planned["mode"] == "preview"
@@ -226,9 +227,11 @@ class TestFourCategoryAggregation:
 class TestFieldMapping:
     """字段映射断言（重点：财务四类费用字段 Excel 列 → 接口入参）。"""
 
-    def test_four_channel_form_mapping(self, mixed_bill, tmp_path):
+    def test_four_channel_form_mapping(self, mixed_bill, tmp_path, monkeypatch):
         """Excel 费用列 → FeeItem → form 键（shou/pay/cost 通道 + 合计回写）。"""
+        # 注入 waiting/other 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
         # 预登记待建费目（模拟自举成功后），保证四通道全部可发射
+        inject_price_map(monkeypatch, {"waiting": None, "other": None})
         reg = get_registry()
         reg.register("waiting", 90001, "待时费")
         reg.register("other", 90002, "其它费")
@@ -487,6 +490,8 @@ class TestE2EMock:
     ):
         # 恢复真实 create_archives（conftest 全局 mock 是零网络兜底），httpx 层统一 mock
         monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
+        # 注入 waiting/other 无 id：触发费目自举建档（2026-09-01 真实表已补值）
+        inject_price_map(monkeypatch, {"waiting": None, "other": None})
         state = {"addwork": 0, "price": 0, "archives": []}
         price_ids = iter([88801, 88802])
         addwork_forms: list[dict] = []

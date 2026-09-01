@@ -28,6 +28,14 @@ from app.orders.bill.fee_bootstrap import (
 from app.orders.bill.fee_price_map import apply_price_map
 from app.orders.bill.fee_registry import get_registry
 from app.orders.bill.master_data import KIND_PRICE
+from helpers import inject_price_map
+
+# 旧版（2026-09-01 补值前）真实表中无 id 的费目码全集：注入 None 锁定自举场景
+_LEGACY_NULL_CODES = [
+    "amend", "damage_box", "deduction", "drop_box", "inspect", "lift",
+    "move", "other", "overdue", "overweight", "port_misc", "pre_inport",
+    "tally", "waiting", "weigh", "yangshan",
+]
 
 FAMILIES_DIR = (
     Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"
@@ -617,12 +625,14 @@ class TestGoldenBootstrap:
     @pytest.mark.skipif(
         not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
     )
-    def test_qiuyi_preview_planned_only(self):
+    def test_qiuyi_preview_planned_only(self, monkeypatch):
         """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。
 
         用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
         2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
+        注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
+        inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
         path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
         if not path.exists():
             pytest.skip("秋怡 2017 样本缺失")
@@ -645,7 +655,9 @@ class TestGoldenBootstrap:
 
         用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
         2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
+        注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
+        inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
         path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
         if not path.exists():
             pytest.skip("秋怡 2017 样本缺失")

@@ -26,13 +26,12 @@ tally:       { tms_name: 理货费,   price_id: 124835 }
 move:        { tms_name: 搬移费,   price_id: 124841 }
 lift:        { tms_name: 上下车费, price_id: 124840 }
 port_misc:   { tms_name: 港杂费,   price_id: 124846 }
-tax:         { tms_name: 税金,     price_id: 125466, import: false }  # 不录入仅对账，id 补全保持数据完整
+tax:         { tms_name: 税金,     price_id: 125466 }  # 2026-09-01 用户拍板：账单中的税金照录（原 import:false 仅对账作废）
 other:       { tms_name: 其它费,   price_id: 124832 }  # to_other 长尾归并目标（is_other=1）
-crane:       { tms_name: 吊机费,   price_id: null }      # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）；TMS 尚不存在，留 null 走自举建档
+# crane（吊机费）已移除：TMS 尚无此费目、无 id 可补；账单中的吊机费自动归「其它费」照录。
+# 自举实弹验证入口保留在 test 表；验证通过后在 TMS 建档拿到 id，再把 crane 行加回本表补值。
 
-# 费目自举（T24/T25）：生产默认关闭——价格表由 运维管控，自举属越权行为，需显式开启。
-# 2026-08-31 用户拍板：开启生产自举（懒创建 + registry 幂等 + 204 已存在标记外部
-# exists_external 不再重试 + 失败降级不阻塞下单，风险受控）；结构已与 test 对齐。
+# 费目自举
 fee_bootstrap:
   enabled: true
   endpoint_key: price_create

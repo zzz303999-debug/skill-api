@@ -29,6 +29,7 @@ from app.orders.bill import (
 from app.orders.bill.fee_map import canonicalize_fee, reload_fee_alias_dictionary
 from app.orders.bill.fee_price_map import apply_price_map, reload_price_map
 from app.orders.bill.payload import build_order_payload
+from helpers import inject_price_map
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"
 
@@ -79,6 +80,17 @@ def _make_order(fees: list[FeeItem] | None = None, bl_no: str = "BL12345678") ->
     )
 
 
+def _inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
+    """注入临时映射表（真实表 deepcopy + 覆盖指定码 price_id），锁定降级场景。
+
+    2026-09-01 起真实表全量补实证 id，「null → 降级」机制改由配置注入锁定，
+    与真实配置值解耦（monkeypatch teardown 自动恢复函数，缓存 fixture 重置表）。
+    2026-09-01 起实现上移至 helpers.inject_price_map（三文件共享）。
+    """
+
+    inject_price_map(monkeypatch, overrides)
+
+
 class TestCanonicalizeFee:
     """T10 归一三级解析：mapping > 全局字典 > unmapped_fee 策略。"""
 
@@ -121,16 +133,18 @@ class TestPriceMap:
         assert updated[0].price_id is not None
         assert dropped == []
 
-    def test_null_price_id_downgrades_to_excluded(self):
+    def test_null_price_id_downgrades_to_excluded(self, monkeypatch):
         """price_id null → 该条降级（excluded，不录入、进报告），不阻塞整单。"""
+        _inject_price_map(monkeypatch, {"waiting": None})
         fee = FeeItem(channel="shou", code="waiting", money=Decimal("50.00"))
         (updated, dropped) = apply_price_map([fee])
         assert updated[0].excluded is True
         assert len(dropped) == 1
         assert dropped[0]["code"] == "waiting" and dropped[0]["reason"] == "price_id null"
 
-    def test_other_null_downgrades_all_to_other(self):
-        """other.price_id null 且存在 to_other 项 → 全部降级（其它费存在性待确认）。"""
+    def test_other_null_downgrades_all_to_other(self, monkeypatch):
+        """other.price_id null 且存在 to_other 项 → 全部降级（长尾无归并目标）。"""
+        _inject_price_map(monkeypatch, {"other": None})
         fees = [
             FeeItem(channel="shou", code="other", money=Decimal("6.00"), note="高速费"),
             FeeItem(channel="shou", code="freight", money=Decimal("100.00")),

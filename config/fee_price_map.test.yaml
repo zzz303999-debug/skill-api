@@ -7,33 +7,29 @@ pre_pick:    { tms_name: 预提费,   price_id: 121744 }   # 实证（跨通道�
 fuel:        { tms_name: 油费,     price_id: 1134 }     # 实证（get/pay/supplier 三通道同现）
 trip:        { tms_name: 出车费,   price_id: 821 }      # 实证
 hijack:      { tms_name: 打劫费,   price_id: 1135 }     # 实证；竞品样本中未出现，先登记防长尾撞上
-waiting:     { tms_name: 待时费,   price_id: null }
-pre_inport:  { tms_name: 预进港,   price_id: null }
-drop_box:    { tms_name: 落箱费,   price_id: null }     # 落/还箱费同目，名称以价格表为准
-amend:       { tms_name: 打单费,   price_id: null }     # TMS 侧是「打单费」还是「打/改单费」待确认
-yangshan:    { tms_name: 洋山费,   price_id: null }     # 洋山提/还若价格表分两项则拆码
-damage_box:  { tms_name: 坏污箱费, price_id: null }
-overdue:     { tms_name: 超期费,   price_id: null }
-overweight:  { tms_name: 超重费,   price_id: null }
-inspect:     { tms_name: 动检费,   price_id: null }
-weigh:       { tms_name: 过磅费,   price_id: null }
-tally:       { tms_name: 理货费,   price_id: null }
-move:        { tms_name: 搬移费,   price_id: null }
-lift:        { tms_name: 上下车费, price_id: null }
-port_misc:   { tms_name: 港杂费,   price_id: null }
-tax:         { tms_name: 税金,     price_id: null, import: false }  # 不录入仅对账，price_id 非必需
-other:       { tms_name: 其它费,   price_id: null }     # 硬依赖：to_other 归并目标，存在性+id 待确认
-deduction:    { tms_name: 扣除费,   price_id: null }     # T27a 负向扣减项（ 仅赢辉应付区），null → 自举建档
-crane:        { tms_name: 吊机费,   price_id: null }     # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）
+waiting:     { tms_name: 待时费,   price_id: 124844 }
+pre_inport:  { tms_name: 预进港,   price_id: 124834 }
+drop_box:    { tms_name: 落箱费,   price_id: 124843 }     # 落/还箱费同目
+amend:       { tms_name: 打单费,   price_id: 124839 }
+yangshan:    { tms_name: 洋山费,   price_id: 124833 }
+damage_box:  { tms_name: 坏污箱费, price_id: 124836 }
+overdue:     { tms_name: 超期费,   price_id: 124845 }
+overweight:  { tms_name: 超重费,   price_id: 124838 }
+inspect:     { tms_name: 动检费,   price_id: 124837 }
+weigh:       { tms_name: 过磅费,   price_id: 124842 }
+tally:       { tms_name: 理货费,   price_id: 124835 }
+move:        { tms_name: 搬移费,   price_id: 124841 }
+lift:        { tms_name: 上下车费, price_id: 124840 }
+port_misc:   { tms_name: 港杂费,   price_id: 124846 }
+tax:         { tms_name: 税金,     price_id: 125466 }  # 2026-09-01 与 prod 对齐：税金照录
+other:       { tms_name: 其它费,   price_id: 124832 }  # to_other 长尾归并目标（sn=AUTO_OTHER）
+deduction:    { tms_name: 扣除费,   price_id: 124850 }  # T27a 负向扣减项（赢辉应付区）
 
-# 费目自举（T24/T25，2026-08-14 定论）：测试环境价格表全量仅 7 费目，15 个标准费目与
-# 「其它费」均不存在——缺失费目码在导入命中时懒创建（建档接口见逆推规范 §8）。
-# enabled 按环境：test=true / prod=false（生产价格表由运维管控，自举需显式开启）。
-# endpoint_key 引用 config/master_data.yaml `master_data.endpoints` 的键名（复用，不重复配 URL）。
+# 费目自举（T24/T25）：缺失费目码在导入命中时懒创建并登记 id；表内 id 已全量补齐，此段为新增未知费目时的兜底。
 fee_bootstrap:
   enabled: true
   endpoint_key: price_create
-  create_defaults:         # 逆推规范 §8 最小字段集 + 抓包默认值（代码零硬编码）
+  create_defaults:         
     sn_prefix: AUTO
     inout: "3"
     is_get: on
