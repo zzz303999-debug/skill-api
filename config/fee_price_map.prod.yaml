@@ -8,23 +8,27 @@ pre_pick:    { tms_name: 预提费,   price_id: 121744 }  # 实证（跨通道�
 fuel:        { tms_name: 油费,     price_id: 1134 }    # 实证（get/pay/supplier 三通道同现）
 trip:        { tms_name: 出车费,   price_id: 821 }     # 实证
 hijack:      { tms_name: 打劫费,   price_id: 1135 }    # 实证；竞品样本中未出现，先登记防长尾撞上
-waiting:     { tms_name: 待时费,   price_id: null }
-pre_inport:  { tms_name: 预进港,   price_id: null }
-drop_box:    { tms_name: 落箱费,   price_id: null }
-amend:       { tms_name: 打单费,   price_id: null }
-yangshan:    { tms_name: 洋山费,   price_id: null }
-damage_box:  { tms_name: 坏污箱费, price_id: null }
-overdue:     { tms_name: 超期费,   price_id: null }
-overweight:  { tms_name: 超重费,   price_id: null }
-inspect:     { tms_name: 动检费,   price_id: null }
-weigh:       { tms_name: 过磅费,   price_id: null }
-tally:       { tms_name: 理货费,   price_id: null }
-move:        { tms_name: 搬移费,   price_id: null }
-lift:        { tms_name: 上下车费, price_id: null }
-port_misc:   { tms_name: 港杂费,   price_id: null }
-tax:         { tms_name: 税金,     price_id: null, import: false }
-other:       { tms_name: 其它费,   price_id: null }
-crane:       { tms_name: 吊机费,   price_id: null }      # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）
+# 2026-09-01 起其余 16 项实证 id 自测试期自举登记（storage/fee_registry.json）同步：
+# 同一 TMS 真实建档（sn=AUTO_* 前缀，2026-08-14 建），price_id 全局唯一跨通道通用。
+# 不补的原因：这些费目在 TMS 已存在 → 生产自举重建被 204 拒 → exists_external
+# 拿不到 id → 费用降级不录入（「其它费没录进去」的根因，T27b 设计边界）。
+waiting:     { tms_name: 待时费,   price_id: 124844 }
+pre_inport:  { tms_name: 预进港,   price_id: 124834 }
+drop_box:    { tms_name: 落箱费,   price_id: 124843 }
+amend:       { tms_name: 打单费,   price_id: 124839 }
+yangshan:    { tms_name: 洋山费,   price_id: 124833 }
+damage_box:  { tms_name: 坏污箱费, price_id: 124836 }
+overdue:     { tms_name: 超期费,   price_id: 124845 }
+overweight:  { tms_name: 超重费,   price_id: 124838 }
+inspect:     { tms_name: 动检费,   price_id: 124837 }
+weigh:       { tms_name: 过磅费,   price_id: 124842 }
+tally:       { tms_name: 理货费,   price_id: 124835 }
+move:        { tms_name: 搬移费,   price_id: 124841 }
+lift:        { tms_name: 上下车费, price_id: 124840 }
+port_misc:   { tms_name: 港杂费,   price_id: 124846 }
+tax:         { tms_name: 税金,     price_id: 125466, import: false }  # 不录入仅对账，id 补全保持数据完整
+other:       { tms_name: 其它费,   price_id: 124832 }  # to_other 长尾归并目标（is_other=1）
+crane:       { tms_name: 吊机费,   price_id: null }      # 2026-08-31 自举实弹验证用（AddCarPrice 建档链路）；TMS 尚不存在，留 null 走自举建档
 
 # 费目自举（T24/T25）：生产默认关闭——价格表由 运维管控，自举属越权行为，需显式开启。
 # 2026-08-31 用户拍板：开启生产自举（懒创建 + registry 幂等 + 204 已存在标记外部
