@@ -10,6 +10,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
+    UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
     PATH="/app/.venv/bin:$PATH"
 
 COPY --from=uv /uv /uvx /bin/
