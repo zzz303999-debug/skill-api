@@ -50,7 +50,7 @@ from app.orders import (
     publish_create_order,
 )
 from app.orders.bill import BillImportResponse, build_result
-from app.orders.manifest import ManifestParseResult, build_manifest_result
+from app.orders.manifest import ManifestImportResponse, build_manifest_result
 
 setup_logging()
 log = get_logger(__name__)
@@ -143,10 +143,14 @@ def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
 # 已适配路径全场景（成功/业务失败/请求错误）统一取 code/msg/data 三字段
 # （code 机器可读、msg 可直接展示的中文说明、data 为补充详情）：
 # - /orders/bill/import：账单录入（v2.2 起先行适配）
+# - /orders/manifest/import：舱单录入（2026-09-01 适配，成功 msg 为
+#   "请求成功"/"添加成功"/"204 具体原因"，错误场景 msg 为中文说明）
 # - /skills/tuoshu/extract：托书单文件抽取（2026-08-31 适配，data 内为
 #   {skill, version, result, meta, content?}，result 即原 data 抽取结果）
 # 其余接口保持 {error: {code, message, description, details}} 结构不变。
-_UNIFIED_RESPONSE_PATHS = frozenset({"/orders/bill/import", "/skills/tuoshu/extract"})
+_UNIFIED_RESPONSE_PATHS = frozenset(
+    {"/orders/bill/import", "/orders/manifest/import", "/skills/tuoshu/extract"}
+)
 
 
 def _use_unified_response(path: str) -> bool:
@@ -605,8 +609,8 @@ async def _validation_error_handler(
 
 @app.exception_handler(Exception)
 async def _generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """未包装异常兜底（审查修正 2026-08-27）：统一外壳路径（/orders/bill/import）
-    返回 {code, msg, data}（msg 可直接展示），避免调用方在意外异常（httpx
+    """未包装异常兜底（审查修正 2026-08-27）：统一外壳路径（_UNIFIED_RESPONSE_PATHS
+    内接口）返回 {code, msg, data}（msg 可直接展示），避免调用方在意外异常（httpx
     超时/解析器内部错误等）下拿到 FastAPI 默认 {"detail": ...} 破坏三字段契约；
     其余路径保持默认 {"detail": "Internal Server Error"} 行为不变。路由级
     404/405 由 Starlette 专用处理器处理不经过此处（统一路径 404/405 不可达，
@@ -1079,7 +1083,7 @@ async def import_bill(
 
 @app.post(
     "/orders/manifest/import",
-    response_model=ManifestParseResult,
+    response_model=ManifestImportResponse,
     tags=["orders"],
     summary="Import an English manifest and optionally create a TMS bill",
 )
@@ -1087,7 +1091,7 @@ async def import_manifest(
     file: Annotated[UploadFile, File()],
     request: Request,
     create_order: bool = Form(default=False),
-) -> ManifestParseResult:
+) -> ManifestImportResponse:
     """上传英文舱单（托书/SI，.xlsx），解析后预览或创建 TMS 舱单（addBill）。
 
     create_order 缺省 false（只预览不触达 TMS）；显式传 true 时创建舱单
@@ -1098,6 +1102,13 @@ async def import_manifest(
     箱型白名单复用账单导入同一份配置（config/box_type_whitelist.yaml）：
     任一单含白名单外标准码箱型 → 全部未决单拒绝（unknown_box_type），
     preview 亦拒绝、不调下游（对齐账单导入 v1.3 语义）。
+
+    响应统一外壳 {code, msg, data}（2026-09-01 适配，对齐账单录入口径）：
+    - code="200" msg="请求成功"：preview 成功（整批被拒时 msg 为具体原因）
+    - code="200" msg="添加成功"：create 创建成功
+    - code="204" msg="添加失败"：create 全部失败（msg 优先为具体拦截原因）
+    - HTTP 错误（400/401/413/422/429/503 等）同样套统一外壳：code 为机器可读
+      错误码、msg 为中文说明（可直接展示）、data 为详情（原 details）
     """
     sk = (request.headers.get("sk") or "").strip()
     if create_order and not sk:
@@ -1124,7 +1135,42 @@ async def import_manifest(
             sk=sk,
         )
     )
-    return result
+    # 统一响应外壳（code/msg/data，2026-09-01 适配账单口径）：
+    # - create 创建成功 → "200" msg="添加成功"
+    # - create 全部失败 → "204" msg=具体失败原因（箱型/多提单号/必填缺失等拦截
+    #   文案优先）或"添加失败"
+    # - preview → "200" msg="请求成功"；整批被拒（箱型/箱型缺失/多提单号）→
+    #   msg 给出具体原因（对齐账单 2026-08-27 修正口径），code 保持 "200"
+    #   （preview 未产生下游动作，语义不冲突）
+    if create_order and result.summary:
+        if result.summary["created"] > 0:
+            code, msg = "200", "添加成功"
+        else:
+            # 全部失败：优先取具体失败原因（箱型白名单/多提单号/必填缺失等拦截文案）
+            failed_msg = next(
+                (
+                    d.get("error_message")
+                    for d in result.summary["failed_details"]
+                    if d.get("error_message")
+                ),
+                None,
+            )
+            code, msg = "204", failed_msg or "添加失败"
+    else:
+        code, msg = "200", "请求成功"
+        # preview 整批被拒（一文件一票）：msg 给出具体原因而非笼统「请求成功」，
+        # 避免调用方误判为可录入；code 保持 "200"（preview 未产生下游动作）
+        rejected_msg = next(
+            (
+                (o.create_result or {}).get("error", {}).get("message")
+                for o in result.orders
+                if (o.create_result or {}).get("error")
+            ),
+            None,
+        )
+        if rejected_msg:
+            msg = rejected_msg
+    return ManifestImportResponse(code=code, msg=msg, data=result)
 
 
 def _make_extract_route(skill: SkillBase):

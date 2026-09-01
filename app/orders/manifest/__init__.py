@@ -9,6 +9,7 @@ from .schema import (
     MANIFEST_REQUIRED,
     ManifestBoxGroup,
     ManifestContainer,
+    ManifestImportResponse,
     ManifestOrder,
     ManifestParseResult,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "MANIFEST_REQUIRED",
     "ManifestBoxGroup",
     "ManifestContainer",
+    "ManifestImportResponse",
     "ManifestOrder",
     "ManifestParseOutput",
     "ManifestParseResult",
