@@ -9,9 +9,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
+    UV_DEFAULT_INDEX=https://mirrors.aliyun.com/pypi/simple \
     PATH="/app/.venv/bin:$PATH"
 
 COPY --from=uv /uv /uvx /bin/
+
+# 阿里云镜像源
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+        /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true
 
 # LibreOffice：.doc 转换需要；不装则 .doc 会走 SCAN_OR_IMAGE_HINT 分支
 # 如果确定不接 .doc 可去掉这段，镜像会小很多（~800MB）
@@ -28,9 +33,6 @@ COPY pyproject.toml uv.lock README.md /app/
 RUN uv sync --frozen --no-dev --no-install-project
 
 COPY app /app/app
-# 运行时配置与账单模板库：fee_price_map 是 fail fast（缺文件直接 500），
-# box_whitelist/master_data 缺失会静默降级（白名单失效/建档禁用），templates
-# 缺失则模板识别全走 LLM——三者都必须随镜像分发（2026-08-31 生产事故根因）
 COPY config /app/config
 COPY templates /app/templates
 RUN uv sync --frozen --no-dev --no-editable
