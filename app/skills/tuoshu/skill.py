@@ -117,7 +117,7 @@ async def _normalize_with_review_issue_repair(
     messages: list[dict],
     output_schema: dict,
 ) -> tuple[dict, dict]:
-    """_normalize_with_review_issue_repair 的异步版（repair 重试走 achat_json），
+    """_normalize_with_review_issue_repair（2026-09 异步化改造后为生产唯一入口）（repair 重试走 achat_json），
     其余逻辑逐行一致。"""
     try:
         return normalize_llm_output(data), meta

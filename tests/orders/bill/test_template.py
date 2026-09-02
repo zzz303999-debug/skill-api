@@ -20,12 +20,14 @@ import pytest
 
 import app.orders.bill.ai_header as ai_header_module
 from app.errors import BadRequestError
-from app.orders.bill import build_result, parse_bill
+from app.orders.bill import build_result_async, parse_bill
 from app.orders.bill.template import (
     BUILTIN_TEMPLATE,
     compute_fingerprint,
 )
 from helpers import REAL_XLS, build_bill_bytes, build_bill_xls_bytes
+
+pytestmark = pytest.mark.asyncio
 
 # 异构模板：列名全换（与金科信同构但名称完全不同）
 HETERO_HEADERS = {
@@ -82,7 +84,7 @@ def _write_hetero(tmp_path, rows: list[dict] | None = None) -> Path:
 class TestBuiltinTemplate:
     """内置模板（jinxin_v1.yaml）：指纹按真实表头 md5[:8] 计算，命中后不调 AI。"""
 
-    def test_fingerprint_matches_real_bill_header(self, real_parse):
+    async def test_fingerprint_matches_real_bill_header(self, real_parse):
         """真实账单解析命中的指纹即 jinxin 模板指纹（新算法按真实表头计算）。"""
         assert real_parse.template == {
             "fingerprint": "e31deea1",
@@ -96,7 +98,7 @@ class TestBuiltinTemplate:
         assert fp_md5(list(BUILTIN_HEADERS)) == "e31deea1"
         assert compute_fingerprint(list(BUILTIN_HEADERS)) == BUILTIN_TEMPLATE.fingerprint
 
-    def test_real_bill_no_ai_called(self, monkeypatch):
+    async def test_real_bill_no_ai_called(self, monkeypatch):
         """金科信真实账单指纹命中 → 直接模板映射，AI 调用次数 0。"""
         calls = _patch_ai(monkeypatch, AI_MAPPING_OK)
         output = parse_bill(REAL_XLS)
@@ -108,7 +110,7 @@ class TestBuiltinTemplate:
 class TestAiMapping:
     """L3 AI 映射（标准字段）：命中流程、四道校验闸门、new_fees 上报、候选固化。"""
 
-    def test_hetero_mapped_and_aggregated(self, tmp_path, monkeypatch):
+    async def test_hetero_mapped_and_aggregated(self, tmp_path, monkeypatch):
         """列名全换 → AI 映射 → 标准字段解析/归集结果正确，产出候选模板配置。"""
         path = _write_hetero(tmp_path)
         calls = _patch_ai(monkeypatch, AI_MAPPING_OK)
@@ -135,7 +137,7 @@ class TestAiMapping:
         assert orders[0].box_groups[0].b_type == "40HQ"
         assert orders[0].missing_fields == []
 
-    def test_missing_required_column_rejected(self, tmp_path, monkeypatch):
+    async def test_missing_required_column_rejected(self, tmp_path, monkeypatch):
         """AI 映射缺 bl_no → 400，details 含 AI 映射 / 失败原因 / 表头原文。"""
         path = _write_hetero(tmp_path)
         payload = dict(AI_MAPPING_OK)
@@ -151,7 +153,7 @@ class TestAiMapping:
         assert caught.value.details["ai_mapping"] == payload
         assert caught.value.details["header_zone"]
 
-    def test_fee_sample_numeric_ratio_rejected(self, tmp_path, monkeypatch):
+    async def test_fee_sample_numeric_ratio_rejected(self, tmp_path, monkeypatch):
         """费用列抽样数字率不达标（全中文金额）→ 400（不带着可疑映射跑）。"""
         path = tmp_path / "fee-text.xlsx"
         path.write_bytes(
@@ -166,7 +168,7 @@ class TestAiMapping:
         assert caught.value.code == "header_mapping_rejected"
         assert any("费用列" in r and "抽样" in r for r in caught.value.details["failure_reasons"])
 
-    def test_duplicate_field_mapping_rejected(self, tmp_path, monkeypatch):
+    async def test_duplicate_field_mapping_rejected(self, tmp_path, monkeypatch):
         """同一标准字段被两列重复映射 → 400（闸门 b）。"""
         path = _write_hetero(tmp_path)
         payload = {
@@ -185,7 +187,7 @@ class TestAiMapping:
         assert caught.value.code == "header_mapping_rejected"
         assert any("重复映射" in r for r in caught.value.details["failure_reasons"])
 
-    def test_header_row_shifted_rejected(self, tmp_path, monkeypatch):
+    async def test_header_row_shifted_rejected(self, tmp_path, monkeypatch):
         """header_row 错位（+1 吞掉全部数据行）→ 样本为空 → 400，不静默产出错行。"""
         path = tmp_path / "shifted.xlsx"
         path.write_bytes(build_bill_bytes(HETERO_HEADERS, [HETERO_ROWS[0]]))
@@ -197,7 +199,7 @@ class TestAiMapping:
         assert caught.value.code == "header_mapping_rejected"
         assert any("未找到含提单号的数据行" in r for r in caught.value.details["failure_reasons"])
 
-    def test_small_xls_header_row_out_of_bounds_rejected(self, tmp_path, monkeypatch):
+    async def test_small_xls_header_row_out_of_bounds_rejected(self, tmp_path, monkeypatch):
         """小行数 .xls（nrows=3）+ AI 幻觉返回 header_row=15 → 400 而非 500。
 
         修复前 xlrd 越界抛 IndexError 落全局 500；修复后上界取
@@ -221,7 +223,7 @@ class TestAiMapping:
             "header_row 非法" in r and "1..3" in r for r in caught.value.details["failure_reasons"]
         )
 
-    def test_small_xlsx_header_row_out_of_bounds_rejected(self, tmp_path, monkeypatch):
+    async def test_small_xlsx_header_row_out_of_bounds_rejected(self, tmp_path, monkeypatch):
         """同场景 .xlsx 对照：行为与 .xls 一致（400 header_mapping_rejected）。"""
         path = tmp_path / "small.xlsx"
         path.write_bytes(
@@ -239,7 +241,7 @@ class TestAiMapping:
         assert caught.value.code == "header_mapping_rejected"
         assert any("header_row 非法" in r for r in caught.value.details["failure_reasons"])
 
-    def test_new_fee_ignored_and_reported(self, tmp_path, monkeypatch):
+    async def test_new_fee_ignored_and_reported(self, tmp_path, monkeypatch):
         """白名单外费用（fee:运杂费）→ 该列降级 ignore，new_fees 上报。"""
         path = tmp_path / "newfee.xlsx"
         path.write_bytes(
@@ -269,7 +271,7 @@ class TestAiMapping:
         assert "fees" not in (output.canonical_rows or [{}])[0]
         assert output.canonical_rows[0]["bl_no"] == "OOLU12345678"
 
-    def test_ai_ignore_cols_not_reported(self, tmp_path, monkeypatch):
+    async def test_ai_ignore_cols_not_reported(self, tmp_path, monkeypatch):
         """AI 明确 ignore 的列（如当前状态）不进 unmatched_headers。"""
         headers = {
             "A": "序号",
@@ -305,7 +307,7 @@ class TestAiMapping:
 class TestTemplatePersist:
     """L3 模板固化：AI 映射 → 候选配置 → 人工确认 save_yaml_template → 二次上传 L1 命中。"""
 
-    def test_saved_after_confirm_and_reused_without_ai(self, tmp_path, monkeypatch):
+    async def test_saved_after_confirm_and_reused_without_ai(self, tmp_path, monkeypatch):
         """候选配置经 save_yaml_template 固化到 templates/，同指纹再次导入不再调 AI。"""
         import app.orders.bill.template_store as store
         from app.orders.bill.template_store import save_yaml_template
@@ -317,7 +319,7 @@ class TestTemplatePersist:
         path = tmp_path / "hetero.xlsx"
         path.write_bytes(build_bill_bytes(HETERO_HEADERS, HETERO_ROWS))
         _patch_ai(monkeypatch, AI_MAPPING_OK)
-        result = build_result(filename=path.name, file_bytes=path.read_bytes())
+        result = await build_result_async(filename=path.name, file_bytes=path.read_bytes())
         # 预览：候选模板配置在 meta.l3_template，不自动落盘（人工确认前置）
         assert result.meta["template"]["source"] == "template"
         candidate = result.meta["l3_template"]

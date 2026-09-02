@@ -17,8 +17,10 @@ from app.orders.document import (
     _revise_port_fields,
     build_document_order_data,
     normalize_document_extraction,
-    parse_document_to_order,
+    parse_document_to_order_async,
 )
+
+pytestmark = pytest.mark.asyncio
 
 client = TestClient(app)
 
@@ -58,7 +60,7 @@ def _fake_convert(file_bytes, filename):
 # ---------- 归一化 ----------
 
 
-def test_normalize_bill_no_accepts_8_plus_alphanumeric():
+async def test_normalize_bill_no_accepts_8_plus_alphanumeric():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "KMTCSHAP950393"})
     assert extracted.order_num1 == "KMTCSHAP950393"
 
@@ -78,12 +80,12 @@ def test_normalize_bill_no_accepts_8_plus_alphanumeric():
         "ABCDEFGH",  # 纯字母（船名/人名）
     ],
 )
-def test_normalize_bill_no_rejects_invalid(value):
+async def test_normalize_bill_no_rejects_invalid(value):
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": value})
     assert extracted.order_num1 is None
 
 
-def test_normalize_bill_no_strips_separators():
+async def test_normalize_bill_no_strips_separators():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "order_num1": "KMTC SHAP-950393"})
     assert extracted.order_num1 == "KMTCSHAP950393"
 
@@ -91,7 +93,7 @@ def test_normalize_bill_no_strips_separators():
 # ---------- 关单号即提单号（兜底修复） ----------
 
 
-def test_revise_bill_no_customs_no_overrides_llm_value():
+async def test_revise_bill_no_customs_no_overrides_llm_value():
     """原文含关单号时覆盖 LLM 输出的运编号（关单号即提单号）。"""
     source = (
         "上海麦可斯国际物流有限公司\n装箱通知\n"
@@ -106,7 +108,7 @@ def test_revise_bill_no_customs_no_overrides_llm_value():
     assert _revise_bill_no("CNWW036474", source) == "CNWW036474"
 
 
-def test_revise_bill_no_no_customs_no_keeps_value():
+async def test_revise_bill_no_no_customs_no_keeps_value():
     """原文有提单号标签时以提单号标签值为准（提单号优先）。"""
     source = "运编号：MAX202011824A/B/C\n提单号：KMTCSHAP950393"
     assert _revise_bill_no("KMTCSHAP950393", source) == "KMTCSHAP950393"
@@ -115,7 +117,7 @@ def test_revise_bill_no_no_customs_no_keeps_value():
     assert _revise_bill_no(None, None) is None
 
 
-def test_revise_bill_no_bill_label_takes_priority_over_customs_no():
+async def test_revise_bill_no_bill_label_takes_priority_over_customs_no():
     """提单号标签优先：提单号与关单号并存且值不同时，取提单号标签值。"""
     source = "提单号：KMTCSHAP950393\n关单号：CNWW036474\n船名航次：COSCO SHIPPING RHINE / 019W"
     assert _revise_bill_no(None, source) == "KMTCSHAP950393"
@@ -123,13 +125,13 @@ def test_revise_bill_no_bill_label_takes_priority_over_customs_no():
     assert _revise_bill_no("CNWW036474", source) == "KMTCSHAP950393"
 
 
-def test_revise_bill_no_ignores_invalid_customs_no():
+async def test_revise_bill_no_ignores_invalid_customs_no():
     """关单号不合提单号格式（如不足 8 位）时不覆盖，保持 LLM 值。"""
     source = "运编号：MAX202011824A\n关单号：1234567\n船名航次：COSCO SHIPPING RHINE / 019W"
     assert _revise_bill_no("MAX202011824A", source) == "MAX202011824A"
 
 
-def test_revise_bill_no_ignores_customs_declaration_no():
+async def test_revise_bill_no_ignores_customs_declaration_no():
     """报关单号不是提单号：原文只有报关单号时不覆盖、不补全。"""
     source = "报关单号：CUS12345678\n船名航次：COSCO SHIPPING RHINE / 019W"
     assert _revise_bill_no("MAX202011824A", source) == "MAX202011824A"
@@ -148,19 +150,19 @@ def test_revise_bill_no_ignores_customs_declaration_no():
         (" 海丰国际 ", "海丰国际"),
     ],
 )
-def test_normalize_c_title_cleans_ocr_break_spaces(raw, expected):
+async def test_normalize_c_title_cleans_ocr_break_spaces(raw, expected):
     extracted = normalize_document_extraction({**COMPLETE_RAW, "c_title": raw})
     assert extracted.c_title == expected
 
 
-def test_normalize_boxes_valid_types():
+async def test_normalize_boxes_valid_types():
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "box": [{"b_type": "40HQ", "box_num": "2"}, {"b_type": "20GP", "box_num": 1}]}
     )
     assert [(b.b_type, b.box_num) for b in extracted.box] == [("40HQ", 2), ("20GP", 1)]
 
 
-def test_normalize_boxes_merges_same_type():
+async def test_normalize_boxes_merges_same_type():
     """多数据行同箱型时 box_num 累加（3×1*40HC → 一条 40HC/3）。"""
     extracted = normalize_document_extraction(
         {
@@ -175,7 +177,7 @@ def test_normalize_boxes_merges_same_type():
     assert [(b.b_type, b.box_num) for b in extracted.box] == [("40HC", 3)]
 
 
-def test_normalize_boxes_merges_mixed_types_preserving_order():
+async def test_normalize_boxes_merges_mixed_types_preserving_order():
     """不同箱型分别累加，保持首次出现顺序。"""
     extracted = normalize_document_extraction(
         {
@@ -201,14 +203,14 @@ def test_normalize_boxes_merges_mixed_types_preserving_order():
         "ABC",      # 无数字
     ],
 )
-def test_normalize_boxes_rejects_invalid_type(b_type):
+async def test_normalize_boxes_rejects_invalid_type(b_type):
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "box": [{"b_type": b_type, "box_num": 1}]}
     )
     assert extracted.box == []
 
 
-def test_normalize_boxes_rejects_zero_qty():
+async def test_normalize_boxes_rejects_zero_qty():
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "box": [{"b_type": "40HQ", "box_num": 0}]}
     )
@@ -222,7 +224,7 @@ MULTI_ROW_DATA = [
 ]
 
 
-def test_normalize_data_items_multiple_rows():
+async def test_normalize_data_items_multiple_rows():
     """一票多客户/多提单号：data 每行一条，完整保留。"""
     extracted = normalize_document_extraction(
         {
@@ -240,7 +242,7 @@ def test_normalize_data_items_multiple_rows():
     ]
 
 
-def test_normalize_data_items_skips_incomplete_row():
+async def test_normalize_data_items_skips_incomplete_row():
     """行内件数/毛重/体积不全时整行跳过，不产生脏数据。"""
     extracted = normalize_document_extraction(
         {
@@ -256,7 +258,7 @@ def test_normalize_data_items_skips_incomplete_row():
     ]
 
 
-def test_normalize_data_items_falls_back_to_single_values():
+async def test_normalize_data_items_falls_back_to_single_values():
     """LLM 未输出 data 键时回退到单值字段组装一条（向后兼容）。"""
     extracted = normalize_document_extraction(COMPLETE_RAW)
     assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
@@ -264,7 +266,7 @@ def test_normalize_data_items_falls_back_to_single_values():
     ]
 
 
-def test_normalize_data_items_empty_data_falls_back_bill_no():
+async def test_normalize_data_items_empty_data_falls_back_bill_no():
     """显式输出 data: [] 且单值缺失时，回退一条仅含提单号的行（data 不允许为空）。"""
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "data": [], "packages": None, "gross_weight": None, "volume": None}
@@ -280,7 +282,7 @@ def test_normalize_data_items_empty_data_falls_back_bill_no():
     ]
 
 
-def test_normalize_data_items_ignores_non_list():
+async def test_normalize_data_items_ignores_non_list():
     """data 非列表（如 dict）时忽略，单值三项齐全则回退组装完整行。"""
     extracted = normalize_document_extraction({**COMPLETE_RAW, "data": {"j": "680"}})
     assert [(d.b_order_num, d.j, d.m, d.t) for d in extracted.data] == [
@@ -288,7 +290,7 @@ def test_normalize_data_items_ignores_non_list():
     ]
 
 
-def test_normalize_data_items_single_row_falls_back_bill_no():
+async def test_normalize_data_items_single_row_falls_back_bill_no():
     """单行明细且行内提单号缺失/非法时，回退主提单号（对齐 mapper 约定）。"""
     extracted = normalize_document_extraction(
         {
@@ -302,7 +304,7 @@ def test_normalize_data_items_single_row_falls_back_bill_no():
     assert extracted.data[0].b_order_num == "KMTCSHAP950393"
 
 
-def test_normalize_data_items_accepts_numeric_types():
+async def test_normalize_data_items_accepts_numeric_types():
     """LLM 把 j/m/t 输出为 JSON number 时也能归一化，不整行丢弃。"""
     extracted = normalize_document_extraction(
         {
@@ -317,7 +319,7 @@ def test_normalize_data_items_accepts_numeric_types():
     ]
 
 
-def test_normalize_data_items_incomplete_rows_fall_back_to_single_values():
+async def test_normalize_data_items_incomplete_rows_fall_back_to_single_values():
     """data 行内三项缺失/非法被过滤时，单值三项齐全则回退组装完整行。"""
     extracted = normalize_document_extraction(
         {
@@ -333,7 +335,7 @@ def test_normalize_data_items_incomplete_rows_fall_back_to_single_values():
     assert document_module._missing_fields(extracted) == []
 
 
-def test_missing_fields_marks_measurements_when_rows_dropped():
+async def test_missing_fields_marks_measurements_when_rows_dropped():
     """data 行不全被过滤且单值不全时，回退仅含提单号的行并标记缺失（防静默丢数据）。"""
     extracted = normalize_document_extraction(
         {
@@ -366,7 +368,7 @@ def test_missing_fields_marks_measurements_when_rows_dropped():
     ]
 
 
-def test_missing_fields_cleared_when_single_values_fill_data_rows():
+async def test_missing_fields_cleared_when_single_values_fill_data_rows():
     """data 行不全/为空但单值三项齐全时，用单值组装完整行且不再标记缺失。"""
     extracted = normalize_document_extraction(
         {
@@ -386,7 +388,7 @@ def test_missing_fields_cleared_when_single_values_fill_data_rows():
     assert document_module._missing_fields(extracted) == []
 
 
-def test_build_document_order_data_fills_missing_bill_no():
+async def test_build_document_order_data_fills_missing_bill_no():
     """多行明细中无提单号的行在组装层回填主提单号（对齐 mapper 契约）。"""
     extracted = normalize_document_extraction(
         {
@@ -407,7 +409,7 @@ def test_build_document_order_data_fills_missing_bill_no():
     ]
 
 
-def test_normalize_data_items_keeps_missing_bill_no_in_multi_row():
+async def test_normalize_data_items_keeps_missing_bill_no_in_multi_row():
     """多行明细行内无提单号保持 null，不回退整票提单号。"""
     extracted = normalize_document_extraction(
         {
@@ -424,7 +426,7 @@ def test_normalize_data_items_keeps_missing_bill_no_in_multi_row():
     assert [d.b_order_num for d in extracted.data] == ["OOLU2120860080", None]
 
 
-def test_single_values_aligned_with_first_data_row():
+async def test_single_values_aligned_with_first_data_row():
     """单值字段与 data[0] 不一致时，以 data[0] 为准保证响应自洽。"""
     extracted = normalize_document_extraction(
         {
@@ -440,7 +442,7 @@ def test_single_values_aligned_with_first_data_row():
     assert extracted.volume == "33.92"
 
 
-def test_normalize_measurements():
+async def test_normalize_measurements():
     extracted = normalize_document_extraction(
         {
             **COMPLETE_RAW,
@@ -454,7 +456,7 @@ def test_normalize_measurements():
     assert extracted.volume == "25.5"
 
 
-def test_normalize_measurements_invalid_values():
+async def test_normalize_measurements_invalid_values():
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "packages": "100.5", "gross_weight": "0", "volume": "ABC"}
     )
@@ -463,17 +465,17 @@ def test_normalize_measurements_invalid_values():
     assert extracted.volume is None
 
 
-def test_normalize_date_accepts_chinese_format():
+async def test_normalize_date_accepts_chinese_format():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "b_date": "2026年7月20日"})
     assert extracted.b_date == "2026-07-20"
 
 
-def test_normalize_date_rejects_invalid():
+async def test_normalize_date_rejects_invalid():
     extracted = normalize_document_extraction({**COMPLETE_RAW, "b_date": "下周二"})
     assert extracted.b_date is None
 
 
-def test_normalize_standard_fields():
+async def test_normalize_standard_fields():
     extracted = normalize_document_extraction(
         {
             **COMPLETE_RAW,
@@ -494,7 +496,7 @@ def test_normalize_standard_fields():
     assert extracted.c_note == "托卡价格: 3000；注意不要破损"
 
 
-def test_normalize_standard_fields_blank_or_invalid():
+async def test_normalize_standard_fields_blank_or_invalid():
     extracted = normalize_document_extraction(
         {
             **COMPLETE_RAW,
@@ -513,14 +515,14 @@ def test_normalize_standard_fields_blank_or_invalid():
 # ---------- 必填校验 ----------
 
 
-def test_build_document_order_data_driver_empty_object():
+async def test_build_document_order_data_driver_empty_object():
     """做箱日期缺失时 driver 显示空对象 [{}]，对齐标准格式。"""
     extracted = normalize_document_extraction({**COMPLETE_RAW, "b_date": None})
     order_data = build_document_order_data(extracted)
     assert order_data["driver"] == [{}]
 
 
-def test_build_document_order_data_succeeds():
+async def test_build_document_order_data_succeeds():
     extracted = normalize_document_extraction(COMPLETE_RAW)
     order_data = build_document_order_data(extracted)
 
@@ -558,7 +560,7 @@ def test_build_document_order_data_succeeds():
     }
 
 
-def test_build_document_order_data_keeps_all_data_rows():
+async def test_build_document_order_data_keeps_all_data_rows():
     """多客户明细行全部保留进 order_data.data。"""
     extracted = normalize_document_extraction(
         {
@@ -577,7 +579,7 @@ def test_build_document_order_data_keeps_all_data_rows():
     ]
 
 
-def test_missing_fields_satisfied_by_data_rows():
+async def test_missing_fields_satisfied_by_data_rows():
     """data 含完整明细行时，单值件数/毛重/体积缺失不算缺失。"""
     extracted = normalize_document_extraction(
         {
@@ -591,7 +593,7 @@ def test_missing_fields_satisfied_by_data_rows():
     assert document_module._missing_fields(extracted) == []
 
 
-def test_missing_fields_reported_when_no_complete_row():
+async def test_missing_fields_reported_when_no_complete_row():
     """无完整明细行且单值缺失时，仍按单值字段标记缺失。"""
     raw = {
         **{k: v for k, v in COMPLETE_RAW.items() if k not in ("packages", "gross_weight", "volume")},
@@ -605,7 +607,7 @@ def test_missing_fields_reported_when_no_complete_row():
     ]
 
 
-def test_missing_fields_returns_all_when_empty():
+async def test_missing_fields_returns_all_when_empty():
     extracted = normalize_document_extraction({})
     # 无提单号可回退时 data 返回 null，不静默为空数组
     assert extracted.data is None
@@ -621,7 +623,7 @@ def test_missing_fields_returns_all_when_empty():
     ]
 
 
-def test_data_null_when_no_bill_and_no_complete_row():
+async def test_data_null_when_no_bill_and_no_complete_row():
     """无完整明细行、单值不全且无提单号：data 返回 null 而非空数组（不静默）。"""
     extracted = normalize_document_extraction({"c_title": "某公司", "data": [{"j": "680"}]})
     assert extracted.data is None
@@ -638,7 +640,7 @@ def test_data_null_when_no_bill_and_no_complete_row():
     assert order_data["data"] is None
 
 
-def test_missing_fields_reports_partial():
+async def test_missing_fields_reports_partial():
     """单值三项不全时无法组装完整明细行，件数/毛重/体积全部标记缺失。"""
     extracted = normalize_document_extraction({**COMPLETE_RAW, "volume": "ABC"})
     assert document_module._missing_fields(extracted) == [
@@ -651,21 +653,21 @@ def test_missing_fields_reports_partial():
 # ---------- 主流程 ----------
 
 
-def test_parse_document_to_order_extracts_without_publishing(monkeypatch):
+async def test_parse_document_to_order_extracts_without_publishing(monkeypatch):
     captured = {}
 
     def fake_convert(file_bytes, filename):
         captured["convert_called"] = True
         return _fake_convert(file_bytes, filename)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return dict(COMPLETE_RAW), {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert captured["convert_called"] is True
     assert result["file"] == "order.pdf"
@@ -679,7 +681,7 @@ def test_parse_document_to_order_extracts_without_publishing(monkeypatch):
     assert "upstream" not in result
 
 
-def test_parse_document_customs_no_overrides_llm_bill_no(monkeypatch):
+async def test_parse_document_customs_no_overrides_llm_bill_no(monkeypatch):
     """文档同时含运编号与关单号：order_num1 取关单号（关单号即提单号）。"""
 
     def fake_convert(file_bytes, filename):
@@ -691,18 +693,18 @@ def test_parse_document_customs_no_overrides_llm_bill_no(monkeypatch):
         )
         return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {"order_num1": "MAX202011824A"}, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
     assert result["extracted"]["order_num1"] == "CNWW036474"
     assert result["order_data"]["order_num1"] == "CNWW036474"
 
 
-def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
+async def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
     """整票无货物明细行（件数/毛重/体积缺失）时，data 输出一条仅含提单号的行。"""
 
     def fake_convert(file_bytes, filename):
@@ -722,7 +724,7 @@ def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
         )
         return markdown, "doc", {"parser": "local"}, ("markdown:" + markdown)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {
             "order_num1": "CNWW036474",
             "c_title": "上海麦可斯国际物流有限公司",
@@ -746,9 +748,9 @@ def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
         }, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-doc", "湖州彩蝶(2).doc")
+    result = await parse_document_to_order_async(b"fake-doc", "湖州彩蝶(2).doc")
     # data 必须有提单号（对齐自由文本 mapper 契约：每行提单号非空）
     assert result["extracted"]["data"] == [
         {"b_order_num": "CNWW036474", "j": None, "m": None, "t": None, "hh": None, "mt": None}
@@ -761,15 +763,15 @@ def test_parse_document_data_keeps_bill_no_when_no_cargo_rows(monkeypatch):
     assert result["needs_manual_confirmation"] is True
 
 
-def test_parse_document_to_order_marks_missing_fields(monkeypatch):
+async def test_parse_document_to_order_marks_missing_fields(monkeypatch):
     monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {"order_num1": "KMTCSHAP950393"}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["needs_manual_confirmation"] is True
     assert result["missing_fields"] == [
@@ -846,7 +848,7 @@ def test_parse_document_to_order_marks_missing_fields(monkeypatch):
         ("INCHON", "FELIXSTOWE", None, "INCHON", "FELIXSTOWE"),
     ],
 )
-def test_revise_port_fields_avoids_confusion(
+async def test_revise_port_fields_avoids_confusion(
     end_port, end_dock, source_text, expected_port, expected_dock
 ):
     assert _revise_port_fields(end_port, end_dock, source_text) == (
@@ -855,23 +857,23 @@ def test_revise_port_fields_avoids_confusion(
     )
 
 
-def test_parse_document_to_order_fixes_port_confusion(monkeypatch):
+async def test_parse_document_to_order_fixes_port_confusion(monkeypatch):
     """LLM 把目的港填进 b_end_port 时，后处理修正为 b_end_port=中转港、b_end_dock=目的港。"""
     def fake_convert(file_bytes, filename):
         markdown = ("运输委托书\n船名航次：PANCON GLORY V.2624E\n"
                     "中转港：INCHON\n目的港：BANDAR ABBAS\n件数：37\n毛重：20001\n体积：41.453")
         return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         raw = dict(COMPLETE_RAW)
         raw["b_end_port"] = "BANDAR ABBAS"  # LLM 误把目的港填进 b_end_port（中转港字段）
         raw["b_end_dock"] = None
         return raw, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["extracted"]["b_end_port"] == "INCHON"
     assert result["extracted"]["b_end_dock"] == "BANDAR ABBAS"
@@ -879,7 +881,7 @@ def test_parse_document_to_order_fixes_port_confusion(monkeypatch):
     assert result["order_data"]["b_end_dock"] == "BANDAR ABBAS"
 
 
-def test_parse_document_to_order_keeps_transit_port(monkeypatch):
+async def test_parse_document_to_order_keeps_transit_port(monkeypatch):
     """parse-document 按订单创建接口文档语义：b_end_port=中转港、b_end_dock=目的港。"""
     def fake_convert(file_bytes, filename):
         markdown = ("做箱通知书\n做箱时间：2021-03-31\n做箱工厂：宝时得园龙\n"
@@ -889,7 +891,7 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
                     "港区：洋一\n船期：2021-04-03\n件数：680\n毛重：8602\n体积：33.92\n箱型箱量：1*40HC")
         return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         raw = dict(COMPLETE_RAW)
         raw["b_end_port"] = "见设"
         raw["b_end_dock"] = "SANTOS"
@@ -897,9 +899,9 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
         return raw, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["extracted"]["b_end_port"] == "见设"
     assert result["extracted"]["b_end_dock"] == "SANTOS"
@@ -922,12 +924,12 @@ def test_parse_document_to_order_keeps_transit_port(monkeypatch):
         ({}, None),
     ],
 )
-def test_normalize_b_date_time_start(raw, expected):
+async def test_normalize_b_date_time_start(raw, expected):
     extracted = normalize_document_extraction(raw)
     assert extracted.b_date_time_start == expected
 
 
-def test_build_driver_merges_date_and_time():
+async def test_build_driver_merges_date_and_time():
     extracted = normalize_document_extraction(
         {"b_date": "2026-07-20", "b_date_time_start": "早上8点"}
     )
@@ -935,13 +937,13 @@ def test_build_driver_merges_date_and_time():
     assert order_data["driver"] == [{"b_date": "2026-07-20", "b_date_time_start": "早上8点"}]
 
 
-def test_build_driver_time_only_without_date():
+async def test_build_driver_time_only_without_date():
     extracted = normalize_document_extraction({"b_date_time_start": "9:00"})
     order_data = build_document_order_data(extracted)
     assert order_data["driver"] == [{"b_date_time_start": "9:00"}]
 
 
-def test_normalize_data_items_keeps_hh_mt_non_empty():
+async def test_normalize_data_items_keeps_hh_mt_non_empty():
     extracted = normalize_document_extraction(
         {
             "data": [
@@ -1000,7 +1002,7 @@ def test_normalize_data_items_keeps_hh_mt_non_empty():
         ),
     ],
 )
-def test_revise_port_fields_boundary(
+async def test_revise_port_fields_boundary(
     end_port, end_dock, source_text, expected_port, expected_dock
 ):
     assert _revise_port_fields(end_port, end_dock, source_text) == (
@@ -1013,7 +1015,7 @@ def test_revise_port_fields_boundary(
     "value",
     ["代码", "中转港代码", "中转港", "转运港", "目的港", "港区", " 代码 "],
 )
-def test_normalize_port_rejects_label_token(value):
+async def test_normalize_port_rejects_label_token(value):
     """端口字段拒绝标签词残留（如“中转港代码：”空值被输出为“代码”）。"""
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "b_end_port": value, "b_end_dock": value}
@@ -1022,7 +1024,7 @@ def test_normalize_port_rejects_label_token(value):
     assert extracted.b_end_dock is None
 
 
-def test_normalize_port_keeps_real_value():
+async def test_normalize_port_keeps_real_value():
     extracted = normalize_document_extraction(
         {**COMPLETE_RAW, "b_end_port": "见设", "b_end_dock": "SANTOS"}
     )
@@ -1056,33 +1058,33 @@ def test_normalize_port_keeps_real_value():
         (None, "截单时间：1-7早上9点", None),
     ],
 )
-def test_revise_loading_time_rejects_cutoff_time(value, source_text, expected):
+async def test_revise_loading_time_rejects_cutoff_time(value, source_text, expected):
     assert _revise_loading_time(value, source_text) == expected
 
 
-def test_parse_document_to_order_marks_vision_skipped(monkeypatch):
+async def test_parse_document_to_order_marks_vision_skipped(monkeypatch):
     """vision 交叉核验因图片超限被跳过时，即使字段完整也必须要求人工确认。"""
     def fake_convert_vision_degraded(file_bytes, filename):
         markdown, doc_format, _, user_content = _fake_convert(file_bytes, filename)
         return markdown, doc_format, {"vision_skipped_reason": "image_too_large"}, user_content
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return dict(COMPLETE_RAW), {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert_vision_degraded)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["missing_fields"] == []
     assert result["needs_manual_confirmation"] is True
     assert result["meta"]["vision_skipped_reason"] == "image_too_large"
 
 
-def test_parse_document_to_order_marks_invalid_values(monkeypatch):
+async def test_parse_document_to_order_marks_invalid_values(monkeypatch):
     monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {
             "order_num1": "KMTCSHAP950393",
             "box": [{"b_type": "40HQ", "box_num": 2}],
@@ -1093,9 +1095,9 @@ def test_parse_document_to_order_marks_invalid_values(monkeypatch):
             "volume": "ABC",
         }, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["needs_manual_confirmation"] is True
     assert result["missing_fields"] == ["c_title", "b_date", "packages", "gross_weight", "volume"]
@@ -1110,21 +1112,21 @@ def test_parse_document_to_order_marks_invalid_values(monkeypatch):
     assert result["order_data"]["driver"] == [{}]
 
 
-def test_parse_document_marks_measurement_not_in_row(monkeypatch):
+async def test_parse_document_marks_measurement_not_in_row(monkeypatch):
     """单值毛重格式合法且已归一，但明细行缺件数/体积被跳过时，
     缺失原因标"已提取但明细行不完整"而非误导性的"格式不合法"。"""
     monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {
             "order_num1": "275005063",
             "c_sn": "HZC2608099",
             "gross_weight": "8000",
         }, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-doc", "275005063.doc")
+    result = await parse_document_to_order_async(b"fake-doc", "275005063.doc")
 
     assert result["extracted"]["gross_weight"] == "8000"
     # 明细行缺件数/体积被跳过 → 回退仅含提单号的行，三项仍标记缺失
@@ -1137,9 +1139,9 @@ def test_parse_document_marks_measurement_not_in_row(monkeypatch):
     assert result["order_data"]["data"][0]["t"] is None
 
 
-def test_parse_document_to_order_rejects_unsupported_extension(monkeypatch):
+async def test_parse_document_to_order_rejects_unsupported_extension(monkeypatch):
     with pytest.raises(Exception) as caught:
-        parse_document_to_order(b"fake", "order.exe")
+        await parse_document_to_order_async(b"fake", "order.exe")
 
     assert caught.value.http_status == 400
     assert caught.value.code == "bad_request"
@@ -1148,7 +1150,7 @@ def test_parse_document_to_order_rejects_unsupported_extension(monkeypatch):
 # ---------- API 路由 ----------
 
 
-def test_parse_document_route_success(monkeypatch):
+async def test_parse_document_route_success(monkeypatch):
     import app.main as main_module
 
     async def fake_parse(file_bytes, filename):
@@ -1183,7 +1185,7 @@ def test_parse_document_route_success(monkeypatch):
     assert "meta" not in body
 
 
-def test_parse_document_route_needs_manual_confirmation(monkeypatch):
+async def test_parse_document_route_needs_manual_confirmation(monkeypatch):
     import app.main as main_module
 
     async def fake_parse(file_bytes, filename):
@@ -1219,7 +1221,7 @@ def test_parse_document_route_needs_manual_confirmation(monkeypatch):
     assert body["order_data"] == {"order_num1": "KMTCSHAP950393", "driver": [{}]}
 
 
-def test_parse_document_route_requires_file():
+async def test_parse_document_route_requires_file():
     response = client.post("/orders/parse-document")
     assert response.status_code == 422
 
@@ -1240,25 +1242,25 @@ _NOTICE_TEXT = (
 )
 
 
-def test_revise_c_title_ignores_fm_company_when_it_is_header_forwarder():
+async def test_revise_c_title_ignores_fm_company_when_it_is_header_forwarder():
     """FM 公司是文档抬头货代（通知发出方）时，不得强制作为客户来源，置空走人工确认。"""
     assert _revise_c_title_to_value("俊泰", _NOTICE_TEXT) is None
     assert _revise_c_title_to_value("海丰", _NOTICE_TEXT) is None
 
 
-def test_revise_c_title_keeps_real_customer_fm():
+async def test_revise_c_title_keeps_real_customer_fm():
     """FM 公司不是抬头货代时（真实客户），仍以 FM 后的公司名为准。"""
     text = "常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\nFROM: 苏州哈亚精密机械有限公司 陈小姐\n"
     assert _revise_c_title_to_value("俊泰", text) == "苏州哈亚精密机械有限公司"
 
 
-def test_revise_c_title_ignores_single_name_fm():
+async def test_revise_c_title_ignores_single_name_fm():
     """普通文本（非展平段落流）FM 单段人名同样不当作客户来源。"""
     text = "TO：俊泰\nFM：范颖晰\n提单号：ABC1234567\n"
     assert _revise_c_title_to_value("俊泰", text) is None
 
 
-def test_revise_c_title_skips_header_forwarder_fm_for_real_customer_fm():
+async def test_revise_c_title_skips_header_forwarder_fm_for_real_customer_fm():
     """FM 是抬头货代（通知发出方）时继续扫描后续 FROM 行，取真实客户公司名。"""
     text = (
         "常州赛格威做箱通知\n"
@@ -1269,7 +1271,7 @@ def test_revise_c_title_skips_header_forwarder_fm_for_real_customer_fm():
     assert _revise_c_title_to_value("俊泰", text) == "苏州哈亚精密机械有限公司"
 
 
-def test_is_header_company_avoids_short_and_table_cell_misjudge():
+async def test_is_header_company_avoids_short_and_table_cell_misjudge():
     """2 字简称与表格单元格不因子串匹配被误判为抬头货代。"""
     assert _is_header_company("倍联", ["江苏倍联现代物流有限公司"]) is False
     assert _is_header_company("东华工贸", ["3 | 做箱工厂 | 东华工贸"]) is False
@@ -1280,7 +1282,7 @@ def test_is_header_company_avoids_short_and_table_cell_misjudge():
     )
 
 
-def test_revise_c_title_ignores_fm_person_name():
+async def test_revise_c_title_ignores_fm_person_name():
     """展平段落流的 FM 人名行不匹配（漏检安全），不会把人名当客户。"""
     text = (
         "_p1_ 运输委托书\n"
@@ -1292,7 +1294,7 @@ def test_revise_c_title_ignores_fm_person_name():
     assert _revise_c_title_to_value("上海捷阳国际货物运输代理有限公司", text) is None
 
 
-def test_revise_c_title_reads_customer_label_after_flat_paragraph_prefix():
+async def test_revise_c_title_reads_customer_label_after_flat_paragraph_prefix():
     """展平段落流中 _pN_ 前缀后的客户栏（行形式）仍可识别。"""
     text = "_p3_ 客户名称：特格威\n_p4_ 提单号：ABC1234567\n"
     assert _revise_c_title_to_value("特格威", text) == "特格威"
@@ -1300,7 +1302,7 @@ def test_revise_c_title_reads_customer_label_after_flat_paragraph_prefix():
     assert _revise_c_title_to_value("海丰", text) is None
 
 
-def test_revise_c_title_ignores_fm_when_it_is_door_point_notice_forwarder():
+async def test_revise_c_title_ignores_fm_when_it_is_door_point_notice_forwarder():
     """门点装箱通知：FM=抬头货代不得强制覆盖 TO/门点值；抬头公司名本身仍是合法来源。"""
     text = (
         "上海威世国际货物运输代理有限公司\n"
@@ -1317,13 +1319,13 @@ def test_revise_c_title_ignores_fm_when_it_is_door_point_notice_forwarder():
     )
 
 
-def test_revise_c_title_returns_none_without_fm_from():
+async def test_revise_c_title_returns_none_without_fm_from():
     """原文无 FM/FROM 行时置空（走人工确认），不放行 TO 收件方。"""
     text = "TO：俊泰\n关单号：SECU13842\n"
     assert _revise_c_title_to_value("俊泰", text) is None
 
 
-def test_revise_c_title_keeps_company_in_transport_order_title():
+async def test_revise_c_title_keeps_company_in_transport_order_title():
     """“公司名+海运出口运输委托单”连写标题：标题公司是合法客户来源。"""
     text = (
         "# +江苏亚东朗升国际物流有限公司海运出口运输委托单\n"
@@ -1337,25 +1339,25 @@ def test_revise_c_title_keeps_company_in_transport_order_title():
     assert _revise_c_title_to_value("上海柚理供应链管理有限公司", text) is None
 
 
-def test_extract_header_company_returns_company_only_from_transport_order_title():
+async def test_extract_header_company_returns_company_only_from_transport_order_title():
     """委托单标题兜底补全只返回公司名部分，不得把整个标题行当公司名。"""
     text = "# +江苏亚东朗升国际物流有限公司海运出口运输委托单\nTO：上海柚理供应链管理有限公司\n"
     assert _extract_header_company(text) == "江苏亚东朗升国际物流有限公司"
 
 
-def test_extract_header_company_keeps_notice_heading_prefix():
+async def test_extract_header_company_keeps_notice_heading_prefix():
     """原有“客户简称+装箱/做箱通知”标题前缀解析不受影响。"""
     text = "常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\n"
     assert _extract_header_company(text) == "常州赛格威"
 
 
-def test_extract_header_company_keeps_transport_order_title_short_prefix():
+async def test_extract_header_company_keeps_transport_order_title_short_prefix():
     """委托单标题前缀过短（如“运输委托书”纯标题行）不作为公司名。"""
     text = "运输委托书\nTO：某客户\n提单号：ABC1234567\n"
     assert _extract_header_company(text) is None
 
 
-def test_revise_c_title_rejects_fabricated_value():
+async def test_revise_c_title_rejects_fabricated_value():
     """原文无 FM/FROM、无客户栏、无抬头公司时，臆造值（如从文件名推断）置空。"""
     text = (
         "提单号：EASEK2615SB7008\n"
@@ -1368,7 +1370,7 @@ def test_revise_c_title_rejects_fabricated_value():
     assert _revise_c_title_to_value("集行供应链", text) is None
 
 
-def test_revise_c_title_keeps_customer_label_value():
+async def test_revise_c_title_keeps_customer_label_value():
     """无 FM/FROM 行时，明确客户栏的值保留（行形式与表格形式）。"""
     assert _revise_c_title_to_value("特格威", "客户名称：特格威\n提单号：ABC1234567") == "特格威"
     assert (
@@ -1379,19 +1381,19 @@ def test_revise_c_title_keeps_customer_label_value():
     )
 
 
-def test_revise_c_title_keeps_notice_heading_company():
+async def test_revise_c_title_keeps_notice_heading_company():
     """无 FM/FROM 行时，'客户简称+装箱/做箱通知'标题前缀可作客户来源。"""
     text = "海丰装箱通知\nTO：俊泰\n提单号：ABC1234567\n"
     assert _revise_c_title_to_value("海丰", text) == "海丰"
 
 
-def test_revise_c_title_keeps_header_company_line():
+async def test_revise_c_title_keeps_header_company_line():
     """无 FM/FROM 行时，顶部区域整行公司名保留。"""
     text = "江苏倍联现代物流有限公司\n常州赛格威做箱通知\nTO：俊泰\n"
     assert _revise_c_title_to_value("江苏倍联现代物流有限公司", text) == "江苏倍联现代物流有限公司"
 
 
-def test_revise_c_title_keeps_table_header_company():
+async def test_revise_c_title_keeps_table_header_company():
     """表格形式的文档抬头公司（xlsx 转换场景）仍可通过兜底校验。"""
     text = "| 1 | 浙江经茂国际货运代理有限公司 |  |\n| 2 | 做箱通知 |  |\n"
     assert (
@@ -1400,7 +1402,7 @@ def test_revise_c_title_keeps_table_header_company():
     )
 
 
-def test_revise_c_title_rejects_label_row_values():
+async def test_revise_c_title_rejects_label_row_values():
     """表格标签行的值（联系人姓名/装箱工厂）不得验证为客户，防止绕过人工确认。"""
     text = "| 2 | 联系人 | 范颖晰 |\n| 12 | 装箱工厂 | 喜临门家具有限公司 |\n"
     assert _revise_c_title_to_value("范颖晰", text) is None
@@ -1410,13 +1412,13 @@ def test_revise_c_title_rejects_label_row_values():
 # ---------- 抬头公司主动提取（LLM 未给出 c_title 时补全） ----------
 
 
-def test_extract_header_company_picks_company_line():
+async def test_extract_header_company_picks_company_line():
     """普通文档顶部独立公司名行 → 主动提取为客户，不依赖文件名。"""
     text = "江苏倍联现代物流有限公司\n常州赛格威做箱通知\nTO：俊泰\n做箱时间：2月28号\n"
     assert _extract_header_company(text) == "江苏倍联现代物流有限公司"
 
 
-def test_extract_header_company_picks_table_company_cell():
+async def test_extract_header_company_picks_table_company_cell():
     """xlsx 表格转换的顶部公司名（表格第一行）也能识别。"""
     text = (
         "| 1 | 浙江经茂国际货运代理有限公司 |  |\n"
@@ -1427,25 +1429,25 @@ def test_extract_header_company_picks_table_company_cell():
     assert _extract_header_company(text) == "浙江经茂国际货运代理有限公司"
 
 
-def test_extract_header_company_picks_notice_heading():
+async def test_extract_header_company_picks_notice_heading():
     """“客户简称+做箱通知”标题前缀可作客户来源。"""
     text = "常州赛格威做箱通知\nTO：俊泰\n做箱地址：常州市武进区夏城路395号\n"
     assert _extract_header_company(text) == "常州赛格威"
 
 
-def test_extract_header_company_ignores_pure_notice_title_and_factory():
+async def test_extract_header_company_ignores_pure_notice_title_and_factory():
     """纯单据标题 + 工厂行不作为客户（不误取装箱工厂）。"""
     text = "做箱通知书\n做箱时间：2021-03-31\n| 12 | 装箱工厂 | 喜临门家具 |\n"
     assert _extract_header_company(text) is None
 
 
-def test_extract_header_company_ignores_short_abbrev_heading():
+async def test_extract_header_company_ignores_short_abbrev_heading():
     """2 字简称标题（海丰装箱通知）无法可靠区分，保守不提取。"""
     text = "海丰装箱通知\n提单号：KMTCSHAP950393\n"
     assert _extract_header_company(text) is None
 
 
-def test_extract_header_company_skips_label_rows_with_company_token():
+async def test_extract_header_company_skips_label_rows_with_company_token():
     """表格标签行的值即使含公司特征词（装箱工厂/发货方）也不误取为客户。"""
     text = (
         "| 1 | 做箱通知 |  |\n"
@@ -1456,7 +1458,7 @@ def test_extract_header_company_skips_label_rows_with_company_token():
     assert _extract_header_company(text) is None
 
 
-def test_extract_header_company_prefers_customer_label():
+async def test_extract_header_company_prefers_customer_label():
     """明确客户栏（表格形式）位于顶部时优先作为客户来源。"""
     text = (
         "| 1 | 客户 | 俊泰物流有限公司 |\n"
@@ -1467,18 +1469,18 @@ def test_extract_header_company_prefers_customer_label():
     assert _extract_header_company(text) == "特格威"
 
 
-def test_extract_header_company_keeps_company_with_goods_token():
+async def test_extract_header_company_keeps_company_with_goods_token():
     """含“货物”子串的货代公司名（长文本）不再被标签词拦截，可作抬头客户来源。"""
     text = "上海威世国际货物运输代理有限公司\n门点装箱通知\nTO: 北跃物流\n"
     assert _extract_header_company(text) == "上海威世国际货物运输代理有限公司"
 
 
-def test_extract_header_company_handles_none():
+async def test_extract_header_company_handles_none():
     assert _extract_header_company(None) is None
     assert _extract_header_company("") is None
 
 
-def test_parse_document_to_order_extracts_header_company_when_llm_empty(monkeypatch):
+async def test_parse_document_to_order_extracts_header_company_when_llm_empty(monkeypatch):
     """LLM 未提取客户时，从文档顶部区域主动补全 c_title。"""
 
     def fake_convert(file_bytes, filename):
@@ -1490,31 +1492,31 @@ def test_parse_document_to_order_extracts_header_company_when_llm_empty(monkeypa
         )
         return markdown, "pdf", {"parser": "pdfplumber"}, ("markdown:" + markdown)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {**COMPLETE_RAW, "c_title": None}, {"model": "fake", "usage": None}
 
     monkeypatch.setattr(document_module, "_convert_file", fake_convert)
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
     assert result["extracted"]["c_title"] == "江苏倍联现代物流有限公司"
     assert result["missing_fields"] == []
 
 
-def test_revise_c_title_handles_none():
+async def test_revise_c_title_handles_none():
     assert _revise_c_title_to_value(None, _NOTICE_TEXT) is None
     assert _revise_c_title_to_value("俊泰", None) == "俊泰"
     assert _revise_c_title_to_value(None, None) is None
 
 
-def test_extract_company_name_strips_contact():
+async def test_extract_company_name_strips_contact():
     assert _extract_company_name("江苏倍联 陈俐玲") == "江苏倍联"
     assert _extract_company_name("海丰") == "海丰"
     assert _extract_company_name("CMA CGM") == "CMA CGM"
     assert _extract_company_name("江苏倍联现代物流有限公司") == "江苏倍联现代物流有限公司"
 
 
-def test_prompt_c_title_only_from_fm_from():
+async def test_prompt_c_title_only_from_fm_from():
     """prompt 必须：客户取文档抬头或 FM/FROM 后的值，并禁止 TO/ATTN。"""
     prompt = document_module._SYSTEM_PROMPT
     assert "抬头" in prompt
@@ -1526,7 +1528,7 @@ def test_prompt_c_title_only_from_fm_from():
     assert "对账时请注明" not in prompt
 
 
-def test_prompt_requires_all_data_rows():
+async def test_prompt_requires_all_data_rows():
     """prompt 必须要求列出每一个数据行，禁止只取第一行。"""
     prompt = document_module._SYSTEM_PROMPT
     assert "每一个数据行" in prompt
@@ -1534,11 +1536,11 @@ def test_prompt_requires_all_data_rows():
     assert "data[0]" in prompt
 
 
-def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
+async def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
     """e2e：mock LLM 输出多行 data，order_data 完整保留。"""
     monkeypatch.setattr(document_module, "_convert_file", _fake_convert)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         return {
             **COMPLETE_RAW,
             "data": MULTI_ROW_DATA,
@@ -1547,9 +1549,9 @@ def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
             "volume": "33.92",
         }, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(document_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(document_module, "achat_json", fake_chat_json)
 
-    result = parse_document_to_order(b"fake-pdf", "order.pdf")
+    result = await parse_document_to_order_async(b"fake-pdf", "order.pdf")
 
     assert result["extracted"]["data"] == [
         {"b_order_num": "OOLU2120860080", "j": "680", "m": "8602", "t": "33.92", "hh": None, "mt": None},

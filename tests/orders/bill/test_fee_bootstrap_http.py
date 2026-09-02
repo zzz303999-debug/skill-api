@@ -23,11 +23,14 @@ import app.orders.bill.fee_bootstrap as fb_module
 import app.orders.bill.fee_price_map as fp_module
 import app.orders.bill.master_data as md_module
 import app.orders.bill.master_data_client as md_client_module
-from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem, build_result
-from app.orders.bill.fee_bootstrap import build_price_form, run_fee_bootstrap
+import app.orders.http_client as http_client_module
+from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem, build_result_async
+from app.orders.bill.fee_bootstrap import build_price_form, run_fee_bootstrap_async
 from app.orders.bill.fee_price_map import apply_price_map
 from app.orders.bill.fee_registry import get_registry
 from helpers import FakeResponse, build_bill_bytes
+
+pytestmark = pytest.mark.asyncio
 
 # 注入的费目映射表（测试值）：freight 已有 id；waiting/other 待自举
 _FEE_MAP = {
@@ -116,7 +119,7 @@ def md_endpoint(tmp_path, monkeypatch):
 @pytest.fixture()
 def real_archives(monkeypatch, _no_real_archive_calls):
     """恢复真实 create_archives（conftest 全局 mock 是零网络兜底）。"""
-    monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
+    monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
     return _no_real_archive_calls
 
 
@@ -126,11 +129,11 @@ def fake_http(monkeypatch):
     captured: list[dict] = []
 
     def _install(responder) -> None:
-        def fake_post(url, *, data=None, headers=None, timeout=None, **kwargs):
-            captured.append({"url": url, "data": data, "headers": headers, "timeout": timeout})
-            return responder(url, data=data)
+        async def fake_post(url, *, payload=None, headers=None, timeout=None, name=None, payload_kind=None, **kwargs):
+            captured.append({"url": url, "data": payload, "headers": headers, "timeout": timeout})
+            return responder(url, data=payload)
 
-        monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
 
     _install.captured = captured
     return _install
@@ -152,7 +155,7 @@ def _make_order(*codes: str) -> CanonicalOrder:
 class TestPriceForm:
     """费用栏目新增请求体：build_price_form 字段完整性。"""
 
-    def test_form_fields_with_defaults(self, price_cfg, md_endpoint):
+    async def test_form_fields_with_defaults(self, price_cfg, md_endpoint):
         """create_defaults 打底 + 生成值覆盖（name/sn）；布尔 on 归一。"""
         form = build_price_form("waiting", "待时费")
         assert form["name"] == "待时费"
@@ -163,16 +166,16 @@ class TestPriceForm:
         assert form["price_type"] == "1" and form["dai_dian"] == "2"
         assert "is_other" not in form  # 非其它费不带 is_other
 
-    def test_other_code_sends_is_other(self, price_cfg, md_endpoint):
+    async def test_other_code_sends_is_other(self, price_cfg, md_endpoint):
         """其它费特判：other 码额外发 is_other=1（逆推规范 §8.2）。"""
         form = build_price_form("other", "其它费")
         assert form["is_other"] == "1"
         assert form["sn"] == "AUTO_OTHER"
 
-    def test_success_parses_price_id_and_registers(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_success_parses_price_id_and_registers(self, price_cfg, md_endpoint, fake_http, real_archives):
         """建档成功 → price_id 解析 → registry 登记 → 当批 apply_price_map 回填。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": {"price_id": 90001}}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["mode"] == "create"
         assert report["created"] == [{"code": "waiting", "tms_name": "待时费", "price_id": 90001}]
         assert report["failed"] == [] and report["exists_external"] == []
@@ -187,11 +190,11 @@ class TestPriceForm:
         apply_price_map(order.fees)
         assert order.fees[0].price_id == 90001 and order.fees[0].tms_name == "待时费"
 
-    def test_multi_code_one_call_each(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_multi_code_one_call_each(self, price_cfg, md_endpoint, fake_http, real_archives):
         """同批多码逐码建档（一次调用一码），互不干扰。"""
         price_ids = iter([90001, 90002])
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "ok", "data": {"price_id": next(price_ids)}}))
-        report = run_fee_bootstrap([_make_order("waiting", "other")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting", "other")], create_order=True, sk="sk-token")
         assert [c["code"] for c in report["created"]] == ["waiting", "other"]
         assert [r["data"]["sn"] for r in fake_http.captured] == ["AUTO_WAITING", "AUTO_OTHER"]
         assert get_registry().lookup("other")["price_id"] == 90002
@@ -200,42 +203,42 @@ class TestPriceForm:
 class TestPriceFailures:
     """费用栏目新增失败解析：HTTP 错误 / 非 JSON / 拒单 / 无主键 / 已存在。"""
 
-    def test_failure_http_500(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_failure_http_500(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse({"msg": "boom"}, status_code=500))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["created"] == [] and report["exists_external"] == []
         assert report["failed"] and "HTTP error: 500" in report["failed"][0]["reason"]
         assert get_registry().lookup("waiting") is None  # 失败不登记 → 下批重试
 
-    def test_failure_non_json(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_failure_non_json(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "not a JSON object" in report["failed"][0]["reason"]
 
-    def test_failure_rejected_code(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_failure_rejected_code(self, price_cfg, md_endpoint, fake_http, real_archives):
         """code 非 "200"（拒单，msg 不命中已存在）→ failed。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "500", "msg": "费类不存在"}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "费类不存在" in report["failed"][0]["reason"]
 
-    def test_failure_duplicate_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_failure_duplicate_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
         """「已存在」拒单 → exists_external 登记（不再重试自举）。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "204", "msg": "费用名称已存在"}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] == []
         ext = report["exists_external"]
         assert ext and ext[0]["code"] == "waiting" and "已存在" in ext[0]["message"]
         assert get_registry().lookup("waiting") is None
         assert get_registry().exists_external("waiting") is True
         # 下批不再重试（exists_external 终态；无缺失码 → 不产生报告段）
-        assert run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token") is None
+        assert await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token") is None
 
-    def test_failure_no_primary_key_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
+    async def test_failure_no_primary_key_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
         """成功但无主键 → 自举路径按 failed 处理（registry 不登记，下批重试）；
         注：与 master_data 建档（exists_external 终态防重复建档）语义不一致，
         已报告待实现侧决策（当前价格创建端点实测均回 price_id，未触发此路径）。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": []}))
-        report = run_fee_bootstrap([_make_order("waiting")], create_order=True, sk="sk-token")
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "未返回主键" in report["failed"][0]["reason"]
         assert report["exists_external"] == [] and report["created"] == []
         assert get_registry().lookup("waiting") is None
@@ -244,15 +247,14 @@ class TestPriceFailures:
 class TestServiceIntegration:
     """service 集成：自举失败不阻断订单；费用降级 excluded 仅对账。"""
 
-    def test_bootstrap_failure_keeps_order_flow(self, price_cfg, md_endpoint, monkeypatch, real_archives):
-        import app.orders.bill.client as client_module
+    async def test_bootstrap_failure_keeps_order_flow(self, price_cfg, md_endpoint, monkeypatch, real_archives):
 
-        def fake_post(url, data=None, **_kwargs):
+        async def fake_post(url, *, payload=None, headers=None, name=None, payload_kind=None, timeout=None, **_kwargs):
             if "/Create/Price" in url:
                 return FakeResponse({"code": "500", "msg": "费目建档失败"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         # junyu 家族表头（L2 命中；含应收费用列「运费」→ waiting 码待自举）
         headers = {
             "A": "序号",
@@ -267,7 +269,7 @@ class TestServiceIntegration:
             "J": "应收备注",
             "K": "待时费",
         }
-        result = build_result(
+        result = await build_result_async(
             filename="junyu.xlsx",
             file_bytes=build_bill_bytes(
                 headers,

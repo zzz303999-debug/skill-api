@@ -260,253 +260,6 @@ def defaults_for(kind: str) -> dict[str, Any]:
 
 # ---- 阈值编排（service 管线挂点入口） ----
 
-
-def run_master_data(
-    orders: list[CanonicalOrder], *, create_order: bool, sk: str = ""
-) -> dict[str, Any] | None:
-    """阈值编排：聚合后、payload 构造前执行 → 报告 dict（meta["master_data"]）。
-
-    create_order=true：计数 → 按依赖序建档（sk 由调用方登录 TMS 后透传）→ 当批
-    回填 + 订单标注；false：只读探测（不计数不建档，展示当前计数状态）。
-    disabled → None（不产生报告段）。
-    建档失败/端点 TODO → 结构化进报告，不抛断订单流程（订单永远照常提交）。
-    """
-    config = load_config()
-    if not config.get("enabled"):
-        return None
-    from .master_data_client import create_archives
-
-    store = get_store()
-    threshold = int(config["threshold"])
-    candidates = collect_candidates(orders)
-    report: dict[str, Any] = {
-        "enabled": True,
-        "threshold": threshold,
-        "mode": "create" if create_order else "preview",
-        "candidates": dict(Counter(c.kind for c in candidates)),
-        "incremented": {},
-        "archived": [],
-        "failed": [],
-        "exists_external": [],
-        "degraded": [
-            kind
-            for kind in (KIND_CLIENT, KIND_FACTORY, KIND_TRUCK, KIND_DRIVER, KIND_BAILOR)
-            if endpoint_for(kind) is None
-        ],
-    }
-
-    if not create_order:
-        # 只读探测：标注基于当前累计计数（不含本批），不写存储
-        _annotate_pending(candidates, store, threshold)
-        report["pending_top"] = _pending_top(store, threshold)
-        return report
-
-    # 1) 计数：按单计（一单一次）；计数先于建档（当批累计、当批判定）
-    for candidate in candidates:
-        store.record(candidate.kind, candidate.key)
-    report["incremented"] = dict(
-        Counter(c.kind for c in candidates)
-    )
-
-    # 2) 建档（按依赖序；每键本批只尝试一次，成功失败均不重试——失败下批重试；
-    #    T27b：exists_external（TMS 已存在）登记后不再重试）
-    attempted: set[tuple[str, str]] = set()
-    archived: dict[str, dict[str, Any]] = {}
-    failed: list[dict[str, Any]] = []
-    exists_external: list[dict[str, Any]] = []
-    for kind in ARCHIVE_ORDER:
-        for candidate in _unique_by_key(candidates, kind):
-            key = candidate.key
-            if (kind, key) in attempted:
-                continue
-            attempted.add((kind, key))
-            rec = store.get(kind, key)
-            if rec and (rec.get("archive_id") or rec.get("exists_external") or rec.get("skip_archive")):
-                continue  # 历史已建档 / TMS 已存在（T27b）/ 本侧不可建档终态（无车牌司机）——均不再重试
-            if int(rec.get("count") or 0) < threshold:
-                continue  # 未达阈值
-            url = endpoint_for(kind)
-            if url is None:
-                continue  # 端点 TODO → 只计数不建档（degraded 已在报告）
-            result = _create_one(
-                kind, candidate, rec, store, create_archives, attempted, archived, failed, exists_external, sk
-            )
-            if result:
-                archived[(kind, key)] = result
-
-    # 3) 当批回填 + 订单标注（全部候选，按当前记录取数）
-    for candidate in candidates:
-        rec = store.get(candidate.kind, candidate.key)
-        if rec and rec.get("archive_id"):
-            candidate.order._archive_refs[candidate.kind] = {
-                "archive_id": rec["archive_id"],
-                "key": candidate.key,
-            }
-    _annotate_pending(candidates, store, threshold)
-
-    report["archived"] = [
-        {"kind": kind, "key": key, "display": result["display"], "archive_id": result["archive_id"]}
-        for (kind, key), result in archived.items()
-    ]
-    report["failed"] = failed
-    report["exists_external"] = exists_external
-    report["pending_top"] = _pending_top(store, threshold)
-    return report
-
-
-def _unique_by_key(
-    candidates: list[MasterDataCandidate], kind: str
-) -> list[MasterDataCandidate]:
-    """同档案类按计数键去重（建档调用每键一次；返回首个候选作代表）。"""
-    seen: set[str] = set()
-    unique: list[MasterDataCandidate] = []
-    for candidate in candidates:
-        if candidate.kind != kind or candidate.key in seen:
-            continue
-        seen.add(candidate.key)
-        unique.append(candidate)
-    return unique
-
-
-def _create_one(
-    kind: str,
-    candidate: MasterDataCandidate,
-    rec: dict[str, Any],
-    store,
-    create_archives,
-    attempted: set[tuple[str, str]],
-    archived: dict[tuple[str, str], dict[str, Any]],
-    failed: list[dict[str, Any]],
-    exists_external: list[dict[str, Any]] | None = None,
-    sk: str = "",
-) -> dict[str, Any] | None:
-    """建档一次（依赖前置检查 + 建档调用 + 结果登记）；失败进 failed 不抛断。
-
-    T27b：响应带 duplicate 标记（TMS 已存在拒单）→ store 登记 exists_external
-    （不再重试，archive_id 保持 null），进 exists_external 报告段（与 failed 区分）。
-    """
-    forms: dict[str, dict[str, str]] = {}
-
-    if kind == KIND_CLIENT:
-        from .master_data_client import build_client_form
-
-        forms[kind] = {candidate.key: build_client_form(candidate, rec)}
-    elif kind == KIND_FACTORY:
-        from .master_data_client import build_factory_form
-
-        client_archive_id = _client_archive_id(candidate, store)
-        if not client_archive_id:
-            failed.append(
-                {
-                    "kind": kind,
-                    "key": candidate.key,
-                    "display": candidate.display,
-                    "reason": "所属客户未建档（依赖前置：客户 → 工厂）",
-                }
-            )
-            return None
-        forms[kind] = {candidate.key: build_factory_form(candidate, rec, client_archive_id)}
-    elif kind == KIND_DRIVER:
-        from .master_data_client import build_driver_form, build_truck_form
-
-        if not candidate.plate:
-            # TMS AddCarDriver 必填 num（车牌），无车牌司机永久无法建档（2026-08-14
-            # live 实证拒单「请重新选择车牌」）→ 登记 skip_archive 终态不再重试
-            # （避免每批都发注定被拒的请求）；订单保留「未建档」标注，计数照常
-            # （后续订单带车牌 → 新计数键 → 恢复正常建档）
-            store.mark_skip_archive(kind, candidate.key)
-            failed.append(
-                {
-                    "kind": kind,
-                    "key": candidate.key,
-                    "display": candidate.display,
-                    "reason": "司机无车牌（TMS AddCarDriver 必填 num），无法建档",
-                }
-            )
-            return None
-        if not candidate.phone:
-            # TMS CarDriver.php 校验 phone 必填（缺键 500 / 空串 no: phone，2026-08-14
-            # live 实证）——无手机号司机同样永久无法建档 → skip_archive 终态
-            store.mark_skip_archive(kind, candidate.key)
-            failed.append(
-                {
-                    "kind": kind,
-                    "key": candidate.key,
-                    "display": candidate.display,
-                    "reason": "司机无手机号（TMS AddCarDriver 必填 phone），无法建档",
-                }
-            )
-            return None
-        # 依赖序：车辆 → 司机（同车牌建过不再建；建车失败不阻塞建司机——truck_id 可空）
-        truck_archive_id = ""
-        if candidate.plate:
-            plate_key_ = plate_key(candidate.plate)
-            truck_rec = store.get(KIND_TRUCK, plate_key_)
-            if truck_rec and truck_rec.get("archive_id"):
-                truck_archive_id = truck_rec["archive_id"]
-            elif endpoint_for(KIND_TRUCK) is not None and (
-                KIND_TRUCK,
-                plate_key_,
-            ) not in attempted:
-                attempted.add((KIND_TRUCK, plate_key_))
-                truck_form = build_truck_form(
-                    candidate.plate, sn_for(KIND_TRUCK, int((truck_rec or {}).get("count") or 0) + 1)
-                )
-                truck_result = create_archives({KIND_TRUCK: {plate_key_: truck_form}}, sk)
-                truck_out = (truck_result.get(KIND_TRUCK) or {}).get(plate_key_) or {}
-                if truck_out.get("success"):
-                    truck_archive_id = str(truck_out["archive_id"])
-                    store.set_archive(KIND_TRUCK, plate_key_, truck_archive_id)
-                    archived[(KIND_TRUCK, plate_key_)] = {
-                        "display": candidate.plate,
-                        "archive_id": truck_archive_id,
-                    }
-                elif truck_out.get("error"):
-                    failed.append(
-                        {
-                            "kind": KIND_TRUCK,
-                            "key": plate_key_,
-                            "display": candidate.plate,
-                            "reason": _failure_reason(truck_out),
-                        }
-                    )
-        forms[kind] = {
-            candidate.key: build_driver_form(candidate, rec, truck_archive_id)
-        }
-    elif kind in (KIND_BAILOR, KIND_PRICE):
-        return None  # 委托人只计数不建档（来源字段缺失）；费目建档在自举管线（fee_bootstrap）
-
-    results = create_archives(forms, sk)
-    outcome = (results.get(kind) or {}).get(candidate.key) or {}
-    if outcome.get("success"):
-        store.set_archive(kind, candidate.key, outcome["archive_id"])
-        return {"display": candidate.display, "archive_id": outcome["archive_id"]}
-    if outcome.get("duplicate") or outcome.get("no_id_created"):
-        # T27b：TMS 已存在（唯一约束拒单）/ 已添加但响应无主键（no_id_created）→
-        # 档案已在 TMS（无查询接口无法取 id）→ 登记 exists_external 不再重试
-        # （后者若不登记，每次重试都会再建一条档案——AddCarFactory 实证）
-        store.mark_exists_external(kind, candidate.key)
-        if exists_external is not None:
-            exists_external.append(
-                {
-                    "kind": kind,
-                    "key": candidate.key,
-                    "display": candidate.display,
-                    "message": (outcome.get("error") or {}).get("message") or "已存在",
-                }
-            )
-        return None
-    failed.append(
-        {
-            "kind": kind,
-            "key": candidate.key,
-            "display": candidate.display,
-            "reason": _failure_reason(outcome) or "未知错误",
-        }
-    )
-    return None
-
-
 def _client_archive_id(candidate: MasterDataCandidate, store) -> str:
     """工厂候选的所属客户档案 id（同单客户归一键查登记；未建档 → ""）。"""
     if not candidate.client_key:
@@ -524,6 +277,20 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
     code = error.get("code") or ""
     parts = [p for p in (code, message) if p]
     return "：".join(parts) or "未知错误"
+
+
+def _unique_by_key(
+    candidates: list[MasterDataCandidate], kind: str
+) -> list[MasterDataCandidate]:
+    """同档案类按计数键去重（建档调用每键一次；返回首个候选作代表）。"""
+    seen: set[str] = set()
+    unique: list[MasterDataCandidate] = []
+    for candidate in candidates:
+        if candidate.kind != kind or candidate.key in seen:
+            continue
+        seen.add(candidate.key)
+        unique.append(candidate)
+    return unique
 
 
 def _annotate_pending(
@@ -571,7 +338,7 @@ async def _create_one_async(
     exists_external: list[dict[str, Any]] | None = None,
     sk: str = "",
 ) -> dict[str, Any] | None:
-    """_create_one 的异步版：建档调用走 await create_archives_fn（async 版），
+    """_create_one（2026-09 异步化改造后为生产唯一入口）：建档调用走 await create_archives_fn（async 版），
     依赖前置/终态登记/报告语义逐行一致（司机前置建车同样 await）。"""
     forms: dict[str, dict[str, str]] = {}
 
@@ -691,7 +458,7 @@ async def _create_one_async(
 async def run_master_data_async(
     orders: list[CanonicalOrder], *, create_order: bool, sk: str = ""
 ) -> dict[str, Any] | None:
-    """run_master_data 的异步版：建档段走 create_archives_async，其余逻辑逐行一致。
+    """run_master_data（2026-09 异步化改造后为生产唯一入口）：建档段走 create_archives_async，其余逻辑逐行一致。
 
     建档保持依赖序串行（客户→工厂/司机跨档案依赖，不能并行）；
     建档失败/端点 TODO → 结构化进报告，不抛断订单流程（语义不变）。

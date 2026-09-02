@@ -11,14 +11,12 @@ addBill），调用方无需自行记录请求与响应——每条调用产出�
 约束：
 - 请求体/响应体一律截断（默认 2000 字符），防超大响应撑爆日志；
 - headers 值不落日志（sk 等凭据不泄露），仅透传给下游；
-- 调用参数与 httpx.post 语义一致（url/data|json/headers/timeout），
-  测试 monkeypatch httpx.post 的既有用例不受影响。
+- 调用参数与 httpx 语义一致（url/payload/headers/timeout），测试经
+  _post_async 或 post_json_async/post_form_async 注入替身。
 
-异步版本（post_json_async / post_form_async，2026-09 异步化改造新增）：
-与同步版语义逐项对齐（同三条日志、同截断、同异常上抛），复用本模块
-纯函数（_preview/_unpack_json_strings 等）；共享懒加载 AsyncClient
-单例（连接池复用，per-request timeout）。同步版本保留至异步链路全部
-切换后统一清理（双轨过渡）。
+2026-09 起生产唯一链路（原同步版已随 Phase 4b 清理）：复用本模块纯函数
+（_preview/_unpack_json_strings 等），共享懒加载 AsyncClient 单例
+（连接池复用，per-request timeout）。
 """
 
 from __future__ import annotations
@@ -116,98 +114,7 @@ def pretty_json(value: Any, *, max_chars: int = 2000) -> str:
     return text[:max_chars]
 
 
-def _post(
-    *,
-    name: str,
-    url: str,
-    timeout: float,
-    payload_kind: str,
-    payload: Any,
-    headers: dict[str, str] | None,
-) -> httpx.Response:
-    """POST 并记录请求/响应/异常日志；网络异常记录后原样抛出。"""
-    started = time.monotonic()
-    request_extra = {
-        "endpoint": name,
-        "method": "POST",
-        "url": url,
-        "payload_kind": payload_kind,
-        "body_preview": _preview(payload),
-    }
-    log.info("third_party_request", extra=request_extra)
-    record_third_party("third_party_request", "INFO", **request_extra)
-    try:
-        kwargs: dict[str, Any] = {"timeout": timeout}
-        if headers:
-            kwargs["headers"] = headers
-        if payload_kind == "json":
-            kwargs["json"] = payload
-        else:
-            kwargs["data"] = payload
-        response = httpx.post(url, **kwargs)
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        error_extra = {
-            "endpoint": name,
-            "method": "POST",
-            "url": url,
-            "error_type": exc.__class__.__name__,
-            "duration_ms": round((time.monotonic() - started) * 1000),
-        }
-        log.warning("third_party_request_error", extra=error_extra)
-        record_third_party("third_party_request_error", "WARNING", **error_extra)
-        raise
-    response_extra = {
-        "endpoint": name,
-        "method": "POST",
-        "url": url,
-        "status_code": response.status_code,
-        "duration_ms": round((time.monotonic() - started) * 1000),
-        "body_preview": _preview(getattr(response, "text", "")),
-    }
-    log.info("third_party_response", extra=response_extra)
-    record_third_party("third_party_response", "INFO", **response_extra)
-    return response
-
-
-def post_json(
-    url: str,
-    payload: Any,
-    *,
-    name: str,
-    timeout: float,
-    headers: dict[str, str] | None = None,
-) -> httpx.Response:
-    """POST JSON body（content-type 由 httpx 默认 application/json）。"""
-    return _post(
-        name=name,
-        url=url,
-        timeout=timeout,
-        payload_kind="json",
-        payload=payload,
-        headers=headers,
-    )
-
-
-def post_form(
-    url: str,
-    data: dict[str, Any],
-    *,
-    name: str,
-    timeout: float,
-    headers: dict[str, str] | None = None,
-) -> httpx.Response:
-    """POST 表单（httpx data= 语义，x-www-form-urlencoded）。"""
-    return _post(
-        name=name,
-        url=url,
-        timeout=timeout,
-        payload_kind="form",
-        payload=data,
-        headers=headers,
-    )
-
-
-# ---- 异步版本（与同步版语义逐项对齐；Phase 2 异步化改造新增）----
+# ---- 异步 POST 封装（2026-09 起生产唯一链路）----
 
 # 共享懒加载 AsyncClient：连接池复用（下游同一批 TMS 端点）；timeout=None
 # 仅作默认值，实际超时由每次请求显式传入（与同步 httpx.post(timeout=) 语义一致）。

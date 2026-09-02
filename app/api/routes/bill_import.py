@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
@@ -61,19 +60,16 @@ async def import_bill(
     content = await _read_upload(file)
     request.state.file_size = len(content)
     # 编排入口经 app.main 命名空间解析：测试以 setattr(main_module,
-    # "build_result", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）。
-    # 生产绑定为 build_result_async（真异步）；同步替身（测试 fake）经
-    # isawaitable 桥接兼容（Phase 4 清理同步路径时一并统一）
+    # "build_result", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）；
+    # main 绑定为 build_result_async（真异步编排，fake 测试替身亦为 async）
     from app.main import build_result
 
-    result = build_result(
+    result = await build_result(
         filename=file.filename or "unnamed",
         file_bytes=content,
         create_order=create_order,
         sk=sk,
     )
-    if inspect.isawaitable(result):
-        result = await result
     # 统一响应外壳（code/msg/data，对齐 TMS 通道口径）：
     # - create 全部命中注册表（skipped>0 且 created=0）→ 409（业务码 "409"）
     # - create 有新建（含部分失败）→ "200"；全部失败（无新建）→ "204"

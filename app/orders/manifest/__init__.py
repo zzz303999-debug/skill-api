@@ -13,7 +13,7 @@ from .schema import (
     ManifestOrder,
     ManifestParseResult,
 )
-from .service import build_manifest_result, build_manifest_result_async
+from .service import build_manifest_result_async
 
 __all__ = [
     "MANIFEST_REQUIRED",
@@ -23,7 +23,6 @@ __all__ = [
     "ManifestOrder",
     "ManifestParseOutput",
     "ManifestParseResult",
-    "build_manifest_result",
     "build_manifest_result_async",
     "parse_manifest",
 ]

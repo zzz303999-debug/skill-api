@@ -14,7 +14,8 @@ import yaml
 
 import app.orders.bill.master_data as md_module
 import app.orders.bill.master_data_client as md_client_module
-from app.orders.bill import BoxGroup, CanonicalOrder, build_result
+import app.orders.http_client as http_client_module
+from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.master_data import (
     KIND_CLIENT,
     KIND_DRIVER,
@@ -27,11 +28,13 @@ from app.orders.bill.master_data import (
     factory_key,
     normalize_key,
     plate_key,
-    run_master_data,
+    run_master_data_async,
     sn_for,
 )
 from app.orders.bill.master_data_store import MasterDataStore, get_store
 from app.orders.bill.payload import build_order_payload
+
+pytestmark = pytest.mark.asyncio
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"
 
@@ -75,7 +78,7 @@ def fake_create(md_config, monkeypatch):
     def _install(cfg: dict | None = None, *, fail_kinds: set[str] | None = None):
         md_config(cfg or _default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
+        async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -95,7 +98,7 @@ def fake_create(md_config, monkeypatch):
                         }
             return results
 
-        monkeypatch.setattr(md_client_module, "create_archives", _fake)
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
 
     _install.calls = calls
     return _install
@@ -141,28 +144,28 @@ def _make_order(
 class TestNormalizeKeys:
     """T17 归一键：去首尾空格/全半角/连续空白；车牌全大写去空格。"""
 
-    def test_normalize_fullwidth_halfwidth(self):
+    async def test_normalize_fullwidth_halfwidth(self):
         assert normalize_key("ＡＢＣ１２３") == "ABC123"
         assert normalize_key("锦煦") == normalize_key("锦煦")
 
-    def test_normalize_whitespace(self):
+    async def test_normalize_whitespace(self):
         assert normalize_key("  锦 煦  ") == "锦煦"  # 空白全部删除
         assert normalize_key("锦  煦") == normalize_key("锦 煦")  # 连续空白
         assert normalize_key("锦　煦") == "锦煦"  # 全角空格归一并删除
 
-    def test_client_key_consistent(self):
+    async def test_client_key_consistent(self):
         assert client_key("锦煦") == client_key(" 锦煦 ") == client_key("锦　煦")
 
-    def test_plate_key_case_and_space(self):
+    async def test_plate_key_case_and_space(self):
         assert plate_key("沪a12345") == plate_key("沪A12345")
         assert plate_key(" 沪A 12345 ") == plate_key("沪A12345")
         assert plate_key(None) == ""
 
-    def test_factory_key_composite(self):
+    async def test_factory_key_composite(self):
         assert factory_key("上海仓", "浦东") != factory_key("上海仓", "浦西")
         assert factory_key("上海仓", "浦东") == factory_key(" 上海仓 ", "浦东")
 
-    def test_driver_key_pair(self):
+    async def test_driver_key_pair(self):
         assert driver_key("王师傅", "沪A12345") != driver_key("王师傅", "沪B67890")
         assert driver_key("王师傅", "沪A12345") != driver_key("李师傅", "沪A12345")
         assert driver_key("王师傅", "沪a12345") == driver_key("王师傅", "沪A12345")
@@ -171,15 +174,15 @@ class TestNormalizeKeys:
 class TestThreshold:
     """阈值边界：第 4 次不触发、第 5 次触发（口径：>N 次才录入）。"""
 
-    def test_fourth_not_trigger_fifth_triggers(self, fake_create):
+    async def test_fourth_not_trigger_fifth_triggers(self, fake_create):
         fake_create()
         for _ in range(4):
-            report = run_master_data([_make_order()], create_order=True)
+            report = await run_master_data_async([_make_order()], create_order=True)
         assert report["archived"] == [] and report["failed"] == []
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 4
         assert fake_create.calls == []  # 未达阈值不建档
 
-        report = run_master_data([_make_order()], create_order=True)
+        report = await run_master_data_async([_make_order()], create_order=True)
         # 同一订单含客户/工厂/司机三类候选，第 5 次全部达阈值；建档按依赖序
         # （客户 → 工厂 → 车辆 → 司机；司机带车牌先建车拿 truck_id）
         assert [a["kind"] for a in report["archived"]] == [
@@ -193,10 +196,10 @@ class TestThreshold:
         assert len(client_calls) == 1
         assert client_calls[0][KIND_CLIENT][client_key("锦煦")]["client_name"] == "锦煦"
 
-    def test_sn_generated_from_count(self, fake_create):
+    async def test_sn_generated_from_count(self, fake_create):
         """sn = {sn_prefix}{5 位序号}（序号取该键累计计数，防存量撞名避让）。"""
         fake_create(_default_cfg(threshold=1))
-        run_master_data([_make_order()], create_order=True)
+        await run_master_data_async([_make_order()], create_order=True)
         form = fake_create.calls[0][KIND_CLIENT][client_key("锦煦")]
         assert form["sn"] == "CLT00001"
         assert sn_for(KIND_CLIENT, 12) == "CLT00012"
@@ -205,7 +208,7 @@ class TestThreshold:
 class TestPersistence:
     """跨批次持久化：重启（新实例）计数不丢。"""
 
-    def test_count_survives_reload(self, tmp_path):
+    async def test_count_survives_reload(self, tmp_path):
         path = tmp_path / "md.json"
         store = MasterDataStore(path)
         store.record(KIND_CLIENT, client_key("锦煦"))
@@ -216,7 +219,7 @@ class TestPersistence:
         rec = restarted.get(KIND_CLIENT, client_key("锦煦"))
         assert rec is not None and rec["count"] == 2
 
-    def test_archive_id_survives_reload(self, tmp_path):
+    async def test_archive_id_survives_reload(self, tmp_path):
         path = tmp_path / "md.json"
         store = MasterDataStore(path)
         store.record(KIND_CLIENT, client_key("锦煦"))
@@ -228,10 +231,10 @@ class TestPersistence:
 class TestBatchDedupe:
     """同批去重：按单计（一单一次），建档调用每键只发一次（T19）。"""
 
-    def test_same_batch_counts_per_order_but_archives_once(self, fake_create):
+    async def test_same_batch_counts_per_order_but_archives_once(self, fake_create):
         fake_create()
         orders = [_make_order() for _ in range(5)]
-        report = run_master_data(orders, create_order=True)
+        report = await run_master_data_async(orders, create_order=True)
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 5
         # 每档案类同批建档只发一次（依赖序：client/factory 各一次；
         # truck 在司机链内嵌调用一次，driver 收尾一次）
@@ -244,10 +247,10 @@ class TestBatchDedupe:
         driver_form = fake_create.calls[-1][KIND_DRIVER][driver_key("王师傅", "沪A12345")]
         assert driver_form["truck_id"] == "aid-truck-0"
 
-    def test_archived_result_reused_within_batch(self, fake_create):
+    async def test_archived_result_reused_within_batch(self, fake_create):
         fake_create(_default_cfg(threshold=3))
         orders = [_make_order() for _ in range(6)]
-        run_master_data(orders, create_order=True)
+        await run_master_data_async(orders, create_order=True)
         # 第 3 单触发建档，后续 3 单直接取用登记结果（调用仍只一次）
         client_calls = [c for c in fake_create.calls if KIND_CLIENT in c]
         assert len(client_calls) == 1
@@ -258,7 +261,7 @@ class TestBatchDedupe:
 class TestDependencyOrder:
     """依赖序（逆推规范 §14）：客户 → 工厂；工厂缺客户档案不建档但计数保留。"""
 
-    def test_factory_skipped_without_client(self, fake_create):
+    async def test_factory_skipped_without_client(self, fake_create):
         """工厂达阈值但所属客户未达 → 跳过建档（failed 原因），工厂计数保留。"""
         fake_create(_default_cfg(threshold=3))
         orders = [
@@ -266,15 +269,15 @@ class TestDependencyOrder:
             _make_order(customer="客户乙", door="上海仓", address="浦东", driver=None),
             _make_order(customer="客户丙", door="上海仓", address="浦东", driver=None),
         ]
-        report = run_master_data(orders, create_order=True)
+        report = await run_master_data_async(orders, create_order=True)
         failed = [f for f in report["failed"] if f["kind"] == KIND_FACTORY]
         assert failed and "所属客户未建档" in failed[0]["reason"]
         assert get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东"))["count"] == 3
         assert fake_create.calls == []  # 客户未建档 → 未触发任何建档调用
 
-    def test_factory_archives_after_client_with_client_id(self, fake_create):
+    async def test_factory_archives_after_client_with_client_id(self, fake_create):
         fake_create(_default_cfg(threshold=1))
-        report = run_master_data([_make_order()], create_order=True)
+        report = await run_master_data_async([_make_order()], create_order=True)
         kinds = [a["kind"] for a in report["archived"]]
         # 依赖序：客户先建档，工厂随后（其后为司机链）
         assert kinds[:2] == [KIND_CLIENT, KIND_FACTORY]
@@ -283,10 +286,10 @@ class TestDependencyOrder:
         assert factory_form["client_id"] == "aid-client-0"
         assert factory_form["client_name"] == "锦煦"
 
-    def test_client_failure_blocks_factory_but_keeps_counts(self, fake_create):
+    async def test_client_failure_blocks_factory_but_keeps_counts(self, fake_create):
         """客户建档失败 → 工厂跳过（计数保留、下批重试）；不抛断。"""
         fake_create(_default_cfg(threshold=1), fail_kinds={KIND_CLIENT})
-        report = run_master_data([_make_order()], create_order=True)
+        report = await run_master_data_async([_make_order()], create_order=True)
         assert any(f["kind"] == KIND_FACTORY for f in report["failed"])
         assert any(f["kind"] == KIND_CLIENT for f in report["failed"])
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
@@ -299,10 +302,10 @@ class TestDriverArchived:
     依赖链：车辆 → 司机（带车牌先建车拿 truck_id）；无车牌 → skip_archive 终态不建档；
     司机档案 id 不回填订单 payload（driver[0] 走文本 d_name/d_num），只落库。"""
 
-    def test_driver_archives_with_truck_chain(self, fake_create):
+    async def test_driver_archives_with_truck_chain(self, fake_create):
         fake_create(_default_cfg(threshold=1))
         order = _make_order(driver="王师傅", plate="沪A12345", phone="13800000000")
-        report = run_master_data([order], create_order=True)
+        report = await run_master_data_async([order], create_order=True)
         assert KIND_DRIVER in [a["kind"] for a in report["archived"]]
         assert KIND_TRUCK in [a["kind"] for a in report["archived"]]
         assert KIND_DRIVER not in report["degraded"]
@@ -324,12 +327,12 @@ class TestDriverArchived:
         assert order._archive_refs[KIND_DRIVER]["archive_id"] == "aid-driver-0"
         assert "司机「王师傅/沪A12345」未建档" not in (order.unmapped_note or "")
 
-    def test_driver_without_plate_skips_archive(self, fake_create):
+    async def test_driver_without_plate_skips_archive(self, fake_create):
         """无车牌司机：TMS AddCarDriver 必填 num → 跳过建档（skip_archive 终态），
         计数照常、订单保留未建档标注、下批不再重试（不发注定被拒的请求）。"""
         fake_create(_default_cfg(threshold=1))
         order = _make_order(driver="王师傅", plate=None)
-        report = run_master_data([order], create_order=True)
+        report = await run_master_data_async([order], create_order=True)
         driver_failed = [f for f in report["failed"] if f["kind"] == KIND_DRIVER]
         assert driver_failed and "无车牌" in driver_failed[0]["reason"]
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
@@ -338,16 +341,16 @@ class TestDriverArchived:
         assert rec and rec["count"] == 1 and rec["skip_archive"] is True
         assert "司机「王师傅」未建档(1/1)" in (order.unmapped_note or "")
         # 下批不再重试（skip_archive 终态）
-        run_master_data([_make_order(driver="王师傅", plate=None)], create_order=True)
+        await run_master_data_async([_make_order(driver="王师傅", plate=None)], create_order=True)
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
         assert not any(KIND_TRUCK in c for c in fake_create.calls)
 
-    def test_driver_without_phone_skips_archive(self, fake_create):
+    async def test_driver_without_phone_skips_archive(self, fake_create):
         """有车牌无手机号：TMS AddCarDriver 必填 phone（缺键 500 / 空串 no: phone
         实证）→ 跳过建档（skip_archive 终态），不发注定被拒的请求。"""
         fake_create(_default_cfg(threshold=1))
         order = _make_order(driver="王师傅", plate="沪A12345", phone=None)
-        report = run_master_data([order], create_order=True)
+        report = await run_master_data_async([order], create_order=True)
         driver_failed = [f for f in report["failed"] if f["kind"] == KIND_DRIVER]
         assert driver_failed and "无手机号" in driver_failed[0]["reason"]
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
@@ -356,43 +359,43 @@ class TestDriverArchived:
         assert rec and rec["skip_archive"] is True
         assert "司机「王师傅/沪A12345」未建档(1/1)" in (order.unmapped_note or "")
         # 下批不再重试
-        run_master_data([_make_order(driver="王师傅", plate="沪A12345", phone=None)], create_order=True)
+        await run_master_data_async([_make_order(driver="王师傅", plate="沪A12345", phone=None)], create_order=True)
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
         assert not any(KIND_TRUCK in c for c in fake_create.calls)
 
-    def test_driver_counts_across_batches(self, fake_create):
+    async def test_driver_counts_across_batches(self, fake_create):
         """跨批计数：达阈值建档一次，后续批次直接取用登记结果不重复建档。"""
         fake_create(_default_cfg(threshold=3))
         for _ in range(3):
-            run_master_data([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
+            await run_master_data_async([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
         driver_calls = [c for c in fake_create.calls if KIND_DRIVER in c]
         assert len(driver_calls) == 1
         assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 3
         assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
 
-    def test_driver_failed_keeps_counts_and_retries(self, fake_create):
+    async def test_driver_failed_keeps_counts_and_retries(self, fake_create):
         """司机建档失败 → 计数保留、订单标注未建档、下批重试（与全失败语义一致）。"""
         fake_create(_default_cfg(threshold=1), fail_kinds={KIND_DRIVER})
         order = _make_order(driver="王师傅", plate="沪A12345")
-        report = run_master_data([order], create_order=True)
+        report = await run_master_data_async([order], create_order=True)
         assert any(f["kind"] == KIND_DRIVER for f in report["failed"])
         assert "司机「王师傅/沪A12345」未建档(1/1)" in (order.unmapped_note or "")
         # 下批重试
         fake_create(_default_cfg(threshold=1))
-        run_master_data([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
+        await run_master_data_async([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
         assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
 
 
 class TestFailureNonBlocking:
     """建档全部失败 → 订单照常（不抛断）、计数保留、报告 failed + 未建档标注。"""
 
-    def test_all_failed_keeps_order_flow(self, fake_create):
+    async def test_all_failed_keeps_order_flow(self, fake_create):
         fake_create(
             _default_cfg(threshold=1),
             fail_kinds={KIND_CLIENT, KIND_FACTORY, KIND_DRIVER, KIND_TRUCK},
         )
         order = _make_order()
-        report = run_master_data([order], create_order=True)
+        report = await run_master_data_async([order], create_order=True)
         assert report["failed"]
         assert order._archive_refs == {}  # 无回填
         # 订单标注「未建档(x/N)」（不阻塞语义可见；threshold 为注入值 1）
@@ -400,35 +403,35 @@ class TestFailureNonBlocking:
         # 计数保留 → 下批继续累计
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
 
-    def test_retry_next_batch(self, fake_create):
+    async def test_retry_next_batch(self, fake_create):
         """建档失败 → 下批再试（每批最多一次）。"""
         fake_create(_default_cfg(threshold=1), fail_kinds={KIND_CLIENT})
-        run_master_data([_make_order()], create_order=True)
+        await run_master_data_async([_make_order()], create_order=True)
         client_calls = [c for c in fake_create.calls if KIND_CLIENT in c]
         assert len(client_calls) == 1  # 首批尝试一次
 
         # 下批同一订单：再次尝试
-        run_master_data([_make_order()], create_order=True)
+        await run_master_data_async([_make_order()], create_order=True)
         assert len([c for c in fake_create.calls if KIND_CLIENT in c]) == 2
 
 
 class TestPayloadBackfill:
     """T20 回填：已建档 → c_id/factory_id/b_factory_address_msg；未建档 → 零变化。"""
 
-    def test_backfill_keys_when_archived(self, fake_create):
+    async def test_backfill_keys_when_archived(self, fake_create):
         fake_create(_default_cfg(threshold=1))
         order = _make_order()
-        run_master_data([order], create_order=True)
+        await run_master_data_async([order], create_order=True)
         form, _ = build_order_payload(order)
         assert form["c_id"] == "aid-client-0"
         assert form["factory_id"] == "aid-factory-0"
         assert form["b_factory_address_msg"] == "浦东新区"
         assert form["c_title"] == "锦煦"  # 客户名文本不变（F1 语义）
 
-    def test_no_archive_keeps_text_only(self, fake_create):
+    async def test_no_archive_keeps_text_only(self, fake_create):
         fake_create()  # threshold=5 未达
         order = _make_order()
-        run_master_data([order], create_order=True)
+        await run_master_data_async([order], create_order=True)
         form, _ = build_order_payload(order)
         assert form["c_id"] == ""
         assert form["factory_id"] == ""
@@ -439,7 +442,7 @@ class TestPayloadBackfill:
 class TestDegradedEndpoints:
     """endpoints TODO（真实配置）→ 只计数不建档、报告 degraded、不 fail fast。"""
 
-    def test_todo_endpoints_count_only(self, md_config):
+    async def test_todo_endpoints_count_only(self, md_config):
         md_config(_default_cfg())
         md_module.reload_config()
         # 把全部端点改回 TODO（模拟真实配置未补给）
@@ -452,7 +455,7 @@ class TestDegradedEndpoints:
                 "defaults": {},
             }
         )
-        report = run_master_data([_make_order()], create_order=True)
+        report = await run_master_data_async([_make_order()], create_order=True)
         assert report["archived"] == []
         assert set(report["degraded"]) == {
             "client",
@@ -470,7 +473,7 @@ class TestClientDirectURL:
     """建档调用跨宿主直发（阶段三收尾 S2，2026-08-14）：endpoints 全量 URL（含
     s3.jxt56.com 不同宿主）原样使用、无 base_url 拼接；sk 鉴权头照带；URL 只从 config 读。"""
 
-    def test_create_archives_posts_full_url_as_is(
+    async def test_create_archives_posts_full_url_as_is(
         self, md_config, monkeypatch, _no_real_archive_calls
     ):
         md_config(_default_cfg())
@@ -478,17 +481,17 @@ class TestClientDirectURL:
 
         captured: dict = {}
 
-        def fake_post(url, *, data, headers, timeout):
-            captured.update(url=url, data=data, headers=headers, timeout=timeout)
+        async def fake_post(url, *, payload, headers, timeout, name=None, payload_kind=None):
+            captured.update(url=url, data=payload, headers=headers, timeout=timeout)
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": {"client_id": "c-1"}}
             )
 
-        monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         # 本用例验证 create_archives 内部调用链：恢复真实实现（conftest 全局
         # mock 是零网络兜底，显式依赖本 fixture 拿回真实函数）
-        monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
-        result = md_client_module.create_archives(
+        monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
+        result = await md_client_module.create_archives_async(
             {KIND_CLIENT: {"key": {"client_name": "测试", "sn": "CLT00001"}}}, "sk-token"
         )
         # 全量 URL 原样直发（含 host，无 base_url 拼接）
@@ -505,7 +508,7 @@ class TestDuplicateExternal:
         """建档 mock：客户建档返回 duplicate（TMS 已存在 204），其余成功。"""
         md_config(_default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
+        async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -529,9 +532,9 @@ class TestDuplicateExternal:
                         }
             return results
 
-        monkeypatch.setattr(md_client_module, "create_archives", _fake)
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
 
-    def test_duplicate_marks_external_and_skips_retry(self, md_config, monkeypatch, tmp_path):
+    async def test_duplicate_marks_external_and_skips_retry(self, md_config, monkeypatch, tmp_path):
         """204+已存在 → exists_external 单列 + store 标记；第二批不再建档。"""
         from app.orders.bill.master_data_store import reload_store
 
@@ -542,7 +545,7 @@ class TestDuplicateExternal:
         orders = [
             _make_order(customer="锦煦", door=None, address=None, driver=None) for _ in range(5)
         ]
-        report = run_master_data(orders, create_order=True)
+        report = await run_master_data_async(orders, create_order=True)
         assert report["exists_external"] and report["exists_external"][0]["kind"] == KIND_CLIENT
         assert report["failed"] == []  # duplicate 不记 failed
         assert len(calls) == 1
@@ -550,7 +553,7 @@ class TestDuplicateExternal:
         assert rec and rec.get("exists_external") is True
         assert rec.get("archive_id") is None
         # 第二批：不再重试建档（store 已有 exists_external 标记）
-        report2 = run_master_data(orders, create_order=True)
+        report2 = await run_master_data_async(orders, create_order=True)
         assert len(calls) == 1
         assert report2["exists_external"] == [] and report2["archived"] == []
         # 不列入 pending
@@ -558,14 +561,14 @@ class TestDuplicateExternal:
         # 订单不标注客户未建档（已存在外部，仅无 id；司机降级标注不影响）
         assert "客户「锦煦」未建档" not in (orders[0].unmapped_note or "")
 
-    def test_duplicate_requires_marker_match(self, md_config, monkeypatch, tmp_path):
+    async def test_duplicate_requires_marker_match(self, md_config, monkeypatch, tmp_path):
         """非「已存在」语义的 204（其他 msg）→ 维持 failed + 下批重试。"""
         from app.orders.bill.master_data_store import reload_store
 
         reload_store(tmp_path / "md2.json")
         calls: list[dict] = []
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
+        async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -578,17 +581,17 @@ class TestDuplicateExternal:
                     }
             return results
 
-        monkeypatch.setattr(md_client_module, "create_archives", _fake)
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
         md_config(_default_cfg())
         orders = [_make_order(customer="锦煦", driver=None) for _ in range(5)]
-        report = run_master_data(orders, create_order=True)
+        report = await run_master_data_async(orders, create_order=True)
         assert report["failed"] and report["exists_external"] == []
         assert len(calls) == 1
         # 下批重试（无 exists_external 标记）
-        run_master_data(orders, create_order=True)
+        await run_master_data_async(orders, create_order=True)
         assert len(calls) == 2
 
-    def test_no_primary_key_marks_external(self, md_config, monkeypatch, tmp_path):
+    async def test_no_primary_key_marks_external(self, md_config, monkeypatch, tmp_path):
         """TMS 成功但无主键（AddCarFactory data:[] 实证，重复提交仍成功）→ 视为已建档
         无 id，登记 exists_external 不再重试（否则每次重试都会再建一条档案）。"""
         from app.orders.bill.master_data_store import reload_store
@@ -597,7 +600,7 @@ class TestDuplicateExternal:
         calls: list[dict] = []
         md_config(_default_cfg())
 
-        def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
+        async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
             calls.append(forms_by_kind)
             results: dict = {}
             for kind, forms in forms_by_kind.items():
@@ -621,9 +624,9 @@ class TestDuplicateExternal:
                         }
             return results
 
-        monkeypatch.setattr(md_client_module, "create_archives", _fake)
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
         orders = [_make_order() for _ in range(5)]
-        report = run_master_data(orders, create_order=True)
+        report = await run_master_data_async(orders, create_order=True)
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_FACTORY]
         assert ext and "未返回主键" in ext[0]["message"]
         assert report["failed"] == []  # no_id 不记 failed
@@ -631,10 +634,10 @@ class TestDuplicateExternal:
         assert rec and rec.get("exists_external") is True and rec.get("archive_id") is None
         # 第二批：全终态（client/driver/truck 已建档、factory exists_external）→ 零新增调用
         calls_before = len(calls)
-        run_master_data(orders, create_order=True)
+        await run_master_data_async(orders, create_order=True)
         assert len(calls) == calls_before
 
-    def test_duplicate_markers_configurable(self, md_config):
+    async def test_duplicate_markers_configurable(self, md_config):
         """duplicate_markers 配置化：自定义匹配串生效。"""
         cfg = _default_cfg()
         cfg["duplicate_markers"] = ["已被占用"]
@@ -646,18 +649,18 @@ class TestDuplicateExternal:
 class TestPreviewReadOnly:
     """preview（create_order=False）：只读探测——不计数不建档，报告当前计数状态。"""
 
-    def test_preview_does_not_count_or_archive(self, fake_create):
+    async def test_preview_does_not_count_or_archive(self, fake_create):
         fake_create()
-        report = run_master_data([_make_order()], create_order=False)
+        report = await run_master_data_async([_make_order()], create_order=False)
         assert report["mode"] == "preview"
         assert report["candidates"] == {KIND_CLIENT: 1, KIND_FACTORY: 1, KIND_DRIVER: 1}
         assert get_store().snapshot() == {}  # 零写入
         assert fake_create.calls == []  # 零建档调用
 
-    def test_preview_shows_current_pending(self, fake_create):
+    async def test_preview_shows_current_pending(self, fake_create):
         fake_create()
-        run_master_data([_make_order()], create_order=True)  # 计数 1
-        report = run_master_data([_make_order()], create_order=False)
+        await run_master_data_async([_make_order()], create_order=True)  # 计数 1
+        report = await run_master_data_async([_make_order()], create_order=False)
         pending = [p for p in report["pending_top"] if p["kind"] == KIND_CLIENT]
         assert pending and pending[0]["count"] == 1 and pending[0]["threshold"] == 5
 
@@ -665,21 +668,21 @@ class TestPreviewReadOnly:
 class TestDisabled:
     """enabled: false → 全局关闭：无报告、零计数、零建档。"""
 
-    def test_disabled_returns_none(self, md_config):
+    async def test_disabled_returns_none(self, md_config):
         md_config({"enabled": False, "threshold": 5, "endpoints": {}})
-        assert run_master_data([_make_order()], create_order=True) is None
+        assert await run_master_data_async([_make_order()], create_order=True) is None
         assert get_store().snapshot() == {}
 
 
 class TestCandidates:
     """候选收集：缺失字段不构成候选（无门点/无司机名跳过）；车牌缺失退化为按名。"""
 
-    def test_missing_fields_skipped(self):
+    async def test_missing_fields_skipped(self):
         # 无客户/无门点/无司机名 → 三类候选全部不构成
         cands = collect_candidates([_make_order(customer=None, door=None, driver=None)])
         assert cands == []
 
-    def test_missing_address_or_plate_fallback(self):
+    async def test_missing_address_or_plate_fallback(self):
         cands = collect_candidates([_make_order(address=None, plate=None)])
         kinds = {c.kind for c in cands}
         assert kinds == {KIND_CLIENT, KIND_FACTORY, KIND_DRIVER}
@@ -692,15 +695,14 @@ class TestGoldenIntegration:
     @pytest.mark.skipif(
         not (FAMILIES_DIR / "junyu").exists(), reason="样本未入库（表格文件不入库）"
     )
-    def test_junyu_create_report(self, monkeypatch):
+    async def test_junyu_create_report(self, monkeypatch):
         path = FAMILIES_DIR / "junyu" / "2020-10上海军羽应收对账单.xls"
         if not path.exists():
             pytest.skip("junyu 样本缺失")
         # mock 下单通道（零网络）：AddWork 成功回显；建档族按 URL 回主键（sk 由调用方透传）
-        import app.orders.bill.client as client_module
         from helpers import FakeResponse
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族（/Car/Car* 路径；下单 AddWork 也在 s3.jxt56.com/Car/ 下，不能按 /Car/ 或 host 判断）
                 pk = (
                     "client_id"
@@ -716,8 +718,8 @@ class TestGoldenIntegration:
                 )
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(
             filename=path.name, file_bytes=path.read_bytes(), create_order=True, sk="sk"
         )
         report = result.meta.get("master_data")

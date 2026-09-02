@@ -28,11 +28,10 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
-from ..http_client import post_form, post_form_async, unpack_json
+from ..http_client import post_form_async, unpack_json
 from .imported_registry import (
     alock_for,
     get_imported_registry,
-    lock_for,
     normalize,
     owner_key,
 )
@@ -292,35 +291,6 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
         result["upstream"] = data_list[0]  # 原始回显（对齐 /orders 的 upstream.data[0]）
     return result
 
-
-def add_work(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
-    """POST AddWork 创建一单 → create_result（{success, sn, error}）。
-
-    表单（§5.3）：a="{}"、c="{}"、b=URL 编码 JSON（键为展平写法，与顶层同内容）、
-    顶层展平字段；header sk；content-type application/x-www-form-urlencoded。
-    响应口径见 _parse_create_response（code "200" → 取 data[0].sn）。
-    """
-    form = build_add_work_form(order_data)
-    try:
-        response = post_form(
-            settings.jxt_addwork_url,
-            form,
-            name="AddWork",
-            headers={"sk": sk},
-            timeout=settings.jxt_timeout_seconds,
-        )
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        log.warning(
-            "jxt_add_work_network_error",
-            extra={"error_type": exc.__class__.__name__},
-        )
-        return _error_result(
-            f"AddWork network error: {exc.__class__.__name__}",
-            details={"error_type": exc.__class__.__name__},
-        )
-    return _parse_create_response(response, step="AddWork")
-
-
 def _register_imported(
     bl_no: str,
     owner: str,
@@ -353,46 +323,6 @@ def _register_imported(
 def _skipped_result(sn: str | None) -> dict[str, Any]:
     """去重命中（已成功创建过）的 create_result：success=True + skipped 标记。"""
     return {"success": True, "skipped": True, "sn": sn, "error": None}
-
-
-def create_orders(orders: list[BillOrder], sk: str, source_sha256: str | None = None) -> None:
-    """逐单串行下单并原地填充 create_result。
-
-    sk 由调用方登录 TMS 后透传（2026-08-19 起，不再服务端换取）；
-    通道固定 AddWork 表单（2026-08-13 起：AddWork 端点 + sk 头 + create_order=true）。
-    单失败不影响后续；任何情况不自动重试；missing_fields 非空照常提交。
-    重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
-    """
-    if not orders:
-        return
-    submit = add_work
-    owner = owner_key(sk)
-    for order in orders:
-        if order.create_result is not None:
-            continue  # service 层预判已标记 skipped → 直接跳过
-        bl = normalize(order.order_num1)
-        if not bl:
-            order.create_result = submit(sk, order.order_data or {})
-            continue
-        box = order.container_no  # 一行一票：去重键=提单号+箱号（无箱号退化为行序号）
-        with lock_for(bl, container_no=box, fallback=order.row_seq):
-            rec = get_imported_registry().lookup(
-                bl, owner, container_no=box, fallback=order.row_seq
-            )
-            if rec:
-                order.create_result = _skipped_result(rec.get("sn"))
-                continue
-            order.create_result = submit(sk, order.order_data or {})
-            if order.create_result.get("success"):
-                _register_imported(
-                    bl,
-                    owner,
-                    order.create_result.get("sn"),
-                    source_sha256,
-                    container_no=box,
-                    fallback=order.row_seq,
-                )
-
 
 def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
     """TMS 通道响应判定（《逆推规范》§3）：code 为字符串 "200" → 成功，
@@ -449,91 +379,11 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
         result["upstream"] = data_list[0]
     return result
 
-
-def submit_canonical(sk: str, order) -> dict[str, Any]:
-    """TMS 通道 POST 一单（form-data + create_order=true，AddWork 端点，sk 头鉴权）。
-
-    payload 构造见 payload.build_order_payload（接口怪癖全部封装在适配层）；
-    多箱号等 warning 仅记日志（不阻断下单）；响应判定见 _parse_canonical_response。
-    端点实测（2026-08-13 最小报文验证）：publishCreateOrder 无论 JSON/form-data
-    均强制要求有效 userId+roomId（204 拒单），AddWork 端点 + sk 头 + create_order=true
-    即可成功下单（费用四通道全空，sn=EX26080356）——TMS 直连以此为准。
-    """
-    from .payload import build_order_payload
-
-    form, warnings = build_order_payload(order)
-    if warnings:
-        log.warning(
-            "canonical_payload_warning",
-            extra={"bl_no": order.bl_no, "warnings": warnings},
-        )
-    try:
-        response = post_form(
-            settings.jxt_addwork_url,
-            form,
-            name="AddWork-canonical",
-            headers={"sk": sk},
-            timeout=settings.jxt_timeout_seconds,
-        )
-    except (httpx.TimeoutException, httpx.RequestError) as exc:
-        log.warning(
-            "jxt_canonical_order_network_error",
-            extra={"error_type": exc.__class__.__name__},
-        )
-        return _error_result(
-            f"order API network error: {exc.__class__.__name__}",
-            details={"error_type": exc.__class__.__name__},
-        )
-    return _parse_canonical_response(response)
-
-
-def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -> None:
-    """TMS 通道逐单串行下单（CanonicalOrder → form-data）并原地填充 create_result。
-
-    sk 由调用方登录 TMS 后透传（2026-08-19 起，不再服务端换取）；单失败隔离
-    不中断；任何情况不自动重试（防重复下单）；missing_fields 非空照常提交。
-    响应回取 data[0].sn（TMS 业务编号）与 o_id。
-    重复上传去重见模块 docstring（查重→提交→登记在 per-bl_no 锁内原子化）。
-    """
-    if not orders:
-        return
-    owner = owner_key(sk)
-    for order in orders:
-        if order.create_result is not None:
-            continue  # service 层预判已标记 skipped → 直接跳过
-        bl = normalize(order.bl_no)
-        if not bl:
-            order.create_result = submit_canonical(sk, order)
-            continue
-        # 一行一票：去重键=提单号+箱号（取首个结构化箱号；无箱号退化为行序号）
-        box = next(
-            (c.container_no for c in (order.containers or []) if c.container_no), None
-        )
-        with lock_for(bl, container_no=box, fallback=order.row_seq):
-            rec = get_imported_registry().lookup(
-                bl, owner, container_no=box, fallback=order.row_seq
-            )
-            if rec:
-                order.create_result = _skipped_result(rec.get("sn"))
-                continue
-            order.create_result = submit_canonical(sk, order)
-            if order.create_result.get("success"):
-                _register_imported(
-                    bl,
-                    owner,
-                    order.create_result.get("sn"),
-                    source_sha256,
-                    container_no=box,
-                    fallback=order.row_seq,
-                )
-
-
 # ---- 异步版本（网络段走 post_form_async；解析/登记复用同步纯函数，Phase 2 新增）----
 
 
 async def add_work_async(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
-    """add_work 的异步版：网络段走 post_form_async，表单构造/响应判定/错误结构
-    与同步版完全一致（复用 _parse_create_response）。"""
+    """add_work（2026-09 异步化改造后为生产唯一入口）：网络段走 post_form_async，表单构造/响应判定/错误结构（复用 _parse_create_response）。"""
     form = build_add_work_form(order_data)
     try:
         response = await post_form_async(
@@ -556,7 +406,7 @@ async def add_work_async(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
 
 
 async def submit_canonical_async(sk: str, order) -> dict[str, Any]:
-    """submit_canonical 的异步版：payload 构造/日志/响应判定与同步版完全一致
+    """submit_canonical（2026-09 异步化改造后为生产唯一入口）：payload 构造/日志/响应判定
     （复用 build_order_payload 与 _parse_canonical_response）。"""
     from .payload import build_order_payload
 
@@ -628,7 +478,7 @@ async def _create_one_async(
         order.create_result = _missing_bl_result()
         return
     # 一行一票：去重键=提单号+箱号（旧链路取 container_no；canonical 取首个结构化箱号；
-    # 无箱号退化为行序号），与同步版逐项一致
+    # 无箱号退化为行序号）
     if getattr(order, "containers", None):
         box = next(
             (c.container_no for c in (order.containers or []) if c.container_no), None
@@ -661,7 +511,7 @@ async def _create_one_async(
 async def create_orders_async(
     orders: list[BillOrder], sk: str, source_sha256: str | None = None
 ) -> None:
-    """create_orders 的异步版：异键有界并发下单（原同步版逐单串行）。
+    """create_orders（2026-09 异步化改造后为生产唯一入口）：异键有界并发下单（原同步版逐单串行）。
 
     语义保持：单失败隔离不中断；任何情况不自动重试；missing_fields 非空
     照常提交；去重（查重→提交→登记）在 per-bl_no 锁内原子化（first-write-wins）。
@@ -686,7 +536,7 @@ async def create_orders_async(
 
 
 async def create_canonical_orders_async(orders, sk: str, source_sha256: str | None = None) -> None:
-    """create_canonical_orders 的异步版（TMS 通道，语义同 create_orders_async）。"""
+    """create_canonical_orders（2026-09 异步化改造后为生产唯一入口）（TMS 通道，语义同 create_orders_async）。"""
     if not orders:
         return
     owner = owner_key(sk)

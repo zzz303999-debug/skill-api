@@ -25,18 +25,15 @@ from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 from app.errors import BadRequestError
 
 from .aggregator import group_canonical, group_orders
-from .client import create_orders, create_orders_async
+from .client import create_canonical_orders_async, create_orders_async
+from .fee_bootstrap import run_fee_bootstrap_async
 from .fee_price_map import apply_price_map
 from .parser import parse_bill
 from .schema import BillParseResult, to_canonical
-
-# _build_fee_reports 自举报告注入哨兵：未传时同步路径内联执行（既有行为）
-_UNSET = object()
 
 
 def _sha256(data: bytes) -> str:
@@ -59,7 +56,7 @@ def _order_dedup_parts(order) -> tuple[str | None, str | None]:
 
 
 def _build_fee_reports(
-    output, orders: list, create_order: bool, sk: str = "", *, bootstrap_report: Any = _UNSET
+    output, orders: list, create_order: bool, sk: str = "", *, bootstrap_report: dict | None
 ) -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
@@ -70,6 +67,8 @@ def _build_fee_reports(
     - 报告内容：price_id null 降级清单、unmapped skip 逐行（计数）、to_other 原名
       计数（≥阈值 warning）、金额解析失败清单。
     返回结构与既有 reconciliation 同键（meta["reconciliation"]），canonical 路径使用。
+    bootstrap_report 由调用方先执行费目自举（run_fee_bootstrap_async）后传入
+    （含 None：自举未执行/无缺失时无报告段）。
     """
     from app.config import settings
 
@@ -79,17 +78,7 @@ def _build_fee_reports(
     channel_stats: dict[str, dict] = {}
     # 费目自举（T25）：费用归一后、payload 构造前——本批缺失费目码自动建档 →
     # registry 登记 → 下方 apply_price_map 经 registry 命中回填（当批正常录入）；
-    # **preview 零副作用**（与阶段三一致）：create_order=false 只输出 planned
-    # 计划清单不发请求；真实导入才建档。disabled/无缺失 → None（不产生报告段）。
-    # bootstrap_report 注入（异步版用）：调用方已执行过自举（async 版传
-    # run_fee_bootstrap_async 结果，含 None）；未注入（哨兵）时同步路径内联执行，
-    # 行为与既有完全一致
-    if bootstrap_report is _UNSET:
-        bootstrap_report = None
-        if orders:
-            from .fee_bootstrap import run_fee_bootstrap
-
-            bootstrap_report = run_fee_bootstrap(orders, create_order=create_order, sk=sk)
+    # **preview 零副作用**：create_order=false 只输出 planned 清单不发请求
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -255,280 +244,7 @@ def _reject_unknown_box_types(orders: list) -> bool:
         }
     return True
 
-
-def build_result(
-    *,
-    filename: str,
-    file_bytes: bytes,
-    create_order: bool = False,
-    sk: str = "",
-) -> BillParseResult:
-    """编排：写临时文件 → 解析 → 归集（双管线分流）→ 组装 BillParseResult。
-
-    create_order=True 时先逐单创建，再填 summary {total, success, failed,
-    skipped, created}；sk 由调用方登录 TMS 后透传（2026-08-19 起；create 模式
-    sk 缺失/空白由本层防御性拒绝 400，与路由层同语义——build_result 为公开
-    函数，防第二入口漏传 sk 时以空 token 逐单静默失败而返 200）。
-    meta 含 source_sha256 / source_bytes / parsed_at /
-    parser / raw_rows / template / unmatched_headers。
-    箱型白名单（2026-08-18 用户拍板）：**文件级校验**——preview 与 create 统一
-    执行，任一单含标准代码形态且不在白名单的箱型（如 40GOH）→ 全部未决单拒绝
-    （unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），不调下游；
-    无强制提交通道；非标表述（大冷/拼箱/17M飞翼车等）不校验（既有规则不变）。
-    """
-    # 防御性校验（置于解析前，零 IO 快速失败）：路由层已拦截，此处为公开函数
-    # 兑底——未来第二入口漏传 sk 时同样返 400，而非空 token 逐单失败返 200
-    if create_order and not (sk or "").strip():
-        raise BadRequestError(
-            "missing sk header for create mode: login to TMS first",
-            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
-            details={
-                "upstream": {
-                    "code": "400",
-                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
-                    "data": [],
-                },
-            },
-        )
-    suffix = Path(filename).suffix.lower()
-    tmp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            tmp.write(file_bytes)
-            tmp.flush()
-            output = parse_bill(tmp_path)
-    finally:
-        if tmp_path:
-            os.unlink(tmp_path)
-
-    # 单次导入行数上限（一柜一行）：preview/create 一致拦截，超限零副作用直接拒绝。
-    # 双管线同口径统计（与 meta.raw_rows 一致）：标准字段（canonical_rows）与
-    # 既有语义（rows）任一超限即拒绝（标准字段模板下 rows 恒空，只看 rows 会漏拦）
-    from app.config import settings
-
-    total_rows = len(output.rows) + len(output.canonical_rows or [])
-    if total_rows > settings.bill_import_max_rows:
-        raise BadRequestError(
-            f"bill has too many rows: {total_rows} > {settings.bill_import_max_rows}",
-            code="too_many_rows",
-            details={
-                "total_rows": total_rows,
-                "max_rows": settings.bill_import_max_rows,
-                # 对齐 create 模式 upstream 结构（code/msg/data），
-                # 保证对接方统一按 upstream.code 判断时错误码可达
-                "upstream": {
-                    "code": "400",
-                    "msg": "数据量过大，联系人工客服",
-                    "data": [],
-                },
-            },
-        )
-
-    # 双管线分流：标准字段（canonical_rows）→ CanonicalOrder；既有语义 → BillOrder
-    agg = group_orders(output.rows, output.period)
-    orders = agg.orders
-    canonical_orders: list = []
-    if output.canonical_rows is not None:
-        template = output.template_match.template if output.template_match else {}
-        canonical_orders = group_canonical(
-            output.canonical_rows, template, output.period
-        )
-    elif orders:
-        # 既有语义路径：归集结果转换为标准订单（TMS 通道入口）
-        canonical_orders = [to_canonical(o) for o in orders]
-
-    bill_period = (
-        f"{output.period.start}~{output.period.end}"
-        if output.period is not None and output.period.start and output.period.end
-        else None
-    )
-
-    # 未映射字段报告：customer_name 在 F2 确认 TMS「客户」字段键前不进表单，
-    # 只进 unmapped_note（预览/对账报告可见，下单路径同样填充）
-    if canonical_orders:
-        from .payload import collect_unmapped_note
-
-        for order in canonical_orders:
-            order.unmapped_note = collect_unmapped_note(order)
-
-    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号+箱号, sk) 维度）：
-    # create 模式先查同一 sk 已成功组合键，命中即标记 skipped（只查不登；登记在
-    # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。
-    # 一行一票（2026-08-31 业务拍板）：提单号必填，缺失行直接标记失败不录入
-    # （不调下游、不进建档/自举 pending），计入 failed_details 由人工核对。
-    # 计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
-    if create_order:
-        from .imported_registry import get_imported_registry, normalize, owner_key
-
-        _imported = get_imported_registry()
-        _owner = owner_key(sk)
-        for order in (*canonical_orders, *orders):
-            bl = normalize(
-                getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
-            )
-            if not bl:
-                order.create_result = {
-                    "success": False,
-                    "skipped": False,
-                    "sn": None,
-                    "error": {
-                        "code": "missing_bl_no",
-                        "message": "提单号缺失，未录入",
-                        "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
-                        "details": {},
-                    },
-                }
-                continue
-            box, seq = _order_dedup_parts(order)
-            if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
-                order.create_result = {
-                    "success": True,
-                    "skipped": True,
-                    "sn": rec.get("sn"),
-                    "error": None,
-                }
-
-    # 文件级箱型白名单校验（2026-08-18 用户拍板）：preview 与 create 统一执行，
-    # 任一单含非法箱型（标准代码形态不在白名单，如 40GOH）→ 全部未决单拒绝，
-    # 不调下游（置于费目自举/建档之前，被拒文件零副作用）；无强制提交通道。
-    # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
-    all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
-    _reject_unknown_box_types(all_pending)
-
-    # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
-    # 2026-08-26 修正——必须在校验后重算，校验被拒单 create_result 已标记
-    # （非 None），自然排除，费目自举/建档只对可录单执行（被拒文件零下游副作用）；
-    # 校验前快照会让被拒单仍进入建档/自举（实测 AddCarClient 被误调）
-    pending = [o for o in canonical_orders if o.create_result is None]
-
-    fee_reconciliation = None
-    if pending and output.canonical_rows is not None:
-        # 费用 price_id 回填 + 费用对账报告（T12/T14，canonical 路径）
-        fee_reconciliation = _build_fee_reports(
-            output, pending, create_order=create_order, sk=sk
-        )
-
-    # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
-    # 当批回填 order._archive_refs（payload 构造在 create 分支内，先于下单执行）；
-    # preview 只读探测不计数；disabled → None（不产生报告段）
-    master_data_report = None
-    if pending:
-        from .master_data import run_master_data
-
-        master_data_report = run_master_data(pending, create_order=create_order, sk=sk)
-
-    summary = None
-    upstream = None
-    file_sha256 = _sha256(file_bytes)
-    if create_order:
-        if orders:
-            # 既有语义：双通道下单（行为语义不变）
-            create_orders(orders, sk, source_sha256=file_sha256)
-        elif canonical_orders:
-            from .client import create_canonical_orders
-
-            create_canonical_orders(canonical_orders, sk, source_sha256=file_sha256)
-        # 与创建分支同管线口径（orders 优先，elif canonical_orders）：双管线并存
-        # 时（同一批数据的两种表示）只统计实际创建管线，避免 summary 计数翻倍
-        # （去重预判标记了两边，created 统计不再合并计数）
-        pipeline = orders if orders else canonical_orders
-        created = [
-            o for o in pipeline if getattr(o, "create_result", None)
-        ]
-        summary = {
-            "total": len(canonical_orders) or len(orders),
-            "success": sum(1 for o in created if o.create_result.get("success")),
-            "failed": sum(1 for o in created if not o.create_result.get("success")),
-            # 重复上传去重（方案一）：本次跳过数（成功单注册表命中，不调下游）
-            "skipped": sum(1 for o in created if o.create_result.get("skipped")),
-            # 本次实际新建数（success 含 skipped 单，created = success − skipped）
-            "created": sum(
-                1
-                for o in created
-                if o.create_result.get("success") and not o.create_result.get("skipped")
-            ),
-            # 下单成功回显（对齐 /orders 的 upstream 语义）：成功单 TMS 业务编号列表
-            "success_sns": [
-                o.create_result.get("sn") for o in created if o.create_result.get("success")
-            ],
-            # 失败单明细（单号 + 错误码/消息/上游业务码），人工可查；本地拦截
-            # （unknown_box_type）额外带 error_upstream（对齐 TMS 204 失败口径）
-            "failed_details": [
-                {
-                    **{
-                        "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-                        "error_code": (o.create_result.get("error") or {}).get("code"),
-                        "error_message": (o.create_result.get("error") or {}).get("message"),
-                    },
-                    **(
-                        {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
-                        if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
-                        else {}
-                    ),
-                }
-                for o in created
-                if not o.create_result.get("success")
-            ],
-        }
-        # 上游回显（对齐 TMS 通道格式，见《逆推规范》§3）：确有新建成功单 →
-        # code "200" + msg 添加成功 + data 成功单原始回显（含 sn/sns；成功但无
-        # 回显时 data 为空仍为 200）；新建全失败 → code "204" + msg 添加失败 +
-        # 空 data；全部 skipped（无新建动作）保持 null（与「无单可创建」同语义，
-        # 路由层转 409；失败原因见 summary.failed_details）
-        upstream_data = [
-            o.create_result.get("upstream")
-            for o in created
-            if o.create_result.get("success") and o.create_result.get("upstream")
-        ]
-        created_ok = any(
-            o.create_result.get("success") and not o.create_result.get("skipped")
-            for o in created
-        )
-        if created and not all(o.create_result.get("skipped") for o in created):
-            upstream = (
-                {"code": "200", "msg": "添加成功", "data": upstream_data}
-                if created_ok
-                else {"code": "204", "msg": "添加失败", "data": []}
-            )
-
-    meta: dict = {
-        "source_sha256": file_sha256,
-        "source_bytes": len(file_bytes),
-        "parsed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "parser": output.engine,
-        "raw_rows": len(output.rows) + len(output.canonical_rows or []),
-        "template": output.template,
-        "unmatched_headers": output.unmatched_headers,
-    }
-    # 既有语义路径保留对账信息（账单锚点校验，只报告不拦截）
-    if orders and not output.canonical_rows:
-        meta["reconciliation"] = agg.reconciliation
-    # 标准字段路径：费用对账报告（与既有 reconciliation 同键）
-    if fee_reconciliation is not None:
-        meta["reconciliation"] = fee_reconciliation
-    # 阶段三：基础资料阈值报告（T21；只报告不拦截，建档异常不使订单丢失）
-    if master_data_report is not None:
-        meta["master_data"] = master_data_report
-    # L3 候选模板配置（人工确认固化的载体）
-    if output.new_template is not None:
-        meta["l3_template"] = output.new_template
-
-    return BillParseResult(
-        file=filename,
-        bill_period=bill_period,
-        total_rows=sum(o.row_count for o in (canonical_orders or orders)),
-        order_count=len(canonical_orders) or len(orders),
-        create_order=create_order,
-        orders=orders,
-        canonical_orders=canonical_orders,
-        summary=summary,
-        upstream=upstream,
-        meta=meta,
-    )
-
-
-# ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义与同步版一致 ----
+# ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义 ----
 
 
 def _parse_stage(filename: str, file_bytes: bytes):
@@ -613,17 +329,17 @@ async def build_result_async(
     create_order: bool = False,
     sk: str = "",
 ) -> BillParseResult:
-    """build_result 的异步版：解析/归集（CPU 密集）入线程池，网络段全 async
-    （并发下单/自举/建档），响应组装语义与同步版逐行一致。
+    """build_result（2026-09 异步化改造后为生产唯一入口）：解析/归集（CPU 密集）入线程池，网络段全 async
+    （并发下单/自举/建档），响应组装语义。
 
     create_order=True 时下单走 create_orders_async / create_canonical_orders_async
-    （异键有界并发，同键串行原子）；费用对账/自举/建档管线与同步版同序。
+    （异键有界并发，同键串行原子）；费用对账/自举/建档管线顺序与既有语义一致。
     """
     import asyncio
 
     from app.config import settings
 
-    # 防御性校验（置于解析前，零 IO 快速失败）：与同步版同语义
+    # 防御性校验（置于解析前，零 IO 快速失败）：服务层公开入口语义
     if create_order and not (sk or "").strip():
         raise BadRequestError(
             "missing sk header for create mode: login to TMS first",
@@ -674,8 +390,6 @@ async def build_result_async(
     if pending and output.canonical_rows is not None:
         # 费目自举（create 模式建档网络；preview 零副作用只出 planned）→
         # 报告注入 _build_fee_reports（同步 CPU 段）
-        from .fee_bootstrap import run_fee_bootstrap_async
-
         bootstrap_report = await run_fee_bootstrap_async(
             pending, create_order=create_order, sk=sk
         )
@@ -701,8 +415,6 @@ async def build_result_async(
             # 既有语义：双通道下单（异键有界并发，同键串行原子）
             await create_orders_async(orders, sk, source_sha256=file_sha256)
         elif canonical_orders:
-            from .client import create_canonical_orders_async
-
             await create_canonical_orders_async(
                 canonical_orders, sk, source_sha256=file_sha256
             )

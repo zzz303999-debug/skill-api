@@ -27,12 +27,12 @@ from .schema import (
     FeeReconcile,
     to_canonical,
 )
-from .service import build_result
+from .service import build_result_async
 
 __all__ = [
     "AggregationOutput",
     "ParseOutput",
-    "build_result",
+    "build_result_async",
     "group_canonical",
     "group_orders",
     "parse_bill",

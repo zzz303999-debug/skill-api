@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from app.config import settings
 from app.document_parsers import mineru
 from app.errors import BadRequestError, ConvertError, ParseError
-from app.llm import chat_json, image_to_data_url
+from app.llm import achat_json, image_to_data_url
 from app.logging_conf import get_logger
 from app.skills.tuoshu.convert_service import (
     SUPPORTED_EXTS,
@@ -1213,99 +1213,21 @@ def _build_driver_entries(extracted: OrderDocumentExtraction) -> list[dict[str, 
 
 # ---- 主流程 ----
 
-def parse_document_to_order(
-    file_bytes: bytes,
-    filename: str,
-    *,
-    customer_id: str = "",
-) -> dict[str, Any]:
-    """上传附件 → 转换 → LLM 抽取 → 校验 → 组装 order_data（不下单）。
-
-    order_data 始终组装并返回（缺字段时缺失项为 null，driver 为 [{}]），
-    是否人工确认由 missing_fields / needs_manual_confirmation 标记。
-    """
-    source_text, doc_format, conversion_meta, user_content = _convert_file(
-        file_bytes, filename
-    )
-    extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
-
-    system = _build_system_prompt()
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user_content},
-    ]
-    output_schema = _clean_json_schema(OrderDocumentExtraction.model_json_schema())
-    raw, llm_meta = chat_json(messages, temperature=0.0, json_schema=output_schema)
-    if not isinstance(raw, dict):
-        raise ParseError("LLM output must be a JSON object")
-
-    # 兜底修复：c_title 误取 TO 收件方（做箱通知类单据无 FM 字段时易发生）；
-    # LLM 未提取到客户时，从文档抬头主动补全（文档抬头公司即客户）
-    if raw_value := raw.get("c_title"):
-        raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
-    elif source_text:
-        raw["c_title"] = _extract_header_company(source_text)
-    # 兜底修复：b_end_port（中转港）与 b_end_dock（目的港）互不混淆，
-    # 字段语义对齐订单创建接口文档：b_end_port=中转港、b_end_dock=目的港
-    raw["b_end_port"], raw["b_end_dock"] = _revise_port_fields(
-        raw.get("b_end_port"), raw.get("b_end_dock"), source_text
-    )
-    # 兜底修复：关单号即提单号——文档同时存在运编号与关单号时，
-    # LLM 可能误取运编号作 order_num1，原文有关单号则一律以关单号为准
-    raw["order_num1"] = _revise_bill_no(raw.get("order_num1"), source_text)
-    # 兜底修复：截单时间不得作为装箱时间（b_date_time_start 只认做箱/装箱时间）
-    if raw.get("b_date_time_start"):
-        raw["b_date_time_start"] = _revise_loading_time(
-            raw.get("b_date_time_start"), source_text
-        )
-
-    extracted = normalize_document_extraction(raw)
-    missing = _missing_fields(extracted)
-    missing_reasons = _missing_field_reasons(raw, extracted)
-    order_data = build_document_order_data(extracted, customer_id=customer_id)
-
-    safe_meta = {key: llm_meta.get(key) for key in ("model", "usage") if key in llm_meta}
-    safe_meta.update(conversion_meta)
-    safe_meta.update(
-        {
-            "extracted_at": extracted_at,
-            "doc_format": doc_format,
-            "source_sha256": hashlib.sha256(file_bytes).hexdigest(),
-            "source_bytes": len(file_bytes),
-            "order_created": False,
-        }
-    )
-    # vision 交叉核验被跳过（图片超限降级）时同样要求人工确认，
-    # 与 skill 端 blocking issue 的口径保持一致
-    vision_degraded = "vision_skipped_reason" in conversion_meta
-    return {
-        "file": filename,
-        "extracted": extracted.model_dump(),
-        "order_data": order_data,
-        "needs_manual_confirmation": bool(missing) or vision_degraded,
-        "missing_fields": missing,
-        "missing_reasons": missing_reasons,
-        "meta": safe_meta,
-    }
-
-
 async def parse_document_to_order_async(
     file_bytes: bytes,
     filename: str,
     *,
     customer_id: str = "",
 ) -> dict[str, Any]:
-    """parse_document_to_order 的异步版（Phase 3 路由异步化）：
+    """parse_document_to_order（2026-09 异步化改造后为生产唯一入口）（Phase 3 路由异步化）：
 
     - 转换段（_convert_file：LibreOffice 转换/PDF 渲染 CPU 密集 + MinerU 网络）
       整体入线程池——不阻塞事件循环；MinerU 的异步化需拆分 _convert_file
       内部管线（~200 行混合 CPU/网络），留待后续迭代（此处注释标记）；
     - LLM 抽取（最长等待段，timeout 180s）走 achat_json 真异步；
-    - 兑底修复/归一化/组装段与同步版逐行一致。
+    - 兑底修复/归一化/组装段。
     """
     import asyncio
-
-    from app.llm import achat_json
 
     source_text, doc_format, conversion_meta, user_content = await asyncio.to_thread(
         _convert_file, file_bytes, filename
@@ -1324,7 +1246,7 @@ async def parse_document_to_order_async(
     if not isinstance(raw, dict):
         raise ParseError("LLM output must be a JSON object")
 
-    # 兑底修复：以下与同步版逐行一致
+    # 兑底修复：以下
     if raw_value := raw.get("c_title"):
         raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
     elif source_text:

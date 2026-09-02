@@ -6,9 +6,9 @@ import hashlib
 
 import pytest
 
-import app.orders.bill.client as client_module
+import app.orders.http_client as http_client_module
 from app.errors import BadRequestError, ConvertError
-from app.orders.bill import BillParseResult, build_result
+from app.orders.bill import BillParseResult, build_result_async
 from helpers import (
     REAL_ORDER_COUNT,
     REAL_RAW_ROWS,
@@ -18,19 +18,21 @@ from helpers import (
     build_bill_bytes,
 )
 
+pytestmark = pytest.mark.asyncio
 
-def build_real_result() -> BillParseResult:
-    return build_result(filename=REAL_XLS.name, file_bytes=REAL_XLS.read_bytes())
+
+async def build_real_result() -> BillParseResult:
+    return await build_result_async(filename=REAL_XLS.name, file_bytes=REAL_XLS.read_bytes())
 
 
 class TestSkGuard:
     """create 模式 sk 防御性校验（build_result 公开函数，防第二入口漏传）。"""
 
-    def test_create_without_sk_raises_bad_request(self):
+    async def test_create_without_sk_raises_bad_request(self):
         """create_order=True 且 sk 缺失 → 400 bad_request（与路由层同语义）；
         守卫在解析前触发，坏文件内容不触发 IO/解析。"""
         with pytest.raises(BadRequestError) as caught:
-            build_result(filename="x.xlsx", file_bytes=b"x", create_order=True)
+            await build_result_async(filename="x.xlsx", file_bytes=b"x", create_order=True)
         assert caught.value.http_status == 400
         assert caught.value.code == "bad_request"
         assert caught.value.details["upstream"] == {
@@ -39,12 +41,12 @@ class TestSkGuard:
             "data": [],
         }
 
-    def test_create_with_blank_sk_raises(self):
+    async def test_create_with_blank_sk_raises(self):
         """空白 sk（纯空格）同样拒绝——与路由层 strip 后判空同口径。"""
         with pytest.raises(BadRequestError):
-            build_result(filename="x.xlsx", file_bytes=b"x", create_order=True, sk="   ")
+            await build_result_async(filename="x.xlsx", file_bytes=b"x", create_order=True, sk="   ")
 
-    def test_preview_without_sk_not_guarded(self):
+    async def test_preview_without_sk_not_guarded(self):
         """preview 不要求 sk：守卫只拦 create 模式，预览路径不受影响。"""
         headers = {
             "A": "序号",
@@ -58,7 +60,7 @@ class TestSkGuard:
             "I": "司机",
             "J": "应收备注",
         }
-        result = build_result(
+        result = await build_result_async(
             filename="junyu.xlsx",
             file_bytes=build_bill_bytes(
                 headers, [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "I": "王师傅"}]
@@ -73,8 +75,8 @@ class TestSkGuard:
     not REAL_XLS.exists(), reason="golden 样本未入库（表格文件不入库），本地放置后自动启用"
 )
 class TestOverview:
-    def test_overview_fields(self):
-        result = build_real_result()
+    async def test_overview_fields(self):
+        result = await build_real_result()
         assert result.file == REAL_XLS.name
         assert result.bill_period == "2015-01-01~2015-12-31"
         assert result.total_rows == REAL_TOTAL_ROWS
@@ -82,8 +84,8 @@ class TestOverview:
         assert result.create_order is False
         assert result.summary is None
 
-    def test_meta(self):
-        result = build_real_result()
+    async def test_meta(self):
+        result = await build_real_result()
         meta = result.meta
         assert meta["source_sha256"] == hashlib.sha256(REAL_XLS.read_bytes()).hexdigest()
         assert meta["source_bytes"] == REAL_XLS.stat().st_size
@@ -96,9 +98,9 @@ class TestOverview:
 
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", meta["parsed_at"])
 
-    def test_json_contract(self):
+    async def test_json_contract(self):
         """model_dump(mode='json') 顶层与 orders[] 键对齐文档 §3.3/§3.4（新增 canonical_orders）。"""
-        dumped = build_real_result().model_dump(mode="json")
+        dumped = (await build_real_result()).model_dump(mode="json")
         assert set(dumped) == {
             "file",
             "bill_period",
@@ -141,14 +143,14 @@ class TestOverview:
     not REAL_XLS.exists(), reason="golden 样本未入库（表格文件不入库），本地放置后自动启用"
 )
 class TestCreateMode:
-    def test_create_fills_create_result_and_summary(self, monkeypatch):
+    async def test_create_fills_create_result_and_summary(self, monkeypatch):
         """create_order=True → 逐单 create_result + summary；preview 路径零变化。"""
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080042"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(
             filename=REAL_XLS.name,
             file_bytes=REAL_XLS.read_bytes(),
             create_order=True,
@@ -174,20 +176,20 @@ class TestCreateMode:
             for o in result.orders
         )
 
-    def test_preview_never_calls_downstream(self, monkeypatch):
+    async def test_preview_never_calls_downstream(self, monkeypatch):
         """preview 路径（create_order=False）零下游调用（行为零变化）。"""
         calls = {"n": 0}
 
-        def fake_post(*_a, **_k):
+        async def fake_post(*_a, **_k):
             calls["n"] += 1
             return FakeResponse({"code": "200"})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(filename=REAL_XLS.name, file_bytes=REAL_XLS.read_bytes())
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(filename=REAL_XLS.name, file_bytes=REAL_XLS.read_bytes())
         assert result.summary is None
         assert calls["n"] == 0
 
-    def test_canonical_create_mode_uses_addwork(self, monkeypatch):
+    async def test_canonical_create_mode_uses_addwork(self, monkeypatch):
         """标准字段家族（canonical 语义）create_order=True → create_canonical_orders
         （AddWork 端点 + sk 头 + create_order=true，2026-08-13 实测定论）。"""
         responses = iter(
@@ -197,11 +199,11 @@ class TestCreateMode:
         )
         posts: list[str] = []
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             posts.append(url)
             return next(responses)
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         # junyu 家族表头（L2 族级近似命中，canonical 语义）
         headers = {
             "A": "序号",
@@ -215,7 +217,7 @@ class TestCreateMode:
             "I": "司机",
             "J": "应收备注",
         }
-        result = build_result(
+        result = await build_result_async(
             filename="junyu.xlsx",
             file_bytes=build_bill_bytes(
                 headers,
@@ -278,18 +280,18 @@ class TestCreateMode:
     def _fake_ok_chain(monkeypatch, calls: dict):
         """下单按调用序计数并返回成功（sk 由调用方透传，无凭证链路）。"""
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
 
-    def test_dedup_second_upload_skipped(self, monkeypatch):
+    async def test_dedup_second_upload_skipped(self, monkeypatch):
         """同文件重导（create_order=True）：第二次全部 skipped（下游 0 次新增调用）。"""
         calls = {"addwork": 0}
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
-        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        first = await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert first.summary == {
             "total": 2,
             "success": 2,
@@ -300,7 +302,7 @@ class TestCreateMode:
             "failed_details": [],
         }
         assert calls["addwork"] == 2
-        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        second = await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
             "success": 2,
@@ -316,7 +318,7 @@ class TestCreateMode:
         # 路由层转 409；不得误报 204 添加失败）
         assert second.upstream is None
 
-    def test_dedup_different_sk_not_skipped(self, monkeypatch):
+    async def test_dedup_different_sk_not_skipped(self, monkeypatch):
         """异 sk（不同操作员）导入同一账单：不命中注册表，照常创建（2026-08-31 起）。
 
         去重维度从提单号全局改为 (提单号, sk)：A 创建后 B 导入不再被误拦，
@@ -325,9 +327,9 @@ class TestCreateMode:
         calls = {"addwork": 0}
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
-        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk-a")
+        await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk-a")
         assert calls["addwork"] == 2
-        other = build_result(
+        other = await build_result_async(
             filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk-b"
         )
         assert other.summary["skipped"] == 0
@@ -335,22 +337,22 @@ class TestCreateMode:
         assert calls["addwork"] == 4  # 异 sk 各自真实下单
         assert all(not o.create_result.get("skipped") for o in other.canonical_orders)
 
-    def test_dedup_failed_not_registered_retry_creates(self, monkeypatch):
+    async def test_dedup_failed_not_registered_retry_creates(self, monkeypatch):
         """失败单不登记：重导时失败单正常创建（修正后重导不被误拦）。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             if calls["addwork"] == 1:
                 return FakeResponse({"code": "204", "msg": "添加失败"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX2"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         file_bytes = self._junyu_file()
-        first = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        first = await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert first.summary["failed"] == 1
         assert first.summary["success"] == 1
-        second = build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        second = await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
             "success": 2,
@@ -361,32 +363,32 @@ class TestCreateMode:
             "failed_details": [],
         }
 
-    def test_all_failed_upstream_204(self, monkeypatch):
+    async def test_all_failed_upstream_204(self, monkeypatch):
         """build_result 直测：新建全失败 → upstream 204 结构（锁死契约）。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return FakeResponse({"code": "204", "msg": "添加失败"})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(
             filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert result.summary["success"] == 0 and result.summary["failed"] == 2
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
         assert calls["addwork"] == 2
 
-    def test_success_without_upstream_echo_is_200(self, monkeypatch):
+    async def test_success_without_upstream_echo_is_200(self, monkeypatch):
         """下游 code 200 但无 data 回显 → 仍按新建成功返回 200（不得误报 204）。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功"})  # 无 data[0]
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(
             filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert result.summary["success"] == 2 and result.summary["created"] == 2
@@ -394,7 +396,7 @@ class TestCreateMode:
         assert result.upstream == {"code": "200", "msg": "添加成功", "data": []}
         assert calls["addwork"] == 2
 
-    def test_too_many_rows_raises_bad_request(self, monkeypatch):
+    async def test_too_many_rows_raises_bad_request(self, monkeypatch):
         """build_result 直测：行数超限 → BadRequestError too_many_rows（双管线口径）。"""
         from types import SimpleNamespace
 
@@ -411,7 +413,7 @@ class TestCreateMode:
             ),
         )
         with pytest.raises(BadRequestError) as caught:
-            build_result(filename="many.xlsx", file_bytes=b"x")
+            await build_result_async(filename="many.xlsx", file_bytes=b"x")
         assert caught.value.http_status == 400
         assert caught.value.code == "too_many_rows"
         assert caught.value.details == {
@@ -420,18 +422,18 @@ class TestCreateMode:
             "upstream": {"code": "400", "msg": "数据量过大，联系人工客服", "data": []},
         }
 
-    def test_nan_echo_sanitized_to_null(self, monkeypatch):
+    async def test_nan_echo_sanitized_to_null(self, monkeypatch):
         """下游回显含 NaN/Infinity 字面量 → 归一为 None（JSON null），不污染响应体。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1", "fee": float("nan")}]}
             )
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = build_result(
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await build_result_async(
             filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert calls["addwork"] == 2
@@ -445,7 +447,7 @@ class TestCreateMode:
             o.create_result["upstream"]["fee"] is None for o in result.canonical_orders
         )
 
-    def test_preview_never_touches_imported_registry(self, monkeypatch):
+    async def test_preview_never_touches_imported_registry(self, monkeypatch):
         """preview 模式零注册表读写（去重零副作用，锁死回归）。"""
         from app.orders.bill import imported_registry
 
@@ -461,11 +463,11 @@ class TestCreateMode:
 
         monkeypatch.setattr(registry, "lookup", _counting(registry.lookup, "lookup"))
         monkeypatch.setattr(registry, "register", _counting(registry.register, "register"))
-        result = build_result(filename="junyu.xlsx", file_bytes=self._junyu_file())
+        result = await build_result_async(filename="junyu.xlsx", file_bytes=self._junyu_file())
         assert result.create_order is False
         assert calls == {"lookup": 0, "register": 0}
 
-    def test_dedup_skipped_not_counted_in_master_data(self, monkeypatch):
+    async def test_dedup_skipped_not_counted_in_master_data(self, monkeypatch):
         """重导跳过单不再计数（建档阈值统计不被重复上传推高）。"""
         from app.orders.bill import master_data_store
 
@@ -473,17 +475,17 @@ class TestCreateMode:
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
         store = master_data_store.get_store()
-        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         after_first = dict(store.snapshot())
         assert after_first  # 第一次导入产生计数
-        build_result(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
+        await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         assert store.snapshot() == after_first  # 第二次（全 skipped）计数不变
 
 
 class TestConstructed:
-    def test_no_period_bill(self):
+    async def test_no_period_bill(self):
         """无结算区间 → bill_period=None，不报错。"""
-        result = build_result(
+        result = await build_result_async(
             filename="no-period.xlsx",
             file_bytes=build_bill_bytes(
                 {"A": "序号", "B": "客户编号", "C": "提单号", "D": "箱型"},
@@ -493,10 +495,10 @@ class TestConstructed:
         assert result.bill_period is None
         assert result.order_count == 1
 
-    def test_broken_bytes_convert_error(self):
+    async def test_broken_bytes_convert_error(self):
         """坏文件 bytes → ConvertError 原样上抛。"""
         try:
-            build_result(filename="bad.xlsx", file_bytes=b"not a zip")
+            await build_result_async(filename="bad.xlsx", file_bytes=b"not a zip")
             raise AssertionError("应抛 ConvertError")
         except ConvertError as exc:
             assert exc.code == "convert_error"

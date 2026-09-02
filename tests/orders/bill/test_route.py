@@ -286,7 +286,7 @@ class TestCreateMode:
             ],
         }
 
-        def fake_build_result(**kwargs):
+        async def fake_build_result(**kwargs):
             return BillParseResult(
                 file=kwargs["filename"],
                 total_rows=1,
@@ -411,7 +411,7 @@ def test_error_envelope_server_busy_503(monkeypatch):
     import app.main as main_module
     from app.errors import ServiceBusyError
 
-    def fake_build_result(**kwargs):
+    async def fake_build_result(**kwargs):
         raise ServiceBusyError("concurrent tasks full, queue timeout")
 
     monkeypatch.setattr(main_module, "build_result", fake_build_result)
@@ -761,7 +761,7 @@ class TestDedupConflict:
         import app.main as main_module
         from app.orders.bill import BillParseResult
 
-        def fake_build_result(**kwargs):
+        async def fake_build_result(**kwargs):
             return BillParseResult(
                 file=kwargs["filename"],
                 total_rows=2,

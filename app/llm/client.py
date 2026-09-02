@@ -330,7 +330,9 @@ async def achat(
     response_format: dict | None = None,
     extra_body: dict | None = None,
 ) -> tuple[str, dict]:
-    """achat：chat 的异步版（逻辑/错误分类/降级重试与 chat 逐项对齐）。"""
+    """achat：chat 的异步版（逻辑/错误分类/降级重试与 chat 逐项对齐）。
+
+    同步 chat 仍保留：ai_header 表头识别在 to_thread 解析段内同步调用。"""
     model = model or settings.llm_model_default
     global _thinking_disabled_supported
     kwargs: dict[str, Any] = {

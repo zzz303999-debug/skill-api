@@ -16,7 +16,8 @@ import yaml
 
 import app.orders.bill.master_data as md_module
 import app.orders.bill.master_data_client as md_client_module
-from app.orders.bill import BoxGroup, CanonicalOrder, build_result
+import app.orders.http_client as http_client_module
+from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.master_data import (
     KIND_CLIENT,
     KIND_DRIVER,
@@ -25,10 +26,12 @@ from app.orders.bill.master_data import (
     client_key,
     driver_key,
     factory_key,
-    run_master_data,
+    run_master_data_async,
 )
 from app.orders.bill.master_data_store import get_store
 from helpers import FakeResponse
+
+pytestmark = pytest.mark.asyncio
 
 # 建档端点测试值（避开真实域名；与 test_master_data.TEST_ENDPOINTS 同口径）
 TEST_ENDPOINTS = {
@@ -81,7 +84,7 @@ def md_config(tmp_path, monkeypatch):
 def real_archives(monkeypatch, _no_real_archive_calls):
     """恢复真实 create_archives（conftest 全局 mock 是零网络兜底）——本文件
     验证建档内部调用链（httpx 层），显式依赖本 fixture 拿回真实实现。"""
-    monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
+    monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
     return _no_real_archive_calls
 
 
@@ -91,11 +94,11 @@ def fake_http(monkeypatch):
     captured: list[dict] = []
 
     def _install(responder) -> None:
-        def fake_post(url, *, data=None, headers=None, timeout=None, **kwargs):
-            captured.append({"url": url, "data": data, "headers": headers, "timeout": timeout})
-            return responder(url, data=data)
+        async def fake_post(url, *, payload=None, headers=None, timeout=None, name=None, payload_kind=None, **kwargs):
+            captured.append({"url": url, "data": payload, "headers": headers, "timeout": timeout})
+            return responder(url, data=payload)
 
-        monkeypatch.setattr(md_client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
 
     _install.captured = captured
     return _install
@@ -139,10 +142,10 @@ def _success(kind: str) -> dict:
 class TestClientCreate:
     """客户建档接口：请求体字段完整性 + 成功解析 client_id。"""
 
-    def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
+    async def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse(_success(KIND_CLIENT)))
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert report["archived"][0] == {
             "kind": KIND_CLIENT,
             "key": client_key("锦煦"),
@@ -161,43 +164,43 @@ class TestClientCreate:
         assert form["data[0][n]"] == "张经理" and form["data[0][p]"] == "13900000000"
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["archive_id"] == "c-1001"
 
-    def test_success_without_contact_omits_contact_keys(self, md_config, fake_http, real_archives):
+    async def test_success_without_contact_omits_contact_keys(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse(_success(KIND_CLIENT)))
-        run_master_data(
+        await run_master_data_async(
             [_make_order(customer="客户甲", customer_contact=None, contact_phone=None)],
             create_order=True, sk="sk-token",
         )
         form = fake_http.captured[0]["data"]
         assert "data[0][n]" not in form and "data[0][p]" not in form  # 非必填空值省略键
 
-    def test_failure_http_500(self, md_config, fake_http, real_archives):
+    async def test_failure_http_500(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"msg": "boom"}, status_code=500))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "HTTP error: 500" in failed[0]["reason"]
         assert report["archived"] == []
         assert get_store().get(KIND_CLIENT, client_key("锦煦")).get("archive_id") is None  # 不登记
 
-    def test_failure_non_json(self, md_config, fake_http, real_archives):
+    async def test_failure_non_json(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "not a JSON object" in failed[0]["reason"]
 
-    def test_failure_rejected_code(self, md_config, fake_http, real_archives):
+    async def test_failure_rejected_code(self, md_config, fake_http, real_archives):
         """code 非 "200"（拒单）→ failed；msg 不命中 duplicate 标记。"""
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"code": "500", "msg": "分组不存在"}))
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "分组不存在" in failed[0]["reason"]
 
-    def test_failure_duplicate_marks_external(self, md_config, fake_http, real_archives):
+    async def test_failure_duplicate_marks_external(self, md_config, fake_http, real_archives):
         """「已存在」拒单 → exists_external 登记（不再重试，不记 failed）。"""
         md_config(_md_cfg(threshold=1))
 
@@ -206,14 +209,14 @@ class TestClientCreate:
 
         fake_http(responder)
         # 仅客户候选（无门点无司机，避免工厂依赖/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         assert report["failed"] == []
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "已存在" in ext[0]["message"]
         rec = get_store().get(KIND_CLIENT, client_key("锦煦"))
         assert rec and rec.get("exists_external") is True and rec.get("archive_id") is None
 
-    def test_duplicate_branch_logging_extra_key_safe(
+    async def test_duplicate_branch_logging_extra_key_safe(
         self, md_config, fake_http, real_archives, monkeypatch
     ):
         """「已存在」分支日志 extra 不得使用 LogRecord 保留键 message（2026-08-31
@@ -229,18 +232,18 @@ class TestClientCreate:
             )
         )
         monkeypatch.setattr(md_client_module.log, "isEnabledFor", lambda level: True)
-        report = run_master_data(
+        report = await run_master_data_async(
             [_make_order(door=None, driver=None)], create_order=True, sk="sk-token"
         )
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "已存在" in ext[0]["message"]
 
-    def test_failure_no_primary_key_marks_external(self, md_config, fake_http, real_archives):
+    async def test_failure_no_primary_key_marks_external(self, md_config, fake_http, real_archives):
         """成功但无主键（data:[] 实证形态）→ exists_external（防重复建档）。"""
         md_config(_md_cfg(threshold=1))
         fake_http(lambda url, **kw: FakeResponse({"code": "200", "msg": "添加成功", "data": []}))
         # 仅客户候选（避免工厂/司机链干扰断言）
-        report = run_master_data([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order(door=None, driver=None)], create_order=True, sk="sk-token")
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "未返回主键" in ext[0]["message"]
         assert report["failed"] == []
@@ -249,14 +252,14 @@ class TestClientCreate:
 class TestFactoryCreate:
     """工厂建档接口：依赖前置 client_id + 请求体字段完整性 + factory_id。"""
 
-    def test_success_fields_with_client_dependency(self, md_config, fake_http, real_archives):
+    async def test_success_fields_with_client_dependency(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(
             lambda url, **kw: FakeResponse(
                 _success(KIND_CLIENT) if "Client" in url else _success(KIND_FACTORY)
             )
         )
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_FACTORY for a in report["archived"])
         factory_req = next(r for r in fake_http.captured if "Factory" in r["url"])
         form = factory_req["data"]
@@ -273,7 +276,7 @@ class TestFactoryCreate:
 class TestTruckCreate:
     """车辆建档接口（司机依赖链内触发）：num/sn + 归属默认值 + truck_id。"""
 
-    def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
+    async def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(
             lambda url, **kw: FakeResponse(
@@ -282,7 +285,7 @@ class TestTruckCreate:
                 else _success(KIND_DRIVER) if "Driver" in url else _success(KIND_CLIENT)
             )
         )
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_TRUCK for a in report["archived"])
         truck_req = next(r for r in fake_http.captured if "Truck" in r["url"])
         form = truck_req["data"]
@@ -295,7 +298,7 @@ class TestTruckCreate:
 class TestDriverCreate:
     """司机建档接口：name/phone/num/sn + sinout 默认值 + truck_id + id 主键。"""
 
-    def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
+    async def test_success_fields_and_primary_key(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(
             lambda url, **kw: FakeResponse(
@@ -304,7 +307,7 @@ class TestDriverCreate:
                 else _success(KIND_DRIVER) if "Driver" in url else _success(KIND_CLIENT)
             )
         )
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert any(a["kind"] == KIND_DRIVER for a in report["archived"])
         driver_req = next(r for r in fake_http.captured if "Driver" in r["url"])
         form = driver_req["data"]
@@ -337,10 +340,10 @@ class TestParallelIsolation:
 
         return responder
 
-    def test_all_four_succeed_in_one_run(self, md_config, fake_http, real_archives):
+    async def test_all_four_succeed_in_one_run(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(None))
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert [a["kind"] for a in report["archived"]] == [
             KIND_CLIENT,
             KIND_FACTORY,
@@ -349,10 +352,10 @@ class TestParallelIsolation:
         ]
         assert report["failed"] == []
 
-    def test_client_failure_blocks_factory_but_not_truck_driver(self, md_config, fake_http, real_archives):
+    async def test_client_failure_blocks_factory_but_not_truck_driver(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(KIND_CLIENT))
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         # 客户失败 → 工厂因依赖前置跳过（failed 原因）；车辆/司机链路不受影响
         assert any(f["kind"] == KIND_CLIENT for f in report["failed"])
         assert any(f["kind"] == KIND_FACTORY and "所属客户未建档" in f["reason"] for f in report["failed"])
@@ -361,10 +364,10 @@ class TestParallelIsolation:
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
         assert get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))["count"] == 1
 
-    def test_driver_failure_does_not_break_others(self, md_config, fake_http, real_archives):
+    async def test_driver_failure_does_not_break_others(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(self._responder(KIND_DRIVER))
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert any(f["kind"] == KIND_DRIVER for f in report["failed"])
         assert [a["kind"] for a in report["archived"]] == [
             KIND_CLIENT,
@@ -383,7 +386,7 @@ class TestSkPassthroughAllKinds:
     且 create_archives 不校验 sk 非空——靠本断言守住透传链不回归。
     """
 
-    def test_all_four_kinds_carry_sk_header(self, md_config, fake_http, real_archives):
+    async def test_all_four_kinds_carry_sk_header(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
         fake_http(
             lambda url, **kw: FakeResponse(
@@ -396,7 +399,7 @@ class TestSkPassthroughAllKinds:
                 else _success(KIND_CLIENT)
             )
         )
-        report = run_master_data([_make_order()], create_order=True, sk="sk-token")
+        report = await run_master_data_async([_make_order()], create_order=True, sk="sk-token")
         assert [a["kind"] for a in report["archived"]] == [
             KIND_CLIENT,
             KIND_FACTORY,
@@ -418,18 +421,17 @@ class TestSkPassthroughAllKinds:
 class TestServiceIntegration:
     """service 层集成：建档失败进 meta.master_data.failed，订单照常创建（不阻断）。"""
 
-    def test_archive_failure_keeps_order_flow(self, md_config, monkeypatch, real_archives):
+    async def test_archive_failure_keeps_order_flow(self, md_config, monkeypatch, real_archives):
         md_config(_md_cfg(threshold=1))
-        import app.orders.bill.client as client_module
 
-        def fake_post(url, data=None, **_kwargs):
+        async def fake_post(url, *, payload=None, headers=None, name=None, payload_kind=None, timeout=None, **_kwargs):
             if "Client" in url:
                 return FakeResponse({"code": "500", "msg": "客户建档失败"})
             if "Factory" in url or "Truck" in url or "Driver" in url:
                 return FakeResponse({"code": "500", "msg": "依赖前置未建档"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         from helpers import build_bill_bytes
 
         # junyu 家族表头（L2 族级近似命中，既有语义 → canonical 转换；订单可建）
@@ -445,7 +447,7 @@ class TestServiceIntegration:
             "I": "司机",
             "J": "应收备注",
         }
-        result = build_result(
+        result = await build_result_async(
             filename="junyu.xlsx",
             file_bytes=build_bill_bytes(
                 headers, [{"A": 1, "B": "客户甲", "E": "OOLU12345678", "D": "40HQ", "I": "王师傅"}]

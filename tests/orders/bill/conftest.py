@@ -76,20 +76,22 @@ def _isolate_imported_registry(tmp_path):
 def _no_real_archive_calls(monkeypatch):
     """全局拦截建档族网络调用（零网络）：默认全部成功返回递增 archive_id。
 
-    费目自举/基础资料建档的编排用例可自行 monkeypatch 覆盖（如 test_master_data
-    的 fake_create）；未 mock 的用例（test_template/test_route 等 build_result
-    调用）不会向真实 s3.jxt56.com 发建档请求（建档失败本就不抛断）。
-    yield 真实 create_archives：需要验证建档内部调用链的用例（如
+    拦截 create_archives_async（async 生产链路唯一建档入口，同步版已随
+    Phase 4b 清理删除）。费目自举/基础资料建档的编排用例可自行 monkeypatch
+    覆盖（如 test_master_data 的 fake_create）；未 mock 的用例（test_template/
+    test_route 等 build_result_async 调用）不会向真实 s3.jxt56.com 发建档请求
+    （建档失败本就不抛断）。
+    yield 真实 create_archives_async：需要验证建档内部调用链的用例（如
     TestClientDirectURL）可显式依赖本 fixture 并恢复真实实现。
     """
     import itertools
 
     import app.orders.bill.master_data_client as md_client_module
 
-    real_create = md_client_module.create_archives  # 真实函数（此刻未被 mock）
+    real_create = md_client_module.create_archives_async  # 真实函数（此刻未被 mock）
     counter = itertools.count(9000)
 
-    def _fake(forms_by_kind: dict, sk: str = ""):
+    async def _fake(forms_by_kind: dict, sk: str = ""):
         return {
             kind: {
                 key: {
@@ -102,7 +104,7 @@ def _no_real_archive_calls(monkeypatch):
             for kind, forms in forms_by_kind.items()
         }
 
-    monkeypatch.setattr(md_client_module, "create_archives", _fake)
+    monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
     yield real_create
 
 

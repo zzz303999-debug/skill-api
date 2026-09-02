@@ -145,6 +145,35 @@ async def test_async_network_error_logged_and_re_raised(caplog, monkeypatch):
     assert errors[0]["error_type"] == "TimeoutException"
 
 
+async def test_async_long_body_truncated_in_logs(caplog, monkeypatch):
+    """超长响应体日志截断（2000 字符），不撑爆日志。"""
+    fake = _FakeAsyncHttpClient(
+        response=FakeResponse(text='{"code": "200", "data": {"x": "' + "y" * 5000 + '"}}')
+    )
+    monkeypatch.setattr(http_client_mod, "get_async_client", lambda: fake)
+    with caplog.at_level("INFO"):
+        await http_client_mod.post_json_async(
+            "https://downstream.test/api", {}, name="addBill", timeout=30
+        )
+    resp = _records(caplog, "third_party_response")[0]
+    assert len(resp["body_preview"]) == 2000
+
+
+async def test_async_non_json_payload_falls_back_to_str(caplog, monkeypatch):
+    """非 JSON 可序列化 payload（bytes）→ 日志以 str 形态摘要，不炸。"""
+    fake = _FakeAsyncHttpClient(response=FakeResponse(text="ok"))
+    monkeypatch.setattr(http_client_mod, "get_async_client", lambda: fake)
+    with caplog.at_level("INFO"):
+        await http_client_mod.post_form_async(
+            "https://downstream.test/form",
+            b"raw-bytes-payload",
+            name="AddWork",
+            timeout=30,
+        )
+    req = _records(caplog, "third_party_request")[0]
+    assert "raw-bytes-payload" in req["body_preview"]
+
+
 async def test_get_async_client_lazy_singleton():
     """懒加载单例：重复调用返回同一连接池实例（测试后释放，不残留全局）。"""
     client = http_client_mod.get_async_client()

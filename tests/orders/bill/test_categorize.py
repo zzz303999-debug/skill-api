@@ -21,17 +21,19 @@ import pytest
 import yaml
 from openpyxl import Workbook
 
-import app.orders.bill.client as client_module
 import app.orders.bill.master_data as md_module
 import app.orders.bill.master_data_client as md_client_module
 import app.orders.bill.template_store as ts_module
-from app.orders.bill import build_result, group_canonical, parse_bill
-from app.orders.bill.fee_bootstrap import run_fee_bootstrap
+import app.orders.http_client as http_client_module
+from app.orders.bill import build_result_async, group_canonical, parse_bill
+from app.orders.bill.fee_bootstrap import run_fee_bootstrap_async
 from app.orders.bill.fee_price_map import apply_price_map
 from app.orders.bill.fee_registry import get_registry
 from app.orders.bill.master_data import collect_candidates
 from app.orders.bill.payload import build_order_payload
 from helpers import FakeResponse, inject_price_map
+
+pytestmark = pytest.mark.asyncio
 
 # ---- 最小混合类别模板（单行表头 + fees.ranges 区块分界，仿赢辉家族） ----
 
@@ -138,7 +140,7 @@ def parse_mixed(bill_bytes: bytes, tmp_path):
 class TestFourCategoryAggregation:
     """四类归集整合：一条 Excel 数据线同时产出四类数据，无遗漏、无错分。"""
 
-    def test_business_information(self, mixed_bill, tmp_path):
+    async def test_business_information(self, mixed_bill, tmp_path):
         """业务信息：一行一票 → 两行同号各自成单（首行主字段+箱型，次行仅提单号+箱型）。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         assert len(orders) == 2
@@ -158,7 +160,7 @@ class TestFourCategoryAggregation:
         assert second.row_count == 1
         assert "customer_name" in second.missing_fields
 
-    def test_multi_plate_cleaned_into_remark(self, mixed_template, tmp_path):
+    async def test_multi_plate_cleaned_into_remark(self, mixed_template, tmp_path):
         """多车牌：浮点尾巴清洗（9486.0→9486）按行生效；一行一票无跨行车牌 remark 段。"""
         rows = [
             [1, "客户甲", "门点A", "王师傅", "9486.0", "OOLU12345678", "40HQ*2", "13800000000",
@@ -170,7 +172,7 @@ class TestFourCategoryAggregation:
         assert [o.plate_no for o in orders] == ["9486", "7399"]
         assert all(o.remark is None for o in orders)  # 单行不再拼接「车牌：」段
 
-    def test_financial_information_channels(self, mixed_bill, tmp_path):
+    async def test_financial_information_channels(self, mixed_bill, tmp_path):
         """财务信息：费用按通道归集（应收→shou/应付→pay/车辆成本→cost），
         一行一票各行独立，未映射费目归并 other。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
@@ -190,7 +192,7 @@ class TestFourCategoryAggregation:
         second = {(f.channel, f.code): f for f in orders[1].fees}
         assert second[("shou", "freight")].money == 150
 
-    def test_basic_information_candidates(self, mixed_bill, tmp_path):
+    async def test_basic_information_candidates(self, mixed_bill, tmp_path):
         """基础信息：客户/工厂/司机三类候选无遗漏（订单侧字段 → 档案候选）。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         cands = collect_candidates(orders)
@@ -202,11 +204,11 @@ class TestFourCategoryAggregation:
         assert by_kind["driver"].phone == "13800000000"
         assert by_kind["driver"].plate == "沪A12345"
 
-    def test_fee_column_bootstrap_planned(self, mixed_bill, tmp_path, monkeypatch):
+    async def test_fee_column_bootstrap_planned(self, mixed_bill, tmp_path, monkeypatch):
         """费用栏目：缺失费目码进自举计划（有 price_id 的费目不重复建）。"""
         inject_price_map(monkeypatch, {"other": None, "waiting": None})
         _, orders = parse_mixed(mixed_bill, tmp_path)
-        planned = run_fee_bootstrap(orders, create_order=False)
+        planned = await run_fee_bootstrap_async(orders, create_order=False)
         assert planned["mode"] == "preview"
         assert planned["created"] == []  # preview 零副作用
         # 待时费/其它费 price_id null → 计划建档（按费用出现序：高速费先于待时费）；
@@ -216,7 +218,7 @@ class TestFourCategoryAggregation:
             {"code": "waiting", "tms_name": "待时费"},
         ]
 
-    def test_record_count_conserved(self, mixed_bill, tmp_path):
+    async def test_record_count_conserved(self, mixed_bill, tmp_path):
         """记录数守恒：2 行数据 → 2 票订单（一行一票，row_count=1），四类输出同源。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         assert len(orders) == 2 and all(o.row_count == 1 for o in orders)
@@ -227,7 +229,7 @@ class TestFourCategoryAggregation:
 class TestFieldMapping:
     """字段映射断言（重点：财务四类费用字段 Excel 列 → 接口入参）。"""
 
-    def test_four_channel_form_mapping(self, mixed_bill, tmp_path, monkeypatch):
+    async def test_four_channel_form_mapping(self, mixed_bill, tmp_path, monkeypatch):
         """Excel 费用列 → FeeItem → form 键（shou/pay/cost 通道 + 合计回写）。"""
         # 注入 waiting/other 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
         # 预登记待建费目（模拟自举成功后），保证四通道全部可发射
@@ -265,7 +267,7 @@ class TestFieldMapping:
         assert form["c_title"] == "客户甲"
         assert form["box[0][b_type]"] == "40HQ" and form["box[0][box_num]"] == "2"
 
-    def test_fee_defaults_and_price_type(self, mixed_bill, tmp_path):
+    async def test_fee_defaults_and_price_type(self, mixed_bill, tmp_path):
         """费目条目六属性键：price_type/is_profit/dai_dian 取模板 fee_defaults。"""
         reg = get_registry()
         reg.register("waiting", 90001, "待时费")
@@ -282,7 +284,7 @@ class TestFieldMapping:
 class TestBoundaries:
     """边界：空行 / 缺列 / 脏数据（提单号前后空格）。"""
 
-    def test_empty_row_filtered(self, tmp_path, mixed_template):
+    async def test_empty_row_filtered(self, tmp_path, mixed_template):
         """全空行不产生数据记录（数据行数守恒）。"""
         rows = mixed_rows()
         rows.insert(1, [None] * len(MIXED_HEADERS))  # 两数据行之间插全空行
@@ -290,7 +292,7 @@ class TestBoundaries:
         _, orders = parse_mixed(bill, tmp_path)
         assert len(orders) == 2 and all(o.row_count == 1 for o in orders)
 
-    def test_missing_columns_flagged(self, tmp_path, mixed_template):
+    async def test_missing_columns_flagged(self, tmp_path, mixed_template):
         """缺列（客户名称/箱型箱量/司机手机缺失）→ missing_fields 登记，不阻塞。"""
         headers = ["序号", "门点", "司机", "车牌号", "提单号", *FEE_HEADERS]
         rows = [
@@ -304,7 +306,7 @@ class TestBoundaries:
         assert order.bl_no == "OOLU12345678"  # 提单号不受影响
         assert any(f.code == "freight" for f in order.fees)  # 费用列不受缺业务列影响
 
-    def test_dirty_bl_no_cleaned(self, tmp_path, mixed_template):
+    async def test_dirty_bl_no_cleaned(self, tmp_path, mixed_template):
         """脏数据：提单号前后空格 → 清洗后同号成单（一行一票两单，清洗不丢单）。"""
         rows = mixed_rows()
         rows[0][5] = "  OOLU12345678  "
@@ -392,7 +394,7 @@ class TestTwoRowRegression:
     xlrd 空文本为 '' 不受影响）；同时覆盖费用区合并区块名的双行匹配路径。
     """
 
-    def test_business_columns_mapped(self, tmp_path, two_row_template):
+    async def test_business_columns_mapped(self, tmp_path, two_row_template):
         """业务区空区块单元格 → 业务列正常映射（修复前「None.客户名称」全失配）。"""
         bill = build_two_row_bill_bytes(MIXED_HEADERS, mixed_rows())
         output, orders = parse_mixed(bill, tmp_path)
@@ -408,7 +410,7 @@ class TestTwoRowRegression:
         assert [(g.b_type, g.box_num) for g in order.box_groups] == [("40HQ", 2)]
         assert order.row_count == 1
 
-    def test_fee_channels_via_merged_sections(self, tmp_path, two_row_template):
+    async def test_fee_channels_via_merged_sections(self, tmp_path, two_row_template):
         """费用区合并区块名 → 四通道费用正确归属（与单行模板同口径，各行独立）。"""
         bill = build_two_row_bill_bytes(MIXED_HEADERS, mixed_rows())
         _, orders = parse_mixed(bill, tmp_path)
@@ -423,7 +425,7 @@ class TestTwoRowRegression:
         second_fees = {(f.channel, f.code): f for f in orders[1].fees}
         assert second_fees[("shou", "freight")].money == 150
 
-    def test_no_none_unmatched_headers(self, tmp_path, two_row_template):
+    async def test_no_none_unmatched_headers(self, tmp_path, two_row_template):
         """未识别表头告警不含 "None" 假列（空区块/空表头单元格不再上报）。"""
         bill = build_two_row_bill_bytes(MIXED_HEADERS, mixed_rows())
         output, _ = parse_mixed(bill, tmp_path)
@@ -485,43 +487,43 @@ def md_config(tmp_path, monkeypatch):
 class TestE2EMock:
     """全流程 mock 端到端（CI 可跑，无 golden 依赖）：一次 create 触发四类链路。"""
 
-    def test_full_flow_and_second_upload_dedup(
+    async def test_full_flow_and_second_upload_dedup(
         self, mixed_bill, tmp_path, md_config, monkeypatch, _no_real_archive_calls
     ):
         # 恢复真实 create_archives（conftest 全局 mock 是零网络兜底），httpx 层统一 mock
-        monkeypatch.setattr(md_client_module, "create_archives", _no_real_archive_calls)
+        monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
         # 注入 waiting/other 无 id：触发费目自举建档（2026-09-01 真实表已补值）
         inject_price_map(monkeypatch, {"waiting": None, "other": None})
         state = {"addwork": 0, "price": 0, "archives": []}
         price_ids = iter([88801, 88802])
         addwork_forms: list[dict] = []
 
-        def fake_post(url, data=None, **_kwargs):
+        async def fake_post(url, *, payload=None, headers=None, name=None, payload_kind=None, timeout=None, **_kwargs):
             if "/Create/Price" in url:
                 state["price"] += 1
-                state["archives"].append(("price", data))
+                state["archives"].append(("price", payload))
                 return FakeResponse({"code": "200", "msg": "添加成功", "data": {"price_id": next(price_ids)}})
             if "/Create/Client" in url:
-                state["archives"].append(("client", data))
+                state["archives"].append(("client", payload))
                 return FakeResponse({"code": "200", "msg": "添加成功", "data": {"client_id": "c1"}})
             if "/Create/Factory" in url:
-                state["archives"].append(("factory", data))
+                state["archives"].append(("factory", payload))
                 return FakeResponse({"code": "200", "msg": "添加成功", "data": {"factory_id": "f1"}})
             if "/Create/Truck" in url:
-                state["archives"].append(("truck", data))
+                state["archives"].append(("truck", payload))
                 return FakeResponse({"code": "200", "msg": "添加成功", "data": {"truck_id": "t1"}})
             if "/Create/Driver" in url:
-                state["archives"].append(("driver", data))
+                state["archives"].append(("driver", payload))
                 return FakeResponse({"code": "200", "msg": "添加成功", "data": {"id": "d1"}})
             state["addwork"] += 1
-            addwork_forms.append(data)
+            addwork_forms.append(payload)
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
 
         # 第一次上传：四类链路全部触发（一行一票：两行 → 两单）。
         # 同号无箱号行按行序号兜底成键（#1/#2），两行各自录入（2026-08-31 拍板）
-        result = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
+        result = await build_result_async(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert result.summary == {
             "total": 2,
             "success": 2,
@@ -567,7 +569,7 @@ class TestE2EMock:
         from app.orders.bill.master_data_store import get_store
 
         counts_after_first = dict(get_store().snapshot())
-        second = build_result(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
+        second = await build_result_async(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
             "success": 2,

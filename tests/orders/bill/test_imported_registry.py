@@ -5,19 +5,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import threading
 import time
 
 import pytest
 
 from app.orders.bill.imported_registry import (
     ImportedOrderRegistry,
+    alock_for,
     dedup_key,
-    lock_for,
     normalize,
     owner_key,
 )
+
+# 测试用去重维度键（真实链路由 owner_key(sk) 计算，这里固定可读）
+pytestmark = pytest.mark.asyncio
 
 # 测试用去重维度键（真实链路由 owner_key(sk) 计算，这里固定可读）
 OWNER_A = owner_key("sk-a")
@@ -202,55 +205,49 @@ class TestDedupKey:
 
 
 class TestLockFor:
-    def test_same_key_serialized(self):
-        """同提单号：后到者必须等待持有者释放（check-then-act 原子化的前提）。"""
-        events: list[str] = []
-        a_in = threading.Event()
-        a_done = threading.Event()
-        b_started = threading.Event()
+    """per-键异步锁（alock_for，async 编排链路用）：协程并发模型（生产单事件循环）。"""
 
-        def worker_a():
-            with lock_for("OOLU1"):
+    async def test_same_key_serialized(self):
+        """同提单号：后到协程必须等待持有者释放（check-then-act 原子化的前提）。"""
+        events: list[str] = []
+        a_in = asyncio.Event()
+        a_done = asyncio.Event()
+
+        async def worker_a():
+            async with alock_for("OOLU1"):
                 events.append("A-in")
                 a_in.set()
-                a_done.wait(timeout=5)  # A 持有锁期间等待 B 尝试进入
+                await asyncio.wait_for(a_done.wait(), timeout=5)  # A 持锁等待 B 尝试进入
                 events.append("A-out")
 
-        def worker_b():
-            b_started.set()
-            with lock_for("OOLU1"):
+        async def worker_b():
+            async with alock_for("OOLU1"):
                 events.append("B-in")
                 events.append("B-out")
 
-        ta = threading.Thread(target=worker_a)
-        tb = threading.Thread(target=worker_b)
-        ta.start()
-        assert a_in.wait(timeout=2)
-        tb.start()
-        assert b_started.wait(timeout=2)
-        time.sleep(0.1)  # 若锁失效，B 会趁机进入临界区
+        ta = asyncio.create_task(worker_a())
+        await asyncio.wait_for(a_in.wait(), timeout=2)
+        tb = asyncio.create_task(worker_b())
+        await asyncio.sleep(0.1)  # 若锁失效，B 会趁机进入临界区
         assert events == ["A-in"]  # B 被锁挡在临界区外
         a_done.set()
-        ta.join(timeout=5)
-        tb.join(timeout=5)
-        assert not ta.is_alive() and not tb.is_alive()
+        await asyncio.wait_for(ta, timeout=5)
+        await asyncio.wait_for(tb, timeout=5)
         assert events == ["A-in", "A-out", "B-in", "B-out"]
 
-    def test_different_keys_parallel(self):
+    async def test_different_keys_parallel(self):
         """不同提单号互不阻塞（串行提单导入场景冲突率≈0）。"""
         stamp: dict[str, float] = {}
 
-        def worker(key: str):
-            with lock_for(key):
+        async def worker(key: str):
+            async with alock_for(key):
                 stamp[key] = time.monotonic()
-                time.sleep(0.15)  # 拉长临界区：若串行，后到者进入时间必然延后
+                await asyncio.sleep(0.15)  # 拉长临界区：若串行，后到者进入必然延后
 
-        t1 = threading.Thread(target=worker, args=("A",))
-        t2 = threading.Thread(target=worker, args=("B",))
-        t1.start()
-        time.sleep(0.02)
-        t2.start()
-        t1.join(timeout=5)
-        t2.join(timeout=5)
+        t1 = asyncio.create_task(worker("A"))
+        await asyncio.sleep(0.02)
+        t2 = asyncio.create_task(worker("B"))
+        await asyncio.wait_for(t1, timeout=5)
+        await asyncio.wait_for(t2, timeout=5)
         # B 在 A 的临界区期间进入（并行），而非等待 A 释放后进入（串行）
         assert stamp["B"] - stamp["A"] < 0.1

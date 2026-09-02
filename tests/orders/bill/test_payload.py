@@ -7,11 +7,18 @@ client 侧响应判定（code 字符串 "200"）与 create_order=true 提交。
 
 from __future__ import annotations
 
+import pytest
+
 import app.orders.bill.client as client_module
-from app.orders.bill.client import create_canonical_orders
+import app.orders.http_client as http_client_module
+from app.orders.bill.client import create_canonical_orders_async
 from app.orders.bill.payload import build_order_form, build_order_payload
 from app.orders.bill.schema import BoxGroup, CanonicalOrder, ContainerInfo
 from helpers import FakeResponse
+
+pytestmark = pytest.mark.asyncio
+
+
 
 
 def _sample_order(**overrides) -> CanonicalOrder:
@@ -50,7 +57,7 @@ def _sample_order(**overrides) -> CanonicalOrder:
 class TestBuildOrderForm:
     """build_order_form 字段落点快照（《逆推规范》§4 映射表）。"""
 
-    def test_required_fields_landing(self):
+    async def test_required_fields_landing(self):
         form, warnings = build_order_form(_sample_order())
         # 必填：提单号 → data[0][b_order_num]；箱型 → box[N][b_type/box_num]
         assert form["data[0][b_order_num]"] == "OOLU4044379500"
@@ -62,7 +69,7 @@ class TestBuildOrderForm:
         assert form["o_id"] == ""
         assert not any(k.startswith(("shou[", "pay[", "duo_get[", "cost[")) for k in form)
 
-    def test_field_mapping_snapshot(self):
+    async def test_field_mapping_snapshot(self):
         """标准字段 → TMS 表单字段逐项落点（§4 映射表）。"""
         form, _ = build_order_form(_sample_order())
         # 客户：c_title=客户名称（2026-08-13 实测响应回显确认）；c_name=客户联系人
@@ -87,7 +94,7 @@ class TestBuildOrderForm:
         assert "业务编号：16070002-1" in form["b_note"]  # biz_no 拼入备查
         assert "业务类型：出口" in form["b_note"]
 
-    def test_note_dual_send_b_note_and_c_note(self):
+    async def test_note_dual_send_b_note_and_c_note(self):
         """备注双发（2026-08-31 用户拍板）：c_note 与 b_note 同内容。
 
         背景：TMS 界面「业务备注」落点未实证（b_note/c_note 哪个被界面消费），
@@ -104,7 +111,7 @@ class TestBuildOrderForm:
         )[0]
         assert empty["c_note"] == "" and empty["b_note"] == ""
 
-    def test_multi_container_takes_first_and_warns(self):
+    async def test_multi_container_takes_first_and_warns(self):
         """多箱号：b_num 取首箱 + warning（split_per_container 预留，默认 false）。"""
         form, warnings = build_order_form(_sample_order())
         assert form["b_num"] == "TCLU1234567"
@@ -114,7 +121,7 @@ class TestBuildOrderForm:
         _, warnings2 = build_order_form(single)
         assert not any("一票多箱" in w for w in warnings2)
 
-    def test_junyu_customer_fields(self):
+    async def test_junyu_customer_fields(self):
         """军羽 r73 实证票（《修复prompt》F4）：客户名称「锦煦」曾误入 c_name。
 
         修复后：c_title=客户名称（旧链路实证），c_name 由 customer_contact 供给，
@@ -133,7 +140,7 @@ class TestBuildOrderForm:
         form2, _ = build_order_form(_sample_order(customer_contact="朱经理"))
         assert form2["c_name"] == "朱经理"
 
-    def test_missing_optional_omitted_as_empty(self):
+    async def test_missing_optional_omitted_as_empty(self):
         """选填缺失 → 空串（PHP 控制器直接索引读取的语义，与既有链路一致）。"""
         order = _sample_order(
             customer_no=None,
@@ -159,12 +166,12 @@ class TestBuildOrderForm:
         # month 回退 order_date
         assert form["month"] == "2016-07"
 
-    def test_type_defaults_to_export(self):
+    async def test_type_defaults_to_export(self):
         """type 枚举：仅确认 1=出口；进口等其他值留 TODO 默认 1。"""
         assert build_order_form(_sample_order(biz_type="进口"))[0]["type"] == "1"
         assert build_order_form(_sample_order(biz_type=None, io_type=None))[0]["type"] == "1"
 
-    def test_payload_flat_form_only(self):
+    async def test_payload_flat_form_only(self):
         """TMS 直连表单：扁平字段 + create_order=true；b 双写实测非必需（2026-08-13），不再发送。"""
         payload, _ = build_order_payload(_sample_order())
         assert "a" not in payload and "b" not in payload and "c" not in payload
@@ -175,20 +182,20 @@ class TestBuildOrderForm:
 class TestSubmitCanonical:
     """client 侧：响应 code 字符串 "200" 判定 + form 字段与 create_order=true 提交。"""
 
-    def test_success_parses_sn_and_o_id(self, monkeypatch):
+    async def test_success_parses_sn_and_o_id(self, monkeypatch):
         captured: dict = {}
 
-        def fake_post(url, data=None, headers=None, **_kwargs):
+        async def fake_post(url, *, payload=None, headers=None, name=None, payload_kind=None, **_kwargs):
             captured["url"] = url
-            captured["data"] = data
+            captured["data"] = payload
             captured["headers"] = headers
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080355", "o_id": "21034692"}]}
             )
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         order = _sample_order()
-        result = client_module.submit_canonical("sk-token", order)
+        result = await client_module.submit_canonical_async("sk-token", order)
         assert result == {
             "success": True,
             "sn": "EX26080355",
@@ -201,29 +208,29 @@ class TestSubmitCanonical:
         assert captured["data"]["data[0][b_order_num]"] == "OOLU4044379500"
         assert captured["headers"] == {"sk": "sk-token"}
 
-    def test_code_as_int_200_also_success(self, monkeypatch):
+    async def test_code_as_int_200_also_success(self, monkeypatch):
         """响应 code 兼容数字 200（PHP 接口历史形态）。"""
 
-        def fake_post(*_a, **_k):
+        async def fake_post(*_a, **_k):
             return FakeResponse({"code": 200, "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = client_module.submit_canonical("sk", _sample_order())
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await client_module.submit_canonical_async("sk", _sample_order())
         assert result["success"] is True and result["sn"] == "EX1"
 
-    def test_rejected_code_not_200(self, monkeypatch):
+    async def test_rejected_code_not_200(self, monkeypatch):
         """code 非 "200" → 该单 error（不抛异常，调用方按单处理）。"""
 
-        def fake_post(*_a, **_k):
+        async def fake_post(*_a, **_k):
             return FakeResponse({"code": "500", "msg": "箱型不存在"})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
-        result = client_module.submit_canonical("sk", _sample_order())
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await client_module.submit_canonical_async("sk", _sample_order())
         assert result["success"] is False
         assert result["error"]["code"] == "order_upstream_error"
         assert result["error"]["details"]["upstream_message"] == "箱型不存在"
 
-    def test_create_canonical_orders_sk_passthrough(self, monkeypatch):
+    async def test_create_canonical_orders_sk_passthrough(self, monkeypatch):
         """sk 由调用方透传 + 逐单提交；单失败隔离不中断（2026-08-19 起无凭证链路）。"""
         responses = iter(
             [
@@ -235,14 +242,14 @@ class TestSubmitCanonical:
         posts: list[str] = []
         sk_seen: list[str | None] = []
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             posts.append(url)
             sk_seen.append((_kwargs.get("headers") or {}).get("sk"))
             return next(responses)
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         orders = [_sample_order(), _sample_order(bl_no="B2"), _sample_order(bl_no="B3")]
-        create_canonical_orders(orders, "tk-caller")
+        await create_canonical_orders_async(orders, "tk-caller")
         assert sum(1 for u in posts if "CreateOrder" in u or "AddWork" in u) == 3
         assert sk_seen and all(s == "tk-caller" for s in sk_seen)  # sk 原样透传
         assert orders[0].create_result["success"] and orders[0].create_result["sn"] == "EX1"

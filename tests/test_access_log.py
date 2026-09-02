@@ -378,7 +378,7 @@ def test_bill_import_409_summarized_for_log(monkeypatch):
         "failed_details": [],
     }
 
-    def fake_build_result(**kwargs):
+    async def fake_build_result(**kwargs):
         return BillParseResult(
             file=kwargs["filename"],
             total_rows=1,

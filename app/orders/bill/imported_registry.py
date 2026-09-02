@@ -19,8 +19,9 @@
   不登记，保证修正后重导失败单不被误拦）；
 - 键规范化 normalize()：strip 首尾空白 + upper 统一大小写（假设下游 TMS 不区分
   提单号大小写；若下游敏感，改为仅 strip）；
-- 并发：组合键锁 lock_for 供编排层包住「查重→提交→登记」临界区——
-  同键跨请求串行化（check-then-act 原子化），不同键互不阻塞；
+- 并发：组合键锁 alock_for（asyncio.Lock）供 async 编排层包住
+  「查重→提交→登记」临界区——同键跨请求串行化（check-then-act 原子化），
+  不同键互不阻塞（临界区内 await 下游不阻塞事件循环）；
 - 局限：单进程部署有效（同 master_data 计数存储）；文件只增不减，清理方式为
   删除文件全量重置（运维操作）；sk 为会话 token，同账号重新登录后 sk 变化
   → 去重按会话维度生效（换号/重登可重导，属本方案既定语义）；下游「已创建
@@ -33,8 +34,8 @@ import asyncio
 import hashlib
 import json
 import threading
-from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -219,26 +220,8 @@ class ImportedOrderRegistry:
             self._save()
 
 
-# ---- 组合键并发锁：编排层包住「查重→提交→登记」临界区 ----
-
-_LOCKS: dict[str, threading.Lock] = {}
-_LOCKS_GUARD = threading.Lock()
-
-
-@contextmanager
-def lock_for(
-    bl_no: str, container_no: str | None = None, fallback: str | None = None
-) -> Iterator[None]:
-    """按去重组合键取互斥锁（上下文管理器）：同键串行化，异键互不阻塞。"""
-    key = dedup_key(bl_no, container_no, fallback)
-    with _LOCKS_GUARD:
-        lock = _LOCKS.setdefault(key or "", threading.Lock())
-    with lock:
-        yield
-
-
-# ---- 异步组合键锁（async 编排层用，2026-09 异步化改造）----
-# 临界区内含下游网络调用（查重→提交→登记），async 版必须用 asyncio.Lock：
+# ---- 组合键异步锁（async 编排层用，2026-09 异步化改造）----
+# 临界区内含下游网络调用（查重→提交→登记），必须用 asyncio.Lock：
 # await 让出事件循环时不阻塞异键协程；同键仍串行（原子性不变）。
 # 字典 setdefault 在单线程事件循环内无竞态。
 _ASYNC_LOCKS: dict[str, asyncio.Lock] = {}
@@ -248,7 +231,7 @@ _ASYNC_LOCKS: dict[str, asyncio.Lock] = {}
 async def alock_for(
     bl_no: str, container_no: str | None = None, fallback: str | None = None
 ) -> AsyncIterator[None]:
-    """lock_for 的异步版：同键串行化（lookup→submit→register 原子），异键并行。"""
+    """按去重组合键取互斥锁（async with）：同键串行化，异键互不阻塞。"""
     key = dedup_key(bl_no, container_no, fallback)
     lock = _ASYNC_LOCKS.setdefault(key or "", asyncio.Lock())
     async with lock:

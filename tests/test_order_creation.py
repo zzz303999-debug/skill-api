@@ -5,9 +5,10 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
+import app.orders.http_client as http_client_module
 from app.config import settings
 from app.main import app
-from app.orders.client import publish_create_order
+from app.orders.client import publish_create_order_async
 from app.orders.extractor import (
     _split_loading_value,
     _split_vessel_voyage,
@@ -15,6 +16,8 @@ from app.orders.extractor import (
 )
 from app.orders.mapper import OrderNotReadyError, build_order_data
 from app.orders.schema import OrderTextExtraction
+
+pytestmark = pytest.mark.asyncio
 
 client = TestClient(app)
 
@@ -35,7 +38,7 @@ def _configure(monkeypatch) -> None:
     monkeypatch.setattr(settings, "order_api_url", "https://orders.example/create")
 
 
-def test_sample_text_is_parsed_verbatim():
+async def test_sample_text_is_parsed_verbatim():
     extracted, meta = extract_order_text(SAMPLE_TEXT)
     order_data = build_order_data(extracted)
 
@@ -73,13 +76,13 @@ def test_sample_text_is_parsed_verbatim():
         ("MSC CRAPOLLA", "MSC CRAPOLLA", None),
     ],
 )
-def test_split_vessel_voyage(value, expected_name, expected_num):
+async def test_split_vessel_voyage(value, expected_name, expected_num):
     name, num = _split_vessel_voyage(value)
     assert name == expected_name
     assert num == expected_num
 
 
-def test_extract_vessel_voyage_plain_space_separated():
+async def test_extract_vessel_voyage_plain_space_separated():
     """生产案例：船名航次合写无 VOY 前缀/斜杠（MSC CRAPOLLA QB633W）→ 拆出航次。"""
     text = (
         "门点地址：江苏省昆山市巴城镇石牌东泰丰路68号；"
@@ -131,16 +134,16 @@ def test_extract_vessel_voyage_plain_space_separated():
         ("  ", None, None),
     ],
 )
-def test_split_loading_value(value, expected_b_date, expected_time_start):
+async def test_split_loading_value(value, expected_b_date, expected_time_start):
     assert _split_loading_value(value) == (expected_b_date, expected_time_start)
 
 
-def test_split_loading_value_invalid_date_returns_none():
+async def test_split_loading_value_invalid_date_returns_none():
     """非法日历日期（如 13月40日）不产出脏数据。"""
     assert _split_loading_value("13月40日") == (None, None)
 
 
-def test_source_fields_preserve_unsupported_label_and_value():
+async def test_source_fields_preserve_unsupported_label_and_value():
     from app.orders.extractor import parse_source_fields
 
     fields = parse_source_fields("自定义字段：AbC-001 原样；提单号：KMTCSHAP950393")
@@ -151,7 +154,7 @@ def test_source_fields_preserve_unsupported_label_and_value():
     }
 
 
-def test_build_order_data_requires_bill_and_shipper():
+async def test_build_order_data_requires_bill_and_shipper():
     with pytest.raises(OrderNotReadyError) as caught:
         build_order_data(OrderTextExtraction())
 
@@ -182,12 +185,12 @@ def test_build_order_data_requires_bill_and_shipper():
         ("20GP2", []),
     ],
 )
-def test_parse_box_quantity_defaults_to_one(box_value, expected):
+async def test_parse_box_quantity_defaults_to_one(box_value, expected):
     extracted, _meta = extract_order_text(f"提单号：KMTCSHAP950393；箱型箱量：{box_value}")
     assert [item.model_dump() for item in extracted.box] == expected
 
 
-def test_create_from_text_extracts_then_publishes(monkeypatch):
+async def test_create_from_text_extracts_then_publishes(monkeypatch):
     import app.main as main_module
 
     _configure(monkeypatch)
@@ -221,7 +224,7 @@ def test_create_from_text_extracts_then_publishes(monkeypatch):
     assert response.json()["upstream"]["data"][0]["sn"] == "EX26040001"
 
 
-def test_create_from_text_requires_content_and_room_id(monkeypatch):
+async def test_create_from_text_requires_content_and_room_id(monkeypatch):
     _configure(monkeypatch)
 
     response = client.post(
@@ -237,8 +240,7 @@ def test_create_from_text_requires_content_and_room_id(monkeypatch):
     assert ("body", "text") in locations
 
 
-def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
-    import app.orders.client as client_module
+async def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
 
     _configure(monkeypatch)
     monkeypatch.setattr(settings, "order_api_url", "https://orders.example/create")
@@ -256,15 +258,15 @@ def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
                 "data": [{"sn": "EX26040001", "sns": "EX26040001-1"}],
             }
 
-    def fake_post(url, *, json, timeout):
-        captured.update(url=url, json=json, timeout=timeout)
+    async def fake_post(url, *, payload=None, name=None, timeout=None, headers=None, payload_kind=None):
+        captured.update(url=url, json=payload, timeout=timeout)
         return FakeResponse()
 
-    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
     extracted, _meta = extract_order_text(SAMPLE_TEXT)
     order_data = build_order_data(extracted)
 
-    result = publish_create_order(order_data, room_id="ewewdsdw121", user_id="10")
+    result = await publish_create_order_async(order_data, room_id="ewewdsdw121", user_id="10")
 
     assert captured == {
         "url": "https://orders.example/create",
@@ -278,8 +280,7 @@ def test_publish_create_order_sends_exact_documented_wrapper(monkeypatch):
     assert result["code"] == "200"
 
 
-def test_publish_accepts_numeric_code_and_object_data(monkeypatch):
-    import app.orders.client as client_module
+async def test_publish_accepts_numeric_code_and_object_data(monkeypatch):
 
     _configure(monkeypatch)
 
@@ -291,15 +292,17 @@ def test_publish_accepts_numeric_code_and_object_data(monkeypatch):
         def json():
             return {"code": 200, "msg": "添加成功", "data": {"sn": "EX26040001"}}
 
-    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    async def _fake_post(*_args, **_kwargs):
+        return FakeResponse()
 
-    result = publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
+    monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
+
+    result = await publish_create_order_async({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert result == {"code": 200, "msg": "添加成功", "data": {"sn": "EX26040001"}}
 
 
-def test_publish_reports_non_json_response_details(monkeypatch):
-    import app.orders.client as client_module
+async def test_publish_reports_non_json_response_details(monkeypatch):
     from app.orders.client import OrderUpstreamError
 
     _configure(monkeypatch)
@@ -314,10 +317,13 @@ def test_publish_reports_non_json_response_details(monkeypatch):
         def json():
             raise ValueError("not JSON")
 
-    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    async def _fake_post(*_args, **_kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
+        await publish_create_order_async({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.details == {
         "status_code": 200,
@@ -326,9 +332,8 @@ def test_publish_reports_non_json_response_details(monkeypatch):
     }
 
 
-def test_publish_passes_through_full_upstream_error(monkeypatch):
+async def test_publish_passes_through_full_upstream_error(monkeypatch):
     """下游拒绝时完整透传错误（code/msg/原始响应体），message 含下游提示。"""
-    import app.orders.client as client_module
     from app.orders.client import OrderUpstreamError
 
     _configure(monkeypatch)
@@ -343,10 +348,13 @@ def test_publish_passes_through_full_upstream_error(monkeypatch):
         def json():
             return {"code": "204", "msg": "no: userId", "data": [{"sn": "EX26040001"}]}
 
-    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    async def _fake_post(*_args, **_kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
+        await publish_create_order_async({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.http_status == 502
     assert caught.value.code == "order_upstream_error"
@@ -363,9 +371,8 @@ def test_publish_passes_through_full_upstream_error(monkeypatch):
     }
 
 
-def test_publish_reports_http_error_with_body(monkeypatch):
+async def test_publish_reports_http_error_with_body(monkeypatch):
     """下游 HTTP 非 2xx 时带响应体预览。"""
-    import app.orders.client as client_module
     from app.orders.client import OrderUpstreamError
 
     _configure(monkeypatch)
@@ -380,10 +387,13 @@ def test_publish_reports_http_error_with_body(monkeypatch):
         def json():
             raise ValueError("not JSON")
 
-    monkeypatch.setattr(client_module.httpx, "post", lambda *_args, **_kwargs: FakeResponse())
+    async def _fake_post(*_args, **_kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
 
     with pytest.raises(OrderUpstreamError) as caught:
-        publish_create_order({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
+        await publish_create_order_async({"order_num1": "TEST-1"}, room_id="room-1", user_id="10")
 
     assert caught.value.details == {
         "status_code": 500,

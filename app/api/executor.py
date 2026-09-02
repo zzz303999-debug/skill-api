@@ -46,7 +46,7 @@ async def _publish_order(
     room_id: str,
     user_id: str,
 ) -> dict[str, Any]:
-    """下单直连异步下游（Phase 3 起不再占用线程；错误分类与同步版一致）。"""
+    """下单直连异步下游（Phase 3 起不再占用线程；错误分类）。"""
     return await publish_create_order_async(order_data, room_id=room_id, user_id=user_id)
 
 
