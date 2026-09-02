@@ -14,26 +14,6 @@ def _items(payload: dict) -> list[dict]:
     return payload["items"]
 
 
-def test_logs_page_returns_html():
-    resp = TestClient(app).get("/logs")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
-    assert "请求日志" in resp.text
-
-
-def test_bill_import_page_returns_html():
-    resp = TestClient(app).get("/bill-import")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
-    assert "竞品账单导入" in resp.text
-
-
-def test_bill_import_help_page_returns_html():
-    resp = TestClient(app).get("/bill-import-help")
-    assert resp.status_code == 200
-    assert "text/html" in resp.headers["content-type"]
-    assert "用户操作手册" in resp.text
-
 
 def test_request_recorded_with_fields():
     client = TestClient(app)
@@ -85,7 +65,7 @@ def test_non_json_response_not_captured():
 
 def test_log_endpoints_not_recorded():
     client = TestClient(app)
-    client.get("/logs")
+    client.get("/api/logs")
     client.get("/api/logs")
     client.get("/healthz")
     payload = client.get("/api/logs").json()

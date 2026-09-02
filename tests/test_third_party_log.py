@@ -16,7 +16,6 @@ def _record(
 ) -> None:
     third_party_log.record(message, level, endpoint=endpoint, url=url, **extra)
 
-
 def test_record_and_query_newest_first():
     _record(status_code=200, duration_ms=5)
     _record("third_party_request", endpoint="addBill", url="https://x/addBill")
@@ -28,7 +27,6 @@ def test_record_and_query_newest_first():
     assert result["items"][0]["message"] == "third_party_request"
     assert result["items"][0]["level"] == "INFO"
     assert "ts" in result["items"][0]
-
 
 def test_query_filters():
     _record(status_code=200, duration_ms=3)
@@ -43,7 +41,6 @@ def test_query_filters():
     assert third_party_log.query(status_max=200)["total"] == 1
     assert third_party_log.query(level="warning")["total"] == 1
 
-
 def test_query_pagination():
     for i in range(5):
         _record(status_code=200, duration_ms=i)
@@ -51,7 +48,6 @@ def test_query_pagination():
     page2 = third_party_log.query(limit=2, offset=2)
     assert page1["total"] == 5 and len(page1["items"]) == 2
     assert page2["items"][0]["duration_ms"] == 2  # 倒序：offset=2 起
-
 
 def test_record_writes_daily_file():
     _record(status_code=200, duration_ms=1)
@@ -62,7 +58,6 @@ def test_record_writes_daily_file():
     assert entry["endpoint"] == "AddWork"
     assert entry["message"] == "third_party_response"
     assert entry["status_code"] == 200
-
 
 def test_reload_backfills_from_file(monkeypatch):
     """服务重启后：内存清空 + _loaded=False → query 从按天文件尾部回填。"""
@@ -79,7 +74,6 @@ def test_reload_backfills_from_file(monkeypatch):
     result = third_party_log.query()
     assert result["total"] == 1
     assert result["items"][0]["duration_ms"] == 7
-
 
 def test_cleanup_expired_removes_old_daily_files():
     """超过 storage_keep_hours（向上取整天）的按天文件被清理。"""
@@ -100,7 +94,6 @@ def test_cleanup_expired_removes_old_daily_files():
     third_party_log._cleanup_expired()
     assert not old.exists()
     assert fresh.exists()
-
 
 def test_record_failure_does_not_raise(monkeypatch):
     """落盘失败只记 warning 不冒泡（日志不阻断业务）。"""
@@ -127,23 +120,3 @@ def test_record_failure_does_not_raise(monkeypatch):
     monkeypatch.setattr(third_party_log, "_log_dir", lambda: BoomDir())
     _record(status_code=200)  # 不应抛异常
 
-
-def test_routes(monkeypatch):
-    from fastapi.testclient import TestClient
-
-    from app.main import app
-
-    monkeypatch.setattr(
-        "app.config.settings.api_key", "", raising=False
-    )  # conftest 已关闭鉴权，此处防回归
-    _record(status_code=200, duration_ms=9)
-    with TestClient(app) as client:
-        resp = client.get("/api/third-party-logs?endpoint=AddWork")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["total"] >= 1
-        assert data["items"][0]["endpoint"] == "AddWork"
-
-        page = client.get("/third-party-logs")
-        assert page.status_code == 200
-        assert "第三方接口调用日志" in page.text

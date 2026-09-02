@@ -604,8 +604,6 @@ def test_auth_middleware_enforces_api_key(monkeypatch):
         # 未携带凭证 → 401
         resp = client.get("/healthz")  # 豁免路径
         assert resp.status_code == 200
-        resp = client.get("/logs")  # 页面本身豁免（无数据），数据接口才需鉴权
-        assert resp.status_code == 200
         resp = client.get("/api/logs")
         assert resp.status_code == 401
         assert resp.json()["error"]["code"] == "unauthorized"

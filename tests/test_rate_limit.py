@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from app import rate_limit
+from app.api.middleware import rate_limit
 from app.main import _LIMITERS, app
 
 client = TestClient(app)
@@ -71,7 +71,7 @@ def test_classify_path_light():
 
 
 def test_classify_path_free():
-    for path in ("/healthz", "/skills", "/logs", "/docs", "/openapi.json", "/favicon.ico"):
+    for path in ("/healthz", "/skills", "/docs", "/openapi.json", "/favicon.ico"):
         assert rate_limit.classify_path(path) is None
 
 
@@ -157,7 +157,6 @@ def test_rate_limit_free_paths_not_limited(monkeypatch):
     for _ in range(5):
         assert client.get("/healthz").status_code == 200
         assert client.get("/skills").status_code == 200
-        assert client.get("/logs").status_code == 200
 
 
 def test_rate_limit_whitelist_exempts_ip(monkeypatch):

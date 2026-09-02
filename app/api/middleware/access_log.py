@@ -20,15 +20,11 @@ from app.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-# 不记录日志接口自身与静态页面，避免自动轮询刷屏日志
+# 不记录日志接口自身，避免自动轮询刷屏日志（静态页面已随 2026-09 结构整理移除）
 _SKIP_ACCESS_LOG_PATHS = {
-    "/logs",
     "/api/logs",
-    "/third-party-logs",
     "/api/third-party-logs",
     "/favicon.ico",
-    "/bill-import",
-    "/bill-import-help",
 }
 
 

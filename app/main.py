@@ -57,8 +57,8 @@ __all__ = [
 # ---- 测试接缝：鉴权豁免路径（auth 中间件调用时经 app.main 解析）----
 # 鉴权豁免路径：健康检查、OpenAPI 文档与日志/账单上传页面本身（页面无数据）；
 # /api/logs 日志数据接口含 PII，不在豁免内，必须鉴权才能查看。
-# /orders/bill/import 为内网免 key 使用场景豁免（与页面配套，见 /bill-import），
-# 仅限可信内网部署；对外开放部署时应移出豁免并恢复页面 Key 输入。
+# /orders/bill/import 为内网免 key 使用场景豁免（与上传页面配套使用场景），
+# 仅限可信内网部署；对外开放部署时应移出豁免。
 _AUTH_FREE_PATHS = frozenset(
     {
         "/healthz",
@@ -67,10 +67,6 @@ _AUTH_FREE_PATHS = frozenset(
         "/redoc",
         "/openapi.json",
         "/favicon.ico",
-        "/logs",
-        "/third-party-logs",
-        "/bill-import",
-        "/bill-import-help",
         "/orders/bill/import",
     }
 )

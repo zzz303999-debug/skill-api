@@ -1,20 +1,14 @@
-"""元信息路由：skill 列表、请求访问日志与第三方接口日志的查询数据接口及页面。"""
+"""元信息路由：skill 列表、请求访问日志与第三方接口日志的查询数据接口。"""
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Query
-from fastapi.responses import FileResponse
 
 from app import access_log, third_party_log
 from app.core import registry
 from app.core.skill_base import SkillMeta
 
 router = APIRouter()
-
-# app/static 静态页目录（原 main.py 以 parent/static 定位，拆分后按包层级回溯）
-_STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 
 @router.get("/skills", response_model=list[SkillMeta], tags=["meta"])
@@ -50,11 +44,6 @@ def list_request_logs(
     )
 
 
-@router.get("/logs", include_in_schema=False)
-def request_logs_page() -> FileResponse:
-    """内置的请求日志查看页面。"""
-    return FileResponse(_STATIC_DIR / "logs.html")
-
 
 @router.get("/api/third-party-logs", tags=["meta"])
 def list_third_party_logs(
@@ -83,8 +72,3 @@ def list_third_party_logs(
         level=level,
     )
 
-
-@router.get("/third-party-logs", include_in_schema=False)
-def third_party_logs_page() -> FileResponse:
-    """内置的第三方接口调用日志查看页面（页面无数据，鉴权豁免；数据接口需 Key）。"""
-    return FileResponse(_STATIC_DIR / "third_party_logs.html")
