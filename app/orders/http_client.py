@@ -13,12 +13,19 @@ addBill），调用方无需自行记录请求与响应——每条调用产出�
 - headers 值不落日志（sk 等凭据不泄露），仅透传给下游；
 - 调用参数与 httpx.post 语义一致（url/data|json/headers/timeout），
   测试 monkeypatch httpx.post 的既有用例不受影响。
+
+异步版本（post_json_async / post_form_async，2026-09 异步化改造新增）：
+与同步版语义逐项对齐（同三条日志、同截断、同异常上抛），复用本模块
+纯函数（_preview/_unpack_json_strings 等）；共享懒加载 AsyncClient
+单例（连接池复用，per-request timeout）。同步版本保留至异步链路全部
+切换后统一清理（双轨过渡）。
 """
 
 from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from typing import Any
 
@@ -190,6 +197,119 @@ def post_form(
 ) -> httpx.Response:
     """POST 表单（httpx data= 语义，x-www-form-urlencoded）。"""
     return _post(
+        name=name,
+        url=url,
+        timeout=timeout,
+        payload_kind="form",
+        payload=data,
+        headers=headers,
+    )
+
+
+# ---- 异步版本（与同步版语义逐项对齐；Phase 2 异步化改造新增）----
+
+# 共享懒加载 AsyncClient：连接池复用（下游同一批 TMS 端点）；timeout=None
+# 仅作默认值，实际超时由每次请求显式传入（与同步 httpx.post(timeout=) 语义一致）。
+# 不用 lifespan 管理：现有大量测试 TestClient(app) 不带 context manager，
+# lifespan 不触发会拿到 None；懒加载与 llm.get_client() 模式一致。
+_async_client: httpx.AsyncClient | None = None
+# 懒加载互斥锁：并发请求首次调用时的双重检查（事件循环单线程下防御
+# 多事件循环/测试并发场景，与 llm.client._state_lock 同风格）
+_async_client_lock = threading.Lock()
+
+
+def get_async_client() -> httpx.AsyncClient:
+    """共享 AsyncClient 懒加载单例（连接池复用；测试可直接 monkeypatch 替换）。"""
+    global _async_client
+    if _async_client is None:
+        with _async_client_lock:
+            if _async_client is None:
+                _async_client = httpx.AsyncClient(timeout=None)
+    return _async_client
+
+
+async def _post_async(
+    *,
+    name: str,
+    url: str,
+    timeout: float,
+    payload_kind: str,
+    payload: Any,
+    headers: dict[str, str] | None,
+) -> httpx.Response:
+    """异步 POST 并记录请求/响应/异常日志；日志字段与异常上抛语义与同步 _post 一致。"""
+    started = time.monotonic()
+    request_extra = {
+        "endpoint": name,
+        "method": "POST",
+        "url": url,
+        "payload_kind": payload_kind,
+        "body_preview": _preview(payload),
+    }
+    log.info("third_party_request", extra=request_extra)
+    record_third_party("third_party_request", "INFO", **request_extra)
+    kwargs: dict[str, Any] = {"timeout": timeout}
+    if headers:
+        kwargs["headers"] = headers
+    if payload_kind == "json":
+        kwargs["json"] = payload
+    else:
+        kwargs["data"] = payload
+    try:
+        response = await get_async_client().post(url, **kwargs)
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        error_extra = {
+            "endpoint": name,
+            "method": "POST",
+            "url": url,
+            "error_type": exc.__class__.__name__,
+            "duration_ms": round((time.monotonic() - started) * 1000),
+        }
+        log.warning("third_party_request_error", extra=error_extra)
+        record_third_party("third_party_request_error", "WARNING", **error_extra)
+        raise
+    response_extra = {
+        "endpoint": name,
+        "method": "POST",
+        "url": url,
+        "status_code": response.status_code,
+        "duration_ms": round((time.monotonic() - started) * 1000),
+        "body_preview": _preview(getattr(response, "text", "")),
+    }
+    log.info("third_party_response", extra=response_extra)
+    record_third_party("third_party_response", "INFO", **response_extra)
+    return response
+
+
+async def post_json_async(
+    url: str,
+    payload: Any,
+    *,
+    name: str,
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST JSON body（异步版；语义同 post_json）。"""
+    return await _post_async(
+        name=name,
+        url=url,
+        timeout=timeout,
+        payload_kind="json",
+        payload=payload,
+        headers=headers,
+    )
+
+
+async def post_form_async(
+    url: str,
+    data: dict[str, Any],
+    *,
+    name: str,
+    timeout: float,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
+    """POST 表单（异步版；语义同 post_form）。"""
+    return await _post_async(
         name=name,
         url=url,
         timeout=timeout,

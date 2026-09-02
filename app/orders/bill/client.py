@@ -27,7 +27,7 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
-from ..http_client import post_form, unpack_json
+from ..http_client import post_form, post_form_async, unpack_json
 from .imported_registry import get_imported_registry, lock_for, normalize, owner_key
 from .schema import BillOrder
 
@@ -519,3 +519,61 @@ def create_canonical_orders(orders, sk: str, source_sha256: str | None = None) -
                     container_no=box,
                     fallback=order.row_seq,
                 )
+
+
+# ---- 异步版本（网络段走 post_form_async；解析/登记复用同步纯函数，Phase 2 新增）----
+
+
+async def add_work_async(sk: str, order_data: dict[str, Any]) -> dict[str, Any]:
+    """add_work 的异步版：网络段走 post_form_async，表单构造/响应判定/错误结构
+    与同步版完全一致（复用 _parse_create_response）。"""
+    form = build_add_work_form(order_data)
+    try:
+        response = await post_form_async(
+            settings.jxt_addwork_url,
+            form,
+            name="AddWork",
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_add_work_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return _error_result(
+            f"AddWork network error: {exc.__class__.__name__}",
+            details={"error_type": exc.__class__.__name__},
+        )
+    return _parse_create_response(response, step="AddWork")
+
+
+async def submit_canonical_async(sk: str, order) -> dict[str, Any]:
+    """submit_canonical 的异步版：payload 构造/日志/响应判定与同步版完全一致
+    （复用 build_order_payload 与 _parse_canonical_response）。"""
+    from .payload import build_order_payload
+
+    form, warnings = build_order_payload(order)
+    if warnings:
+        log.warning(
+            "canonical_payload_warning",
+            extra={"bl_no": order.bl_no, "warnings": warnings},
+        )
+    try:
+        response = await post_form_async(
+            settings.jxt_addwork_url,
+            form,
+            name="AddWork-canonical",
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_canonical_order_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return _error_result(
+            f"order API network error: {exc.__class__.__name__}",
+            details={"error_type": exc.__class__.__name__},
+        )
+    return _parse_canonical_response(response)

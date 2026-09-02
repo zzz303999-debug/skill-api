@@ -260,3 +260,116 @@ def run_fee_bootstrap(orders, *, create_order: bool, sk: str = "") -> dict[str, 
         "failed": failed,
         "exists_external": exists_external,
     }
+
+
+async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:
+    """run_fee_bootstrap 的异步版：建档段走 create_archives_async，其余逻辑逐行一致。
+
+    **preview 零副作用**、registry 登记与降级语义与同步版完全相同；
+    建档异常不使订单丢失（防御分支同步保留）。
+    """
+    config = load_bootstrap_config()
+    if not config.get("enabled"):
+        return None
+    # 防御（2026-08-26）：跳过已标记的单（去重 skipped / 箱型拒绝），
+    # 被拒单不参与费目自举（避免被拒文件仍触发 AddCarPrice 建档）
+    orders = [o for o in orders if getattr(o, "create_result", None) is None]
+    missing = _collect_missing(orders)
+    if not missing:
+        return None
+    if not create_order:
+        # preview：只报告计划创建清单，零副作用（不发请求、不查端点、不写 registry）
+        return {
+            "enabled": True,
+            "mode": "preview",
+            "planned": [
+                {"code": code, "tms_name": tms_name} for code, tms_name in missing
+            ],
+            "created": [],
+            "failed": [],
+            "exists_external": [],
+        }
+    url = bootstrap_endpoint()
+    if url is None:
+        log.warning(
+            "fee_bootstrap_endpoint_missing",
+            extra={"endpoint_key": config.get("endpoint_key")},
+        )
+        return None
+
+    from .master_data import KIND_PRICE
+    from .master_data_client import create_archives_async
+
+    forms = {
+        KIND_PRICE: {
+            code: build_price_form(code, tms_name) for code, tms_name in missing
+        }
+    }
+    try:
+        results = await create_archives_async(forms, sk)
+    except Exception as exc:  # 防御：建档层意外异常也不使订单丢失（降级语义）
+        log.warning(
+            "fee_bootstrap_create_unexpected",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return {
+            "enabled": True,
+            "mode": "create",
+            "planned": [],
+            "created": [],
+            "failed": [
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "reason": f"unexpected error: {exc.__class__.__name__}",
+                }
+                for code, tms_name in missing
+            ],
+            "exists_external": [],
+        }
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    exists_external: list[dict[str, Any]] = []
+    for code, tms_name in missing:
+        outcome = (results.get(KIND_PRICE) or {}).get(code) or {}
+        if outcome.get("success"):
+            price_id = int(outcome["archive_id"])
+            get_registry().register(code, price_id, tms_name)
+            log.info(
+                "fee_bootstrap_created",
+                extra={"code": code, "price_id": price_id},
+            )
+            created.append(
+                {"code": code, "tms_name": tms_name, "price_id": price_id}
+            )
+        elif outcome.get("duplicate"):
+            # T27b：费目在 TMS 价格表已存在（204 已存在拒单）→ 登记 exists_external
+            # 不再重试自举；price_id 无（无查询接口），费用继续降级不录入仅对账
+            get_registry().mark_exists_external(code, tms_name)
+            log.info(
+                "fee_bootstrap_exists_external",
+                extra={"code": code, "message": (outcome.get("error") or {}).get("message")},
+            )
+            exists_external.append(
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "message": (outcome.get("error") or {}).get("message") or "已存在",
+                }
+            )
+        else:
+            failed.append(
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "reason": _failure_reason(outcome) or "未知错误",
+                }
+            )
+    return {
+        "enabled": True,
+        "mode": "create",
+        "planned": [],
+        "created": created,
+        "failed": failed,
+        "exists_external": exists_external,
+    }

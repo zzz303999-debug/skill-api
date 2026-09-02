@@ -22,7 +22,7 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
-from ..http_client import post_form, unpack_json
+from ..http_client import post_form, post_form_async, unpack_json
 from .master_data import (
     KIND_BAILOR,
     KIND_CLIENT,
@@ -294,6 +294,51 @@ def create_archives(
                 continue
             try:
                 response = post_form(
+                    url,
+                    form,
+                    name=f"archive-{kind}",
+                    headers={"sk": sk},
+                    timeout=settings.jxt_timeout_seconds,
+                )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                log.warning(
+                    "master_data_create_network_error",
+                    extra={"kind": kind, "error_type": exc.__class__.__name__},
+                )
+                per_key[key] = _failure_result(
+                    f"{kind_label(kind)} create API network error: {exc.__class__.__name__}",
+                    details={"error_type": exc.__class__.__name__},
+                )
+                continue
+            per_key[key] = _parse_archive_response(response, kind)
+        results[kind] = per_key
+    return results
+
+
+async def create_archives_async(
+    forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """create_archives 的异步版：网络段走 post_form_async，其余逻辑逐行一致。
+
+    档案间存在依赖（客户 → 工厂/司机），保持逐条串行与同步版一致；
+    单条失败不影响后续；任何情况不自动重试（防重复建档）。
+    """
+    if not forms_by_kind:
+        return {}
+
+    results: dict[str, dict[str, dict[str, Any]]] = {}
+    for kind, forms in forms_by_kind.items():
+        url = endpoint_for(kind)
+        per_key: dict[str, dict[str, Any]] = {}
+        for key, form in forms.items():
+            if url is None:
+                per_key[key] = _failure_result(
+                    "endpoint TODO (config/master_data.{env}.yaml endpoints)",
+                    details={"kind": kind},
+                )
+                continue
+            try:
+                response = await post_form_async(
                     url,
                     form,
                     name=f"archive-{kind}",

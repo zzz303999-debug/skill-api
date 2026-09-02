@@ -17,7 +17,7 @@ import httpx
 from app.config import settings
 from app.logging_conf import get_logger
 
-from ..http_client import post_json
+from ..http_client import post_json, post_json_async
 
 log = get_logger(__name__)
 
@@ -97,6 +97,35 @@ def submit_manifest(payload: dict, sk: str) -> dict:
     """
     try:
         response = post_json(
+            settings.jxt_manifest_addbill_url,
+            payload,
+            name="addBill",
+            headers={"sk": sk},
+            timeout=settings.jxt_timeout_seconds,
+        )
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        log.warning(
+            "jxt_manifest_network_error",
+            extra={"error_type": exc.__class__.__name__},
+        )
+        return {
+            "success": False,
+            "sn": None,
+            "error": {
+                "code": "order_upstream_error",
+                "message": f"addBill network error: {exc.__class__.__name__}",
+                "description": _ERROR_DESCRIPTION,
+                "details": {"error_type": exc.__class__.__name__},
+            },
+        }
+    return _parse_response(response)
+
+
+async def submit_manifest_async(payload: dict, sk: str) -> dict:
+    """submit_manifest 的异步版：网络段走 post_json_async，响应判定/错误结构
+    与同步版完全一致（复用 _parse_response）。网络异常按单记 error（不抛）。"""
+    try:
+        response = await post_json_async(
             settings.jxt_manifest_addbill_url,
             payload,
             name="addBill",
