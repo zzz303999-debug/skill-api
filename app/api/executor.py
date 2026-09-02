@@ -1,19 +1,13 @@
-"""执行器：Skill.run 同步契约的有界线程池执行 + 路由异步包装（Phase 3 起）。
+"""执行器：skill 异步契约的并发控制与路由异步包装。
 
-Phase 3 路由异步化后职责收缩：
-- _run_skill / _run_in_executor：skill 同步契约继续走有界线程池（并发上限与
-  排队 503 语义不变）；
-- _publish_order / _parse_document_to_order：改为直连异步下游（不再占用线程），
-  经 app.main 接缝供路由调用（测试替身签名兼容，fake 本为 async）；
-- _extract_order_text：纯规则 CPU（毫秒级），直接同步执行。
+Phase 4 契约统一后：SkillBase.run 为 async 契约（转换段内部 to_thread），
+线程池退役；在途任务信号量保留——skill_max_concurrency 继续控制并发、
+排队超时返回 503 server_busy（语义与线程池时代一致）。
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from typing import Any
 
 from app.config import settings
@@ -23,21 +17,12 @@ from app.orders import extract_order_text
 from app.orders.client import publish_create_order_async
 from app.orders.document import parse_document_to_order_async
 
-_skill_executor = ThreadPoolExecutor(
-    max_workers=settings.skill_max_concurrency,
-    thread_name_prefix="skill-runner",
-)
-# 在途任务信号量：与线程池 worker 数一致，防止无界排队导致内存膨胀
+# 在途任务信号量：防止无界排队导致内存膨胀（与线程池时代同语义）
 _inflight_semaphore = asyncio.Semaphore(settings.skill_max_concurrency)
 
 
-async def _run_in_executor(call: Callable[[], Any]) -> Any:
-    """在有界线程池中执行同步调用，避免阻塞事件循环。
-
-    在途任务数受 skill_max_concurrency 限制：超限的新请求最多排队
-    skill_queue_wait_seconds 秒，仍无空位则返回 503 server_busy，
-    防止 LLM/转换任务（持有大文件字节）无界堆积耗尽内存。
-    """
+async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
+    """skill 执行：并发上限 + 排队 503 语义包裹异步契约调用。"""
     try:
         await asyncio.wait_for(
             _inflight_semaphore.acquire(),
@@ -46,25 +31,13 @@ async def _run_in_executor(call: Callable[[], Any]) -> Any:
     except TimeoutError:
         raise ServiceBusyError("server is busy, too many concurrent tasks") from None
     except ValueError:
-        # wait_for 超时取消与 release() 的竞争：等待者 future 已被弹出，
-        # acquire 未成功，按繁忙处理（避免裸 500）
+        # 防御性兜底：理论上不可达（3.12 标准库在超时竞争中自行归还信号量值后
+        # 抛 TimeoutError），保留以防运行时版本差异导致裸 500
         raise ServiceBusyError("server is busy, too many concurrent tasks") from None
     try:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_skill_executor, call)
+        return await skill.run(file_bytes=content, filename=filename, options=None)
     finally:
         _inflight_semaphore.release()
-
-
-async def _run_skill(skill: SkillBase, content: bytes, filename: str) -> dict:
-    return await _run_in_executor(
-        partial(
-            skill.run,
-            file_bytes=content,
-            filename=filename,
-            options=None,
-        )
-    )
 
 
 async def _publish_order(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -55,7 +57,7 @@ def test_extract_missing_file_field_returns_unified_422():
 def test_batch_extract_calls_keyword_only_skill(monkeypatch):
     skill = registry.get("tuoshu")
 
-    def fake_run(*, file_bytes: bytes, filename: str, options=None):
+    async def fake_run(*, file_bytes: bytes, filename: str, options=None):
         return {
             "result": {"filename": filename, "size": len(file_bytes)},
             "meta": {"fake": True},
@@ -87,10 +89,9 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
             "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
         ),
     )
-    monkeypatch.setattr(
-        skill_module,
-        "chat_json",
-        lambda _messages, **_kwargs: (
+
+    async def fake_achat_json(_messages, **_kwargs):
+        return (
             {
                 "mbl_no": "HLCUSHA12345678",
                 "carrier": "HMM",
@@ -107,8 +108,9 @@ def test_extract_response_has_no_independent_summary(monkeypatch):
                 "chat_text": "承运人: HMM\n做箱工厂: 错误工厂",
                 "summary": "模型二次摘要",
             },
-        ),
-    )
+        )
+
+    monkeypatch.setattr(skill_module, "achat_json", fake_achat_json)
 
     response = client.post(
         "/skills/tuoshu/extract",
@@ -161,13 +163,13 @@ def test_scanned_pdf_is_sent_as_vision_pages(monkeypatch):
         lambda _file_bytes, *, max_pages, scale: [b"page-1", b"page-2"],
     )
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    response = TuoshuSkill().run(file_bytes=b"fake-pdf", filename="scan.pdf")
+    response = asyncio.run(TuoshuSkill().run(file_bytes=b"fake-pdf", filename="scan.pdf"))
 
     user_content = captured["messages"][-1]["content"]
     images = [item for item in user_content if item["type"] == "image_url"]
@@ -201,7 +203,7 @@ def test_incomplete_review_issue_is_repaired_once(monkeypatch):
 
     calls: list[list[dict]] = []
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         calls.append(messages)
         if len(calls) == 1:
             return {
@@ -226,14 +228,16 @@ def test_incomplete_review_issue_is_repaired_once(monkeypatch):
             "source": {},
         }, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
     # 启用 LLM 视觉能力（无视觉时该流程在 convert 阶段即被拒绝）
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
-    response = TuoshuSkill().run(
-        file_bytes=b"\x89PNG\r\n\x1a\nimage",
-        filename="order.png",
+    response = asyncio.run(
+        TuoshuSkill().run(
+            file_bytes=b"\x89PNG\r\n\x1a\nimage",
+            filename="order.png",
+        )
     )
 
     assert len(calls) == 2
@@ -251,7 +255,7 @@ def test_incomplete_review_issue_still_fails_after_one_repair(monkeypatch):
 
     calls = 0
 
-    def fake_chat_json(_messages, **_kwargs):
+    async def fake_chat_json(_messages, **_kwargs):
         nonlocal calls
         calls += 1
         return {
@@ -259,15 +263,17 @@ def test_incomplete_review_issue_still_fails_after_one_repair(monkeypatch):
             "source": {},
         }, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
     # 启用 LLM 视觉能力（无视觉时该流程在 convert 阶段即被拒绝）
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     with pytest.raises(ParseError, match="required structure"):
-        TuoshuSkill().run(
-            file_bytes=b"\x89PNG\r\n\x1a\nimage",
-            filename="order.png",
+        asyncio.run(
+            TuoshuSkill().run(
+                file_bytes=b"\x89PNG\r\n\x1a\nimage",
+                filename="order.png",
+            )
         )
 
     assert calls == 2
@@ -297,24 +303,25 @@ def test_parser_fallback_issue_reaches_final_output(monkeypatch):
         ],
     )
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
-    monkeypatch.setattr(
-        skill_module,
-        "chat_json",
-        lambda *_args, **_kwargs: (
+    async def fake_achat_json(*_args, **_kwargs):
+        return (
             {
                 "shipper_company": "某托运人公司",
                 "factory": {"name": "某门点"},
                 "source": {},
             },
             {"model": "fake", "usage": None},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(skill_module, "achat_json", fake_achat_json)
     # 启用 LLM 视觉能力（无视觉时 parser=vision 且无 OCR 文本会被拒绝）
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
-    response = TuoshuSkill().run(
-        file_bytes=b"\x89PNG\r\n\x1a\nimage",
-        filename="order.png",
+    response = asyncio.run(
+        TuoshuSkill().run(
+            file_bytes=b"\x89PNG\r\n\x1a\nimage",
+            filename="order.png",
+        )
     )
 
     issue = next(
@@ -348,13 +355,13 @@ def test_high_confidence_mineru_image_skips_vision_for_speed(monkeypatch):
     )
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    result = TuoshuSkill().run(file_bytes=image_bytes, filename="order.png")
+    result = asyncio.run(TuoshuSkill().run(file_bytes=image_bytes, filename="order.png"))
 
     user_content = captured["messages"][-1]["content"]
     # 高置信 MinerU 跳过 LLM vision，走纯文本通道
@@ -391,13 +398,13 @@ def test_low_confidence_mineru_image_keeps_vision_cross_check(monkeypatch):
     # 启用 LLM 视觉能力，验证低置信图片携原图走 vision 交叉核验
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    TuoshuSkill().run(file_bytes=image_bytes, filename="order.png")
+    asyncio.run(TuoshuSkill().run(file_bytes=image_bytes, filename="order.png"))
 
     user_content = captured["messages"][-1]["content"]
     text_content = next(item["text"] for item in user_content if item["type"] == "text")
@@ -434,14 +441,16 @@ def test_oversized_image_degrades_to_text_and_flags_manual_review(monkeypatch):
     # 启用 LLM 视觉能力，验证超限降级路径
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    result = TuoshuSkill().run(
-        file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+    result = asyncio.run(
+        TuoshuSkill().run(
+            file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+        )
     )
 
     user_content = captured["messages"][-1]["content"]
@@ -481,8 +490,10 @@ def test_oversized_image_without_ocr_text_rejected(monkeypatch):
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
     with pytest.raises(ConvertError) as exc_info:
-        TuoshuSkill().run(
-            file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+        asyncio.run(
+            TuoshuSkill().run(
+                file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+            )
         )
     assert exc_info.value.code == "vision_image_too_large"
 
@@ -508,8 +519,10 @@ def test_image_without_ocr_text_rejected_when_vision_disabled(monkeypatch):
     monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
 
     with pytest.raises(ConvertError) as exc_info:
-        TuoshuSkill().run(
-            file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+        asyncio.run(
+            TuoshuSkill().run(
+                file_bytes=b"\x89PNG\r\n\x1a\nimage", filename="order.png"
+            )
         )
     assert exc_info.value.code == "vision_disabled_no_ocr"
 
@@ -528,7 +541,7 @@ def test_scan_pdf_vision_bytes_budget(monkeypatch):
     )
 
     with pytest.raises(ConvertError) as exc_info:
-        TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+        asyncio.run(TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf"))
     assert exc_info.value.code == "vision_image_too_large"
 
 
@@ -546,13 +559,13 @@ def test_scan_pdf_goes_to_mineru_when_vision_disabled(monkeypatch):
         )(),
     )
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    response = TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+    response = asyncio.run(TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf"))
 
     user_content = captured["messages"][-1]["content"]
     # MinerU OCR 文本走纯文本通道，不再携带图片
@@ -579,7 +592,7 @@ def test_scan_pdf_rejected_when_mineru_fails_and_vision_disabled(monkeypatch):
     )
 
     with pytest.raises(ConvertError) as exc_info:
-        TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf")
+        asyncio.run(TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf"))
     assert exc_info.value.code == "vision_disabled_no_ocr"
     assert "MinerU" in exc_info.value.message
 
@@ -692,10 +705,9 @@ def test_skill_uses_deterministic_route_when_llm_misclassifies_doc_type(monkeypa
         "convert_to_markdown",
         lambda _file_bytes, _filename: markdown,
     )
-    monkeypatch.setattr(
-        skill_module,
-        "chat_json",
-        lambda _messages, **_kwargs: (
+
+    async def fake_achat_json(_messages, **_kwargs):
+        return (
             {
                 "doc_type": "PACKING_NOTICE",
                 "shipper_company": "某托运人公司",
@@ -703,10 +715,11 @@ def test_skill_uses_deterministic_route_when_llm_misclassifies_doc_type(monkeypa
                 "source": {},
             },
             {"model": "fake", "usage": None},
-        ),
-    )
+        )
 
-    response = TuoshuSkill().run(file_bytes=b"fake-docx", filename="order.docx")
+    monkeypatch.setattr(skill_module, "achat_json", fake_achat_json)
+
+    response = asyncio.run(TuoshuSkill().run(file_bytes=b"fake-docx", filename="order.docx"))
 
     assert response["result"]["doc_type"] == "TRUCKING_ORDER"
 

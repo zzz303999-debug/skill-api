@@ -126,7 +126,7 @@ def test_error_code_recorded_on_skill_error():
 def test_extract_records_filename(monkeypatch):
     skill = next(s for s in registry.all_skills() if s.name == "tuoshu")
 
-    def fake_run(*, file_bytes, filename, options):
+    async def fake_run(*, file_bytes, filename, options):
         return {
             "result": {"source": {"file": filename, "doc_format": "docx"}},
             "meta": {},
@@ -268,7 +268,7 @@ def test_http_error_details_recorded_for_non_business_failures():
 def test_extract_records_file_size(monkeypatch):
     skill = next(s for s in registry.all_skills() if s.name == "tuoshu")
 
-    def fake_run(*, file_bytes, filename, options):
+    async def fake_run(*, file_bytes, filename, options):
         return {
             "result": {"source": {"file": filename, "doc_format": "docx"}},
             "meta": {},

@@ -117,9 +117,10 @@ def test_500_internal_error(monkeypatch):
     异常以便定位），断言 500 响应体需用 False 关闭该保护。
     """
     skill = registry.get("tuoshu")
-    monkeypatch.setattr(
-        skill, "run", lambda **_: (_ for _ in ()).throw(RuntimeError("boom"))
-    )
+    async def _boom(**_):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(skill, "run", _boom)
     resp = TestClient(app, raise_server_exceptions=False).post(
         "/skills/tuoshu/extract",
         files={"file": ("a.xlsx", b"x", "application/octet-stream")},
@@ -150,10 +151,9 @@ def _stub_llm_success(monkeypatch):
     """mock 文档转换与 LLM：返回最小合法 TuoshuOutput 数据（零网络）。"""
     markdown = "提单号：HLCUSHA12345678\n承运人：HMM\n做箱工厂：某门点\n柜1备注：博特装柜"
     monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_: markdown)
-    monkeypatch.setattr(
-        skill_module,
-        "chat_json",
-        lambda _messages, **_kwargs: (
+
+    async def fake_achat_json(_messages, **_kwargs):
+        return (
             {
                 "mbl_no": "HLCUSHA12345678",
                 "carrier": "HMM",
@@ -165,8 +165,9 @@ def _stub_llm_success(monkeypatch):
                 "source": {},
             },
             {"model": "fake", "usage": None},
-        ),
-    )
+        )
+
+    monkeypatch.setattr(skill_module, "achat_json", fake_achat_json)
 
 
 def test_success_unified_envelope(monkeypatch):
@@ -213,11 +214,11 @@ def test_convert_error_422(monkeypatch):
 def test_parse_error_502(monkeypatch):
     """集成：LLM 输出不合法（ParseError）→ 502 parse_error 统一外壳。"""
     monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_: "markdown")
-    monkeypatch.setattr(
-        skill_module,
-        "chat_json",
-        lambda _messages, **_kwargs: (_ for _ in ()).throw(ParseError("llm boom")),
-    )
+
+    async def fake_achat_json_error(_messages, **_kwargs):
+        raise ParseError("llm boom")
+
+    monkeypatch.setattr(skill_module, "achat_json", fake_achat_json_error)
     resp = client.post(
         "/skills/tuoshu/extract",
         files={"file": ("order.docx", b"fake-docx", "application/octet-stream")},

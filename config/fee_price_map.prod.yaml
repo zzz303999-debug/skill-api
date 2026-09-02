@@ -26,10 +26,9 @@ tally:       { tms_name: 理货费,   price_id: 124835 }
 move:        { tms_name: 搬移费,   price_id: 124841 }
 lift:        { tms_name: 上下车费, price_id: 124840 }
 port_misc:   { tms_name: 港杂费,   price_id: 124846 }
-tax:         { tms_name: 税金,     price_id: 125466 }  # 2026-09-01 用户拍板：账单中的税金照录（原 import:false 仅对账作废）
+tax:         { tms_name: 税金,     price_id: 125466 }  
 other:       { tms_name: 其它费,   price_id: 124832 }  # to_other 长尾归并目标（is_other=1）
-# crane（吊机费）已移除：TMS 尚无此费目、无 id 可补；账单中的吊机费自动归「其它费」照录。
-# 自举实弹验证入口保留在 test 表；验证通过后在 TMS 建档拿到 id，再把 crane 行加回本表补值。
+
 
 # 费目自举
 fee_bootstrap:

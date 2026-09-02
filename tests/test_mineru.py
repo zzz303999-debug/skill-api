@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import app.document_parsers.mineru as mineru_module
@@ -471,13 +473,13 @@ def test_mineru_markdown_is_sent_to_llm_in_full(monkeypatch):
         lambda _file_bytes, _filename: ConversionText(markdown, parser="mineru"),
     )
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
         return {"source": {}}, {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(skill_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(skill_module, "achat_json", fake_chat_json)
 
-    skill_module.TuoshuSkill().run(file_bytes=b"pdf", filename="order.pdf")
+    asyncio.run(skill_module.TuoshuSkill().run(file_bytes=b"pdf", filename="order.pdf"))
 
     user_message = captured["messages"][-1]["content"]
     assert markdown in user_message

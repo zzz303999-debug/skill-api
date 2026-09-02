@@ -14,7 +14,7 @@ from app.config import settings
 from app.core.skill_base import SkillBase
 from app.document_parsers import mineru
 from app.errors import BadRequestError, ConvertError, ParseError
-from app.llm import chat_json, image_to_data_url
+from app.llm import achat_json, image_to_data_url
 from app.logging_conf import get_logger
 
 from .convert_service import (
@@ -110,18 +110,15 @@ def _extract_review_issues_list(raw: dict | list) -> list | None:
     return None
 
 
-def _normalize_with_review_issue_repair(
+async def _normalize_with_review_issue_repair(
     data: dict,
     meta: dict,
     *,
     messages: list[dict],
     output_schema: dict,
 ) -> tuple[dict, dict]:
-    """Retry once when the model emits an incomplete structured review issue.
-
-    重试时只让模型重发 review_issues 数组（而非重输出整个 JSON），
-    输出显著变短，重试耗时从 ~80s 降到 ~20s。
-    """
+    """_normalize_with_review_issue_repair 的异步版（repair 重试走 achat_json），
+    其余逻辑逐行一致。"""
     try:
         return normalize_llm_output(data), meta
     except ParseError as exc:
@@ -154,7 +151,7 @@ def _normalize_with_review_issue_repair(
                 ),
             },
         ]
-        repaired_raw, repaired_meta = chat_json(
+        repaired_raw, repaired_meta = await achat_json(
             repair_messages,
             temperature=0.0,
             # 目标是裸数组，不套用完整对象 schema，避免约束模型输出整个 JSON
@@ -179,7 +176,9 @@ class TuoshuSkill(SkillBase):
     output_model = TuoshuOutput
     include_content = True
 
-    def run(self, *, file_bytes: bytes, filename: str, options: dict | None = None) -> dict:
+    def _prepare_stage(self, *, file_bytes: bytes, filename: str) -> dict:
+        """转换与 prompt 构造段（CPU/LibreOffice subprocess/MinerU 网络）：
+        run 主流程首段；返回 LLM 与后处理所需的全部上下文。"""
         ext = Path(filename).suffix.lower()
         if ext not in self.accepts:
             raise BadRequestError(f"unsupported extension: {ext}", details={"accepts": self.accepts})
@@ -523,23 +522,58 @@ class TuoshuSkill(SkillBase):
                 "document_chars": len(source_text) if source_text is not None else None,
             },
         )
+        return {
+            "messages": messages,
+            "conversion_meta": conversion_meta,
+            "source_text": source_text,
+            "route": route,
+            "mapper_result": mapper_result,
+            "parser_review_issues": parser_review_issues,
+            "doc_format": doc_format,
+            "detected_format": detected_format,
+            "extracted_at": extracted_at,
+            "filename": filename,
+            "file_bytes": file_bytes,
+        }
 
-        log.info("tuoshu_llm_start", extra={"file": filename, "doc_format": doc_format})
-        # 用 TuoshuOutput 的 JSON Schema 约束模型输出，确保字段名严格一致
+    async def run(self, *, file_bytes: bytes, filename: str, options: dict | None = None) -> dict:
+        """异步契约主流程：转换段（CPU/subprocess/MinerU，to_thread）→
+        LLM（achat_json 真异步）→ 后处理段（CPU）；语义与拆分前 run() 一致。"""
+        import asyncio
+
+        ctx = await asyncio.to_thread(
+            lambda: self._prepare_stage(file_bytes=file_bytes, filename=filename)
+        )
+        log.info(
+            "tuoshu_llm_start",
+            extra={"file": filename, "doc_format": ctx["doc_format"]},
+        )
         output_schema = _clean_json_schema(TuoshuOutput.model_json_schema())
-        data, meta = chat_json(messages, temperature=0.0,
-                               json_schema=output_schema)
-
+        data, meta = await achat_json(
+            ctx["messages"], temperature=0.0, json_schema=output_schema
+        )
         if not isinstance(data, dict):
             raise ParseError("LLM output must be a JSON object")
-
-        # 字段名归一化（兜底：网关不支持 json_schema 时仍能矫正中文 key）
-        data, meta = _normalize_with_review_issue_repair(
+        data, meta = await _normalize_with_review_issue_repair(
             data,
             meta,
-            messages=messages,
+            messages=ctx["messages"],
             output_schema=output_schema,
         )
+        return self._finalize_stage(ctx, data, meta)
+
+    def _finalize_stage(self, ctx: dict, data: dict, meta: dict) -> dict:
+        """后处理段（纯 CPU）：路由 doc_type 覆盖/确定性合并/终稿化/校验/组装。"""
+        filename = ctx["filename"]
+        source_text = ctx["source_text"]
+        conversion_meta = ctx["conversion_meta"]
+        parser_review_issues = ctx["parser_review_issues"]
+        route = ctx["route"]
+        mapper_result = ctx["mapper_result"]
+        doc_format = ctx["doc_format"]
+        detected_format = ctx["detected_format"]
+        extracted_at = ctx["extracted_at"]
+        file_bytes = ctx["file_bytes"]
         if route.doc_type != "UNKNOWN":
             llm_doc_type = data.get("doc_type")
             if llm_doc_type != route.doc_type:
