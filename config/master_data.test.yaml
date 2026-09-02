@@ -1,0 +1,31 @@
+# 阶段三：基础资料阈值建档配置——测试环境（APP_ENV=test 时加载，本地联调默认）
+# 按环境拆分（2026-09-02）：config/master_data.{env}.yaml 双份随镜像分发，
+# APP_ENV 决定加载哪份（与 fee_price_map.{env}.yaml 同模式）——本地连测试零 Git 改动。
+# 端点与生产（master_data.prod.yaml）同路径族，宿主切 test-s3（2026-09-01 实测可用）；
+# 其余段（threshold/sn_prefix/defaults/duplicate_markers）两环境保持一致。
+master_data:
+  enabled: true
+  threshold: 5
+  duplicate_markers:
+  - 已存在
+  - Duplicate entry
+  - 重复
+  sn_prefix:
+    client: CLT
+    factory: FAC
+    bailor: BAL
+    truck: TRK
+    driver: DRV
+  endpoints:
+    client_create: "https://test-s3.jxt56.com/Car/CarClient/AddCarClient"
+    factory_create: "https://test-s3.jxt56.com/Car/CarFactory/AddCarFactory"
+    bailor_create: "TODO"
+    truck_create: "https://test-s3.jxt56.com/Car/CarTruck/AddCarTruck"
+    driver_create: "https://test-s3.jxt56.com/Car/CarDriver/AddCarDriver"
+    price_create: "https://test-s3.jxt56.com/Car/CarPrice/AddCarPrice"
+  defaults:
+    client:  { cg_id: "4", cg_name: 同行, sys_type: "1", su_id: "15478" }
+    truck:   { section_id: "6987", remind_id: "15478", sys_type: "1", type: bill }
+    driver:  { sinout: 自做, sys_type: "1" }
+    factory: { sys_type: "1" }
+    bailor:  { sys_type: "1", is_involve: "1", is_quoted: "0" }

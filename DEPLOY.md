@@ -75,11 +75,14 @@ chmod 600 .env
   日志页面 `/logs` 首次访问会提示输入 API Key 并保存在浏览器本地
 - 完整变量清单见第 5 节；不用的功能（订单接口/MinerU）可保留默认值
 - **`APP_ENV` 必须按环境设置（2026-08-31 事故教训）**：决定加载
-  `config/fee_price_map.{env}.yaml`，默认 `test`；生产必须显式设
-  `APP_ENV=prod`，否则费目映射表缺失/错位，账单导入
+  `config/fee_price_map.{env}.yaml` 与 `config/master_data.{env}.yaml`，默认 `test`；
+  生产必须显式设 `APP_ENV=prod`，否则费目映射表缺失/错位，账单导入
   （`/orders/bill/import`）会 500 `internal_error`
   （fail fast：`fee price map missing`）；
-  同时箱型白名单、建档配置随镜像分发，缺失时会静默降级（见第 12 节）
+  两套配置文件均随镜像分发、双环境内容齐全——**环境差异只存在于各环境的 `.env`
+  与 `{env}.yaml` 文件，任何 Git 提交都不携带环境切换**
+  （本地联调零配置即连测试环境，生产设 `APP_ENV=prod` 即连生产）。
+  箱型白名单随镜像分发，缺失时会静默降级（见第 12 节）
 
 ### 4.2 方式 A：镜像部署
 
@@ -190,12 +193,15 @@ sudo journalctl -u skill-api -n 200 --no-pager
 |------|------|
 | `LLM_BASE_URL` | OpenAI-compatible API 地址，如 `https://api.example.com/v1` |
 | `LLM_MODEL_DEFAULT` | 服务端支持的模型名，默认 `deepseek-v4-flash` |
-| `ORDER_API_URL` | 订单接口地址（仅使用 `/orders` 时必填，需覆盖默认的预发地址） |
+| `ORDER_API_URL` | 订单接口地址（默认即生产地址，生产无需配置；仅上游变更时覆盖） |
 
 ### 可选（有默认值）
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
+| `JXT_ADDWORK_URL` | `https://s3.jxt56.com/Car/WorkOut/AddWork` | 竞品账单导入下游（生产地址）；本地联调在本地 `.env` 覆盖 test-s3 |
+| `JXT_MANIFEST_ADDBILL_URL` | `https://service.jxt56.com/crm/order/bill/addBill` | 舱单导入下游（生产地址）；本地联调在本地 `.env` 覆盖 test-service |
+| `JXT_TIMEOUT_SECONDS` | `30` | 竞品账单/舱单下游超时秒数 |
 | `API_HOST` | `0.0.0.0` | 监听地址 |
 | `API_PORT` | `9000` | 监听端口 |
 | `API_MAX_UPLOAD_BYTES` | `20971520` | 单文件上传上限（20MB），须与反代 `client_max_body_size` 一致 |

@@ -7,6 +7,10 @@ from manifest_helpers import FakeResponse
 
 import app.orders.manifest.client as client_module
 
+# 端点由 settings 注入（.env 可覆盖）：测试固定哨兵值，断言透传而非具体域名，
+# 避免本地/生产 .env 差异打红测试（与 bill 侧 test_client.py urls fixture 同模式）
+_TEST_ADDBILL_URL = "https://svc.example.com/crm/order/bill/addBill"
+
 
 def _fake_post(monkeypatch, payload, status_code: int = 200):
     captured: dict = {}
@@ -23,13 +27,14 @@ class TestSubmitManifest:
     """提交：端点/JSON/sk 透传；响应 code 数字 200 判定（与 AddWork 字符串区分）。"""
 
     def test_success_parses_bid(self, monkeypatch):
+        monkeypatch.setattr(client_module.settings, "jxt_manifest_addbill_url", _TEST_ADDBILL_URL)
         captured = _fake_post(
             monkeypatch,
             {"code": 200, "msg": "成功", "data": [{"bId": 11801, "bOrderNum": "111"}]},
         )
         payload = {"bOrderNum": "111"}
         result = client_module.submit_manifest(payload, "tk-1")
-        assert captured["url"] == "https://service.jxt56.com/crm/order/bill/addBill"
+        assert captured["url"] == _TEST_ADDBILL_URL
         assert captured["json"] is payload
         assert captured["headers"]["sk"] == "tk-1"
         assert result == {

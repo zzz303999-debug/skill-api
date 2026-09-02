@@ -1,7 +1,7 @@
 """阶段三：基础资料阈值建档（T17-T21）——配置/归一键/候选收集/阈值编排。
 
 口径（2026-08-14 用户拍板，见 docs/竞品/阶段三-基础资料阈值录入设计.md）：
-- N 默认 5（config/master_data.yaml `master_data.threshold`），不进代码；
+- N 默认 5（config/master_data.{env}.yaml `master_data.threshold`），不进代码；
 - 计数键：客户=归一名；工厂=「名+地址」复合键；司机+车辆=「司机名+车牌」组合键；
 - 计数范围：跨全部模板家族全局累计（master_data_store 单文件持久化）；
 - 未达阈值：订单照常带文本提交，订单 unmapped_note 标注「未建档(x/N)」，不阻塞；
@@ -22,6 +22,7 @@ from typing import Any
 
 import yaml
 
+from app.config import settings
 from app.logging_conf import get_logger
 
 from .master_data_store import get_store
@@ -53,7 +54,9 @@ COUNT_KINDS: tuple[str, ...] = (KIND_CLIENT, KIND_FACTORY, KIND_DRIVER)
 PENDING_TOP_N = 10
 
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config"
-_CONFIG_PATH = _CONFIG_DIR / "master_data.yaml"
+# 按环境解析：config/master_data.{env}.yaml（APP_ENV 选择，与 fee_price_map 同模式）。
+# 双份随镜像分发，环境切换零 Git 改动——本地联调永远 test，生产永远 prod。
+_CONFIG_PATH = _CONFIG_DIR / f"master_data.{settings.env}.yaml"
 
 # 空白归一：全部空白（含全角空格/连续空白）一律删除——任何空白差异都不产生
 # 新计数键（防「锦煦 」/「锦　煦」/「锦 煦」算两个；宁合并不拆分）
@@ -186,7 +189,7 @@ def kind_label(kind: str) -> str:
     return _KIND_LABELS.get(kind, kind)
 
 
-# ---- 配置加载（config/master_data.yaml；缺文件 → 全局禁用 + warning，不 fail fast） ----
+# ---- 配置加载（config/master_data.{env}.yaml；缺文件 → 全局禁用 + warning，不 fail fast） ----
 
 _DEFAULTS: dict[str, Any] = {
     "enabled": True,

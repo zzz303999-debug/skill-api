@@ -323,7 +323,7 @@
 >    空串 → 拒单 `no: phone`；
 > 4. **成功响应带主键 `data.id`**（294329/294333）——可登记幂等，不再存在「无主键无法登记」问题。
 >
-> **结论（2026-08-14 定论）**：司机建档正常启用（config/master_data.yaml `driver_create`），
+> **结论（2026-08-14 定论）**：司机建档正常启用（config/master_data.{env}.yaml `driver_create`，APP_ENV 选择 test/prod 双份随镜像分发），
 > 无车牌/无手机号司机 → 登记 skip_archive 终态不建档（数据缺失，TMS 硬约束）。
 
 | 分组 | 字段（值） | 说明 |

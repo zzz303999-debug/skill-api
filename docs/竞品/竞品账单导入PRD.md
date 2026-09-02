@@ -258,7 +258,7 @@
 | 字段别名字典 | `templates/alias_dictionary.yaml` | 标准字段 ← 源列名别名（L3 前道） |
 | 费目别名字典 | `config/fee_alias_dictionary.yaml` | 费目名 → 标准费目码 |
 | price_id 映射 | `config/fee_price_map.{env}.yaml` | 按环境隔离；缺文件 fail fast；含 fee_bootstrap 段 |
-| 基础资料 | `config/master_data.yaml` | threshold / sn_prefix / endpoints（6 建档接口）/ defaults / duplicate_markers |
+| 基础资料 | `config/master_data.{env}.yaml`（APP_ENV 选择，test/prod 双份随镜像分发） | threshold / sn_prefix / endpoints（6 建档接口）/ defaults / duplicate_markers |
 | 下游凭证 | 无（v1.4：服务端不再配置/换取，调用方登录 TMS 后经请求头 `sk` 透传） | — |
 
 ## 9. 错误码

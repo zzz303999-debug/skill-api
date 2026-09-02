@@ -73,7 +73,7 @@ skill-api/
 │           ├── deterministic_mapper.py  # 模板指纹 + 确定性字段映射
 │           ├── postprocessor.py # 后处理编排：确定性映射 + review_issues 复核
 │           └── references/      # 业务知识（ports/carriers/aliases/…）+ few-shot examples
-├── config/                      # 费率与主数据配置（fee_price_map.{env}.yaml、master_data.yaml）
+├── config/                      # 费率与主数据配置（fee_price_map.{env}.yaml、master_data.{env}.yaml，APP_ENV 选择）
 ├── templates/                   # 内置账单模板（8 家族 yaml）
 ├── mineru/
 │   └── Dockerfile               # MinerU CPU 镜像构建（模型随镜像发布）

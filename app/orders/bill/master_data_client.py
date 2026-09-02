@@ -1,6 +1,6 @@
 """建档调用器（T18）：sk 由调用方登录 TMS 后透传 + 六档案 builder。
 
-- 端点 URL 从配置取（config/master_data.yaml `endpoints`）；TODO/空 → endpoint_for
+- 端点 URL 从配置取（config/master_data.{env}.yaml `endpoints`）；TODO/空 → endpoint_for
   返回 None，编排侧降级为只计数不建档（端点是运维补给，不 fail fast）；
 - 每档案一个 builder：只发最小字段集（逆推规范 §14 表）+ defaults 合并，禁止抓包
   测试值（test/11111/章家俊等）进代码/测试——全部走配置 defaults；
@@ -288,7 +288,7 @@ def create_archives(
         for key, form in forms.items():
             if url is None:
                 per_key[key] = _failure_result(
-                    "endpoint TODO (config/master_data.yaml endpoints)",
+                    "endpoint TODO (config/master_data.{env}.yaml endpoints)",
                     details={"kind": kind},
                 )
                 continue
