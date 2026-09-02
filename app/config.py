@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     skill_max_concurrency: int = Field(default=4, ge=1, le=64)
     # 在途任务满时新请求排队等待的最长秒数，超时返回 503 server_busy
     skill_queue_wait_seconds: float = Field(default=10.0, ge=0, le=300)
+    # 账单导入 create 模式并发下单上限（异键并行、同键串行；2026-09 异步化新增）：
+    # 防止大批账单同时打满 TMS 下游；单失败隔离/不重试语义不受影响
+    bill_create_concurrency: int = Field(default=4, ge=1, le=32)
     # 接口访问凭证（Bearer / X-API-Key）。生产必须设置；为空时不启用鉴权（仅限可信内网）
     api_key: str = ""
 

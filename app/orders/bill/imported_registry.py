@@ -29,11 +29,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,24 @@ def lock_for(
     with _LOCKS_GUARD:
         lock = _LOCKS.setdefault(key or "", threading.Lock())
     with lock:
+        yield
+
+
+# ---- 异步组合键锁（async 编排层用，2026-09 异步化改造）----
+# 临界区内含下游网络调用（查重→提交→登记），async 版必须用 asyncio.Lock：
+# await 让出事件循环时不阻塞异键协程；同键仍串行（原子性不变）。
+# 字典 setdefault 在单线程事件循环内无竞态。
+_ASYNC_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+@asynccontextmanager
+async def alock_for(
+    bl_no: str, container_no: str | None = None, fallback: str | None = None
+) -> AsyncIterator[None]:
+    """lock_for 的异步版：同键串行化（lookup→submit→register 原子），异键并行。"""
+    key = dedup_key(bl_no, container_no, fallback)
+    lock = _ASYNC_LOCKS.setdefault(key or "", asyncio.Lock())
+    async with lock:
         yield
 
 

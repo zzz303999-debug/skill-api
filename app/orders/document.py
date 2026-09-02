@@ -1287,3 +1287,80 @@ def parse_document_to_order(
         "missing_reasons": missing_reasons,
         "meta": safe_meta,
     }
+
+
+async def parse_document_to_order_async(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    customer_id: str = "",
+) -> dict[str, Any]:
+    """parse_document_to_order 的异步版（Phase 3 路由异步化）：
+
+    - 转换段（_convert_file：LibreOffice 转换/PDF 渲染 CPU 密集 + MinerU 网络）
+      整体入线程池——不阻塞事件循环；MinerU 的异步化需拆分 _convert_file
+      内部管线（~200 行混合 CPU/网络），留待后续迭代（此处注释标记）；
+    - LLM 抽取（最长等待段，timeout 180s）走 achat_json 真异步；
+    - 兑底修复/归一化/组装段与同步版逐行一致。
+    """
+    import asyncio
+
+    from app.llm import achat_json
+
+    source_text, doc_format, conversion_meta, user_content = await asyncio.to_thread(
+        _convert_file, file_bytes, filename
+    )
+    extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    system = _build_system_prompt()
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+    output_schema = _clean_json_schema(OrderDocumentExtraction.model_json_schema())
+    raw, llm_meta = await achat_json(
+        messages, temperature=0.0, json_schema=output_schema
+    )
+    if not isinstance(raw, dict):
+        raise ParseError("LLM output must be a JSON object")
+
+    # 兑底修复：以下与同步版逐行一致
+    if raw_value := raw.get("c_title"):
+        raw["c_title"] = _revise_c_title_to_value(raw_value, source_text)
+    elif source_text:
+        raw["c_title"] = _extract_header_company(source_text)
+    raw["b_end_port"], raw["b_end_dock"] = _revise_port_fields(
+        raw.get("b_end_port"), raw.get("b_end_dock"), source_text
+    )
+    raw["order_num1"] = _revise_bill_no(raw.get("order_num1"), source_text)
+    if raw.get("b_date_time_start"):
+        raw["b_date_time_start"] = _revise_loading_time(
+            raw.get("b_date_time_start"), source_text
+        )
+
+    extracted = normalize_document_extraction(raw)
+    missing = _missing_fields(extracted)
+    missing_reasons = _missing_field_reasons(raw, extracted)
+    order_data = build_document_order_data(extracted, customer_id=customer_id)
+
+    safe_meta = {key: llm_meta.get(key) for key in ("model", "usage") if key in llm_meta}
+    safe_meta.update(conversion_meta)
+    safe_meta.update(
+        {
+            "extracted_at": extracted_at,
+            "doc_format": doc_format,
+            "source_sha256": hashlib.sha256(file_bytes).hexdigest(),
+            "source_bytes": len(file_bytes),
+            "order_created": False,
+        }
+    )
+    vision_degraded = "vision_skipped_reason" in conversion_meta
+    return {
+        "file": filename,
+        "extracted": extracted.model_dump(),
+        "order_data": order_data,
+        "needs_manual_confirmation": bool(missing) or vision_degraded,
+        "missing_fields": missing,
+        "missing_reasons": missing_reasons,
+        "meta": safe_meta,
+    }

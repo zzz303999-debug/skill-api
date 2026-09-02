@@ -12,6 +12,8 @@ response_shell），启动时 create_app() 完成：
   为本模块定义；build_result / _publish_order / _parse_document_to_order
   为 re-export——中间件与路由在**调用时**从 app.main 命名空间读取这些符号，
   测试以 setattr(main_module, ...) 注入替身依然生效（见各调用点注释）；
+  build_result 已绑定为 async 编排（build_result_async），同步替身由路由层
+  isawaitable 桥接兼容；
 - 兼容 re-export（同一对象）：app / _LIMITERS / _inflight_semaphore /
   _resolve_client_ip / _summarize_import_response / _probe_* / access_log。
 """
@@ -31,7 +33,7 @@ from app.api.middleware.access_log import _summarize_import_response
 from app.api.middleware.rate_limit import _LIMITERS, _resolve_client_ip
 from app.config import settings
 from app.logging_conf import setup_logging
-from app.orders.bill import build_result
+from app.orders.bill.service import build_result_async as build_result
 
 __all__ = [
     "_AUTH_FREE_PATHS",

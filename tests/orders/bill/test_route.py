@@ -8,8 +8,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.orders.bill.ai_header as ai_header_module
-import app.orders.bill.client as client_module
 import app.orders.bill.service as service_module
+import app.orders.http_client as http_client_module
 from app.config import settings
 from app.errors import ERROR_CODE_DESCRIPTIONS
 from app.main import app
@@ -111,14 +111,14 @@ class TestCreateMode:
         calls = {"addwork": 0}
         sk_seen: list[str | None] = []
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族（/Car/Car* 路径，区别于下单 /Car/WorkOut/AddWork）
                 return _archive_post(url)
             sk_seen.append((_kwargs.get("headers") or {}).get("sk"))
             calls["addwork"] += 1
             return _ok_chain_post(url)
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -158,11 +158,11 @@ class TestCreateMode:
         建档路径（端点已配后激活）同样不触发。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return FakeResponse({"code": "200", "msg": "添加成功"})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -188,7 +188,7 @@ class TestCreateMode:
         """部分单失败 → 200 + summary.failed 计数，单失败不影响其他。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             calls["addwork"] += 1
@@ -196,7 +196,7 @@ class TestCreateMode:
                 return FakeResponse({"code": "204", "msg": "添加失败"})
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -238,13 +238,13 @@ class TestCreateMode:
         """全部单失败 → 200 + summary.failed 全量；upstream 返回 204 结构。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             calls["addwork"] += 1
             return FakeResponse({"code": "204", "msg": "添加失败"})
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -346,14 +346,14 @@ def test_unknown_box_type_zero_downstream(monkeypatch):
 
     calls = {"addwork": 0, "archive": 0}
 
-    def fake_post(url, **_kwargs):
+    async def fake_post(url, **_kwargs):
         if "/Car/Car" in url:  # 建档族（CarClient/CarFactory/CarTruck/CarDriver/CarPrice）
             calls["archive"] += 1
             return _archive_post(url)
         calls["addwork"] += 1
         return _ok_chain_post(url)
 
-    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
     with TestClient(app) as client:
         r = upload(
             client,
@@ -435,14 +435,14 @@ def test_qiuyi_20hq_whole_file_rejected(monkeypatch):
     """秋怡 2019（含 20HQ，2026-08-26 用户确认非法）→ 整批拒绝、零下游。"""
     calls = {"addwork": 0, "archive": 0}
 
-    def fake_post(url, **_kwargs):
+    async def fake_post(url, **_kwargs):
         if "/Car/Car" in url:  # 建档族
             calls["archive"] += 1
             return _archive_post(url)
         calls["addwork"] += 1
         return _ok_chain_post(url)
 
-    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
     with TestClient(app) as client:
         r = upload(
             client,
@@ -541,7 +541,7 @@ class TestFileErrors:
         calls = {"addwork": 0, "lookup": 0, "register": 0}
         registry = imported_registry.get_imported_registry()
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             calls["addwork"] += 1
             return _ok_chain_post(url)
 
@@ -552,7 +552,7 @@ class TestFileErrors:
 
             return wrapped
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         monkeypatch.setattr(registry, "lookup", counting(registry.lookup, "lookup"))
         monkeypatch.setattr(registry, "register", counting(registry.register, "register"))
         with TestClient(app) as client:
@@ -633,14 +633,14 @@ class TestNanEcho:
     def test_nan_upstream_returns_200(self, monkeypatch):
         """AddWork 回显 data[0] 含 NaN → 200 + upstream 中为 null（序列化不炸）。"""
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族：返回主键，不占 addwork 计数
                 return _archive_post(url)
             return FakeResponse(
                 {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1", "fee": float("nan")}]}
             )
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -853,13 +853,13 @@ class TestDedupConflict:
         """真实链路：首次创建并登记 → 同文件重导全部命中 → 409（下游 0 次新增）。"""
         calls = {"addwork": 0}
 
-        def fake_post(url, **_kwargs):
+        async def fake_post(url, **_kwargs):
             if "/Car/Car" in url:  # 建档族（区别于下单 /Car/WorkOut/AddWork）
                 return _archive_post(url)
             calls["addwork"] += 1
             return _ok_chain_post(url)
 
-        monkeypatch.setattr(client_module.httpx, "post", fake_post)
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         with TestClient(app) as client:
             first = upload(
                 client,

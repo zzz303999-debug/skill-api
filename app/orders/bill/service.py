@@ -25,14 +25,18 @@ from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from app.errors import BadRequestError
 
 from .aggregator import group_canonical, group_orders
-from .client import create_orders
+from .client import create_orders, create_orders_async
 from .fee_price_map import apply_price_map
 from .parser import parse_bill
 from .schema import BillParseResult, to_canonical
+
+# _build_fee_reports 自举报告注入哨兵：未传时同步路径内联执行（既有行为）
+_UNSET = object()
 
 
 def _sha256(data: bytes) -> str:
@@ -54,7 +58,9 @@ def _order_dedup_parts(order) -> tuple[str | None, str | None]:
     return container_no, getattr(order, "row_seq", None)
 
 
-def _build_fee_reports(output, orders: list, create_order: bool, sk: str = "") -> dict:
+def _build_fee_reports(
+    output, orders: list, create_order: bool, sk: str = "", *, bootstrap_report: Any = _UNSET
+) -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
     - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
@@ -74,12 +80,16 @@ def _build_fee_reports(output, orders: list, create_order: bool, sk: str = "") -
     # 费目自举（T25）：费用归一后、payload 构造前——本批缺失费目码自动建档 →
     # registry 登记 → 下方 apply_price_map 经 registry 命中回填（当批正常录入）；
     # **preview 零副作用**（与阶段三一致）：create_order=false 只输出 planned
-    # 计划清单不发请求；真实导入才建档。disabled/无缺失 → None（不产生报告段）
-    bootstrap_report = None
-    if orders:
-        from .fee_bootstrap import run_fee_bootstrap
+    # 计划清单不发请求；真实导入才建档。disabled/无缺失 → None（不产生报告段）。
+    # bootstrap_report 注入（异步版用）：调用方已执行过自举（async 版传
+    # run_fee_bootstrap_async 结果，含 None）；未注入（哨兵）时同步路径内联执行，
+    # 行为与既有完全一致
+    if bootstrap_report is _UNSET:
+        bootstrap_report = None
+        if orders:
+            from .fee_bootstrap import run_fee_bootstrap
 
-        bootstrap_report = run_fee_bootstrap(orders, create_order=create_order, sk=sk)
+            bootstrap_report = run_fee_bootstrap(orders, create_order=create_order, sk=sk)
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -501,6 +511,266 @@ def build_result(
     if master_data_report is not None:
         meta["master_data"] = master_data_report
     # L3 候选模板配置（人工确认固化的载体）
+    if output.new_template is not None:
+        meta["l3_template"] = output.new_template
+
+    return BillParseResult(
+        file=filename,
+        bill_period=bill_period,
+        total_rows=sum(o.row_count for o in (canonical_orders or orders)),
+        order_count=len(canonical_orders) or len(orders),
+        create_order=create_order,
+        orders=orders,
+        canonical_orders=canonical_orders,
+        summary=summary,
+        upstream=upstream,
+        meta=meta,
+    )
+
+
+# ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义与同步版一致 ----
+
+
+def _parse_stage(filename: str, file_bytes: bytes):
+    """解析段（CPU 密集，to_thread 执行）：写临时文件 → parse_bill。"""
+    suffix = Path(filename).suffix.lower()
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp_path = tmp.name
+            tmp.write(file_bytes)
+            tmp.flush()
+            return parse_bill(tmp_path)
+    finally:
+        if tmp_path:
+            os.unlink(tmp_path)
+
+
+def _aggregate_stage(output, create_order: bool, sk: str):
+    """归集与预判段（内存 CPU，to_thread 执行）：双管线分流 → unmapped_note →
+    create 模式去重预判（registry 内存查重）→ 箱型白名单文件级校验。
+
+    registry lookup 为进程内内存读（threading.Lock 微秒级），随归集段入线程池；
+    返回 (orders, canonical_orders, agg)。
+    """
+    agg = group_orders(output.rows, output.period)
+    orders = agg.orders
+    canonical_orders: list = []
+    if output.canonical_rows is not None:
+        template = output.template_match.template if output.template_match else {}
+        canonical_orders = group_canonical(
+            output.canonical_rows, template, output.period
+        )
+    elif orders:
+        canonical_orders = [to_canonical(o) for o in orders]
+
+    if canonical_orders:
+        from .payload import collect_unmapped_note
+
+        for order in canonical_orders:
+            order.unmapped_note = collect_unmapped_note(order)
+
+    if create_order:
+        from .imported_registry import get_imported_registry, normalize, owner_key
+
+        _imported = get_imported_registry()
+        _owner = owner_key(sk)
+        for order in (*canonical_orders, *orders):
+            bl = normalize(
+                getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
+            )
+            if not bl:
+                order.create_result = {
+                    "success": False,
+                    "skipped": False,
+                    "sn": None,
+                    "error": {
+                        "code": "missing_bl_no",
+                        "message": "提单号缺失，未录入",
+                        "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
+                        "details": {},
+                    },
+                }
+                continue
+            box, seq = _order_dedup_parts(order)
+            if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
+                order.create_result = {
+                    "success": True,
+                    "skipped": True,
+                    "sn": rec.get("sn"),
+                    "error": None,
+                }
+
+    all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
+    _reject_unknown_box_types(all_pending)
+    return orders, canonical_orders, agg
+
+
+async def build_result_async(
+    *,
+    filename: str,
+    file_bytes: bytes,
+    create_order: bool = False,
+    sk: str = "",
+) -> BillParseResult:
+    """build_result 的异步版：解析/归集（CPU 密集）入线程池，网络段全 async
+    （并发下单/自举/建档），响应组装语义与同步版逐行一致。
+
+    create_order=True 时下单走 create_orders_async / create_canonical_orders_async
+    （异键有界并发，同键串行原子）；费用对账/自举/建档管线与同步版同序。
+    """
+    import asyncio
+
+    from app.config import settings
+
+    # 防御性校验（置于解析前，零 IO 快速失败）：与同步版同语义
+    if create_order and not (sk or "").strip():
+        raise BadRequestError(
+            "missing sk header for create mode: login to TMS first",
+            description="缺少 TMS token，请先登录 TMS 获取 token，并以 sk 请求头携带",
+            details={
+                "upstream": {
+                    "code": "400",
+                    "msg": "缺少 TMS token（sk 请求头），请先登录 TMS",
+                    "data": [],
+                },
+            },
+        )
+
+    # 解析 + 归集 + 预判 + 箱型校验（CPU 密集段入线程池，不阻塞事件循环）
+    output = await asyncio.to_thread(_parse_stage, filename, file_bytes)
+
+    # 单次导入行数上限（一柜一行）：preview/create 一致拦截，超限零副作用直接拒绝
+    total_rows = len(output.rows) + len(output.canonical_rows or [])
+    if total_rows > settings.bill_import_max_rows:
+        raise BadRequestError(
+            f"bill has too many rows: {total_rows} > {settings.bill_import_max_rows}",
+            code="too_many_rows",
+            details={
+                "total_rows": total_rows,
+                "max_rows": settings.bill_import_max_rows,
+                "upstream": {
+                    "code": "400",
+                    "msg": "数据量过大，联系人工客服",
+                    "data": [],
+                },
+            },
+        )
+
+    orders, canonical_orders, agg = await asyncio.to_thread(
+        _aggregate_stage, output, create_order, sk
+    )
+
+    bill_period = (
+        f"{output.period.start}~{output.period.end}"
+        if output.period is not None and output.period.start and output.period.end
+        else None
+    )
+
+    # 未决单（去重 + 箱型校验后真正待处理）：费目自举/建档只对可录单执行
+    pending = [o for o in canonical_orders if o.create_result is None]
+
+    fee_reconciliation = None
+    if pending and output.canonical_rows is not None:
+        # 费目自举（create 模式建档网络；preview 零副作用只出 planned）→
+        # 报告注入 _build_fee_reports（同步 CPU 段）
+        from .fee_bootstrap import run_fee_bootstrap_async
+
+        bootstrap_report = await run_fee_bootstrap_async(
+            pending, create_order=create_order, sk=sk
+        )
+        fee_reconciliation = _build_fee_reports(
+            output, pending, create_order=create_order, sk=sk,
+            bootstrap_report=bootstrap_report,
+        )
+
+    # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
+    master_data_report = None
+    if pending:
+        from .master_data import run_master_data_async
+
+        master_data_report = await run_master_data_async(
+            pending, create_order=create_order, sk=sk
+        )
+
+    summary = None
+    upstream = None
+    file_sha256 = _sha256(file_bytes)
+    if create_order:
+        if orders:
+            # 既有语义：双通道下单（异键有界并发，同键串行原子）
+            await create_orders_async(orders, sk, source_sha256=file_sha256)
+        elif canonical_orders:
+            from .client import create_canonical_orders_async
+
+            await create_canonical_orders_async(
+                canonical_orders, sk, source_sha256=file_sha256
+            )
+        pipeline = orders if orders else canonical_orders
+        created = [
+            o for o in pipeline if getattr(o, "create_result", None)
+        ]
+        summary = {
+            "total": len(canonical_orders) or len(orders),
+            "success": sum(1 for o in created if o.create_result.get("success")),
+            "failed": sum(1 for o in created if not o.create_result.get("success")),
+            "skipped": sum(1 for o in created if o.create_result.get("skipped")),
+            "created": sum(
+                1
+                for o in created
+                if o.create_result.get("success") and not o.create_result.get("skipped")
+            ),
+            "success_sns": [
+                o.create_result.get("sn") for o in created if o.create_result.get("success")
+            ],
+            "failed_details": [
+                {
+                    **{
+                        "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
+                        "error_code": (o.create_result.get("error") or {}).get("code"),
+                        "error_message": (o.create_result.get("error") or {}).get("message"),
+                    },
+                    **(
+                        {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
+                        if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
+                        else {}
+                    ),
+                }
+                for o in created
+                if not o.create_result.get("success")
+            ],
+        }
+        upstream_data = [
+            o.create_result.get("upstream")
+            for o in created
+            if o.create_result.get("success") and o.create_result.get("upstream")
+        ]
+        created_ok = any(
+            o.create_result.get("success") and not o.create_result.get("skipped")
+            for o in created
+        )
+        if created and not all(o.create_result.get("skipped") for o in created):
+            upstream = (
+                {"code": "200", "msg": "添加成功", "data": upstream_data}
+                if created_ok
+                else {"code": "204", "msg": "添加失败", "data": []}
+            )
+
+    meta: dict = {
+        "source_sha256": file_sha256,
+        "source_bytes": len(file_bytes),
+        "parsed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "parser": output.engine,
+        "raw_rows": len(output.rows) + len(output.canonical_rows or []),
+        "template": output.template,
+        "unmatched_headers": output.unmatched_headers,
+    }
+    if orders and not output.canonical_rows:
+        meta["reconciliation"] = agg.reconciliation
+    if fee_reconciliation is not None:
+        meta["reconciliation"] = fee_reconciliation
+    if master_data_report is not None:
+        meta["master_data"] = master_data_report
     if output.new_template is not None:
         meta["l3_template"] = output.new_template
 

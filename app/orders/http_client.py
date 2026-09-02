@@ -23,6 +23,7 @@ addBill），调用方无需自行记录请求与响应——每条调用产出�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import threading
@@ -213,6 +214,10 @@ def post_form(
 # 不用 lifespan 管理：现有大量测试 TestClient(app) 不带 context manager，
 # lifespan 不触发会拿到 None；懒加载与 llm.get_client() 模式一致。
 _async_client: httpx.AsyncClient | None = None
+# 创建时绑定的事件循环：AsyncClient 连接池绑定 loop，跨 loop 复用会报
+# SSLWantReadError/RuntimeError（pytest-asyncio 每测试新 loop 的场景）；
+# 生产单 loop 常驻不受影响，检测到 loop 变化时重建实例
+_async_client_loop: asyncio.AbstractEventLoop | None = None
 # 懒加载互斥锁：并发请求首次调用时的双重检查（事件循环单线程下防御
 # 多事件循环/测试并发场景，与 llm.client._state_lock 同风格）
 _async_client_lock = threading.Lock()
@@ -220,11 +225,14 @@ _async_client_lock = threading.Lock()
 
 def get_async_client() -> httpx.AsyncClient:
     """共享 AsyncClient 懒加载单例（连接池复用；测试可直接 monkeypatch 替换）。"""
-    global _async_client
+    global _async_client, _async_client_loop
+    loop = asyncio.get_running_loop()
+    if _async_client is not None and _async_client_loop is not loop:
+        # 跨事件循环（测试多 loop）：旧实例废弃由 GC 回收
+        _async_client = None
     if _async_client is None:
-        with _async_client_lock:
-            if _async_client is None:
-                _async_client = httpx.AsyncClient(timeout=None)
+        _async_client = httpx.AsyncClient(timeout=None)
+        _async_client_loop = loop
     return _async_client
 
 

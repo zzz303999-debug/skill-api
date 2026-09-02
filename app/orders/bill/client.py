@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -28,7 +29,13 @@ from app.config import settings
 from app.logging_conf import get_logger
 
 from ..http_client import post_form, post_form_async, unpack_json
-from .imported_registry import get_imported_registry, lock_for, normalize, owner_key
+from .imported_registry import (
+    alock_for,
+    get_imported_registry,
+    lock_for,
+    normalize,
+    owner_key,
+)
 from .schema import BillOrder
 
 log = get_logger(__name__)
@@ -577,3 +584,123 @@ async def submit_canonical_async(sk: str, order) -> dict[str, Any]:
             details={"error_type": exc.__class__.__name__},
         )
     return _parse_canonical_response(response)
+
+
+# ---- 异步编排：并发下单（同键串行原子、异键有界并行；Phase 3 新增）----
+
+
+def _missing_bl_result() -> dict[str, Any]:
+    """提单号缺失的兑底 create_result（与 service 层预判同结构；防御直接调用
+    create_orders_async 的第二入口，不提交下游）。"""
+    return {
+        "success": False,
+        "skipped": False,
+        "sn": None,
+        "error": {
+            "code": "missing_bl_no",
+            "message": "提单号缺失，未录入",
+            "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
+            "details": {},
+        },
+    }
+
+
+async def _create_one_async(
+    order,
+    *,
+    sk: str,
+    submit,
+    owner: str,
+    source_sha256: str | None,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    """单单异步创建（create_orders_async / create_canonical_orders_async 共用）：
+
+    - service 层预判已标记（skipped/预判）→ 跳过；
+    - 无提单号 → 兑底 missing_bl_no（与 service 层同结构，不提交下游）；
+    - 查重→提交→登记在 per-bl_no asyncio.Lock 内原子化（await 让出时
+      不阻塞异键协程）；有界并发槽限制同时在飞的下单数（不自动重试）。
+    """
+    if order.create_result is not None:
+        return
+    bl = normalize(getattr(order, "order_num1", None) or getattr(order, "bl_no", None))
+    if not bl:
+        order.create_result = _missing_bl_result()
+        return
+    # 一行一票：去重键=提单号+箱号（旧链路取 container_no；canonical 取首个结构化箱号；
+    # 无箱号退化为行序号），与同步版逐项一致
+    if getattr(order, "containers", None):
+        box = next(
+            (c.container_no for c in (order.containers or []) if c.container_no), None
+        )
+    else:
+        box = getattr(order, "container_no", None)
+    async with alock_for(bl, container_no=box, fallback=order.row_seq):
+        rec = get_imported_registry().lookup(
+            bl, owner, container_no=box, fallback=order.row_seq
+        )
+        if rec:
+            order.create_result = _skipped_result(rec.get("sn"))
+            return
+        async with semaphore:
+            order.create_result = await submit(sk, order)
+        if order.create_result.get("success"):
+            # 登记含磁盘原子写（小文件毫秒级）→ to_thread 避免阻塞事件循环；
+            # 仍在键锁内，保持查重→提交→登记原子性
+            await asyncio.to_thread(
+                _register_imported,
+                bl,
+                owner,
+                order.create_result.get("sn"),
+                source_sha256,
+                container_no=box,
+                fallback=order.row_seq,
+            )
+
+
+async def create_orders_async(
+    orders: list[BillOrder], sk: str, source_sha256: str | None = None
+) -> None:
+    """create_orders 的异步版：异键有界并发下单（原同步版逐单串行）。
+
+    语义保持：单失败隔离不中断；任何情况不自动重试；missing_fields 非空
+    照常提交；去重（查重→提交→登记）在 per-bl_no 锁内原子化（first-write-wins）。
+    """
+    if not orders:
+        return
+    owner = owner_key(sk)
+    semaphore = asyncio.Semaphore(settings.bill_create_concurrency)
+    await asyncio.gather(
+        *[
+            _create_one_async(
+                order,
+                sk=sk,
+                submit=lambda sk_, order_: add_work_async(sk_, order_.order_data or {}),
+                owner=owner,
+                source_sha256=source_sha256,
+                semaphore=semaphore,
+            )
+            for order in orders
+        ]
+    )
+
+
+async def create_canonical_orders_async(orders, sk: str, source_sha256: str | None = None) -> None:
+    """create_canonical_orders 的异步版（TMS 通道，语义同 create_orders_async）。"""
+    if not orders:
+        return
+    owner = owner_key(sk)
+    semaphore = asyncio.Semaphore(settings.bill_create_concurrency)
+    await asyncio.gather(
+        *[
+            _create_one_async(
+                order,
+                sk=sk,
+                submit=lambda sk_, order_: submit_canonical_async(sk_, order_),
+                owner=owner,
+                source_sha256=source_sha256,
+                semaphore=semaphore,
+            )
+            for order in orders
+        ]
+    )

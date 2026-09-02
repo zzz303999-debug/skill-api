@@ -99,10 +99,10 @@ class TestRouteCreate:
         assert "error" not in body
 
     def test_create_success(self, auth_bytes, monkeypatch):
-        def fake(_payload, _sk):
+        async def fake(_payload, _sk):
             return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
 
-        monkeypatch.setattr(service_module, "submit_manifest", fake)
+        monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
         r = _post(
             client,
@@ -121,10 +121,10 @@ class TestRouteCreate:
 
     def test_duplicate_upload_returns_200(self, auth_bytes, monkeypatch):
         """v1.9 放开本地去重：同一文件重复上传照常重新创建，不再 409。"""
-        def fake(_payload, _sk):
+        async def fake(_payload, _sk):
             return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
 
-        monkeypatch.setattr(service_module, "submit_manifest", fake)
+        monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
         assert _post(
             client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS
@@ -141,10 +141,10 @@ class TestRouteCreate:
 
     def test_create_all_failed_204_upstream(self, auth_bytes, monkeypatch):
         """下游全拒 → 200 + 外壳 204 + 具体失败原因（非 HTTP 错误）。"""
-        def fake(_payload, _sk):
+        async def fake(_payload, _sk):
             return {"success": False, "sn": None, "error": {"code": "x", "message": "rejected"}}
 
-        monkeypatch.setattr(service_module, "submit_manifest", fake)
+        monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
         r = _post(client, auth_bytes, data={"create_order": "true"}, headers=CREATE_HEADERS)
         assert r.status_code == 200

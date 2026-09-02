@@ -12,7 +12,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-import app.orders.bill.client as client_module
+import app.orders.http_client as http_client_module
 from app.main import app
 from app.orders.bill import imported_registry
 from app.orders.bill.imported_registry import owner_key
@@ -70,7 +70,7 @@ def _patch_downstream(monkeypatch) -> dict:
     """mock 下游：AddWork 计数/记录 sk 并返回递增 sn；建档族返回主键（不计入下单）。"""
     calls: dict = {"addwork": 0, "sks": []}
 
-    def fake_post(url, **kwargs):
+    async def fake_post(url, **kwargs):
         if "/Car/Car" in url:  # 建档族（区别于下单 /Car/WorkOut/AddWork）
             return _archive_post(url)
         calls["addwork"] += 1
@@ -83,7 +83,7 @@ def _patch_downstream(monkeypatch) -> dict:
             }
         )
 
-    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
     return calls
 
 

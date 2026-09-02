@@ -1,7 +1,11 @@
-"""同步业务的有界线程池执行：Skill.run 同步契约的异步桥接。
+"""执行器：Skill.run 同步契约的有界线程池执行 + 路由异步包装（Phase 3 起）。
 
-Skill.run 是同步契约，统一放到有界线程池，避免文件转换和 LLM 请求阻塞事件循环，
-同时限制对 LLM 服务的并发压力；在途任务满时新请求排队，超时返回 503 server_busy。
+Phase 3 路由异步化后职责收缩：
+- _run_skill / _run_in_executor：skill 同步契约继续走有界线程池（并发上限与
+  排队 503 语义不变）；
+- _publish_order / _parse_document_to_order：改为直连异步下游（不再占用线程），
+  经 app.main 接缝供路由调用（测试替身签名兼容，fake 本为 async）；
+- _extract_order_text：纯规则 CPU（毫秒级），直接同步执行。
 """
 
 from __future__ import annotations
@@ -15,11 +19,9 @@ from typing import Any
 from app.config import settings
 from app.core.skill_base import SkillBase
 from app.errors import ServiceBusyError
-from app.orders import (
-    extract_order_text,
-    parse_document_to_order,
-    publish_create_order,
-)
+from app.orders import extract_order_text
+from app.orders.client import publish_create_order_async
+from app.orders.document import parse_document_to_order_async
 
 _skill_executor = ThreadPoolExecutor(
     max_workers=settings.skill_max_concurrency,
@@ -71,20 +73,15 @@ async def _publish_order(
     room_id: str,
     user_id: str,
 ) -> dict[str, Any]:
-    return await _run_in_executor(
-        partial(publish_create_order, order_data, room_id=room_id, user_id=user_id)
-    )
+    """下单直连异步下游（Phase 3 起不再占用线程；错误分类与同步版一致）。"""
+    return await publish_create_order_async(order_data, room_id=room_id, user_id=user_id)
 
 
 async def _extract_order_text(text: str):
-    return await _run_in_executor(partial(extract_order_text, text))
+    """自由文本抽取为纯规则 CPU（毫秒级），直接执行（保持 async 签名供路由 await）。"""
+    return extract_order_text(text)
 
 
 async def _parse_document_to_order(file_bytes: bytes, filename: str):
-    return await _run_in_executor(
-        partial(
-            parse_document_to_order,
-            file_bytes,
-            filename,
-        )
-    )
+    """文档解析直连异步编排（转换段入线程池 + LLM 真异步，见 document.py）。"""
+    return await parse_document_to_order_async(file_bytes, filename)

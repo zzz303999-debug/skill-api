@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
-from app.api.executor import _run_in_executor
 from app.api.uploads import _read_upload
 from app.errors import BadRequestError
-from app.orders.manifest import ManifestImportResponse, build_manifest_result
+from app.orders.manifest import ManifestImportResponse, build_manifest_result_async
 
 router = APIRouter()
 
@@ -60,14 +58,11 @@ async def import_manifest(
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
-    result = await _run_in_executor(
-        partial(
-            build_manifest_result,
-            filename=file.filename or "unnamed",
-            file_bytes=content,
-            create_order=create_order,
-            sk=sk,
-        )
+    result = await build_manifest_result_async(
+        filename=file.filename or "unnamed",
+        file_bytes=content,
+        create_order=create_order,
+        sk=sk,
     )
     # 统一响应外壳（code/msg/data，2026-09-01 适配账单口径）：
     # - create 创建成功 → "200" msg="添加成功"
