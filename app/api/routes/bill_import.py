@@ -104,17 +104,20 @@ async def import_bill(
         if result.summary["created"] > 0:
             code, msg = "200", "添加成功"
         else:
-            # 全部失败：优先取箱型白名单拦截的具体原因（文件级拦截，返回
-            # 「系统没有此箱型：<箱型>，请联系客服」等具体文案，而非笼统「添加失败」）
-            box_msg = next(
+            # 全部失败：按优先级扫描 failed_details 取本地拦截原因作 msg——
+            # 箱型白名单（文件级「系统没有此箱型：<箱型>，请联系客服」）→ 提单号
+            # 缺失（行级「提单号缺失，未录入」，2026-09-03 扩展）→ 兜底「添加失败」
+            # （下游拒绝/网络错误类保持笼统，明细在 failed_details）
+            block_msg = next(
                 (
                     d.get("error_message")
+                    for code in ("unknown_box_type", "missing_bl_no")
                     for d in result.summary["failed_details"]
-                    if d.get("error_code") == "unknown_box_type"
+                    if d.get("error_code") == code
                 ),
                 None,
             )
-            code, msg = "204", box_msg or "添加失败"
+            code, msg = "204", block_msg or "添加失败"
     else:
         code, msg = "200", "请求成功"
         # preview 模式整批箱型被拒（审查修正 2026-08-27）：summary 为 None 走

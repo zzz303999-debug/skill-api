@@ -311,6 +311,111 @@ class TestCreateMode:
         assert body["msg"] == "文件含非法箱型：40GOH，请联系客服"
         assert body["data"]["summary"]["failed"] == 1
 
+    def test_all_missing_bl_no_msg_specific(self, monkeypatch):
+        """整批提单号缺失（missing_bl_no）→ 外层 msg 给出具体原因，而非笼统「添加失败」。
+
+        2026-09-03 扩展：全部失败分支的本地拦截文案从箱型白名单推广到提单号缺失。
+        """
+        import app.main as main_module
+        from app.orders.bill import BillParseResult
+
+        summary = {
+            "total": 2,
+            "success": 0,
+            "failed": 2,
+            "skipped": 0,
+            "created": 0,
+            "success_sns": [],
+            "failed_details": [
+                {
+                    "order_num": None,
+                    "error_code": "missing_bl_no",
+                    "error_message": "提单号缺失，未录入",
+                },
+                {
+                    "order_num": None,
+                    "error_code": "missing_bl_no",
+                    "error_message": "提单号缺失，未录入",
+                },
+            ],
+        }
+
+        async def fake_build_result(**kwargs):
+            return BillParseResult(
+                file=kwargs["filename"],
+                total_rows=2,
+                order_count=2,
+                create_order=True,
+                summary=summary,
+                meta={},
+            )
+
+        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "b.xlsx",
+                b"x",
+                data={"create_order": "true"},
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["code"] == "204"
+        assert body["msg"] == "提单号缺失，未录入"
+        assert body["data"]["summary"]["failed"] == 2
+
+    def test_mixed_block_reasons_box_msg_priority(self, monkeypatch):
+        """混合失败原因（缺提单号 + 箱型拒）→ msg 取箱型文案（文件级拦截优先级更高）。"""
+        import app.main as main_module
+        from app.orders.bill import BillParseResult
+
+        summary = {
+            "total": 2,
+            "success": 0,
+            "failed": 2,
+            "skipped": 0,
+            "created": 0,
+            "success_sns": [],
+            # failed_details 顺序倒置（提单号缺失在前），优先级不应受顺序影响
+            "failed_details": [
+                {
+                    "order_num": None,
+                    "error_code": "missing_bl_no",
+                    "error_message": "提单号缺失，未录入",
+                },
+                {
+                    "order_num": "OOLU40GOH002",
+                    "error_code": "unknown_box_type",
+                    "error_message": "系统没有此箱型：40GOH，请联系客服",
+                },
+            ],
+        }
+
+        async def fake_build_result(**kwargs):
+            return BillParseResult(
+                file=kwargs["filename"],
+                total_rows=2,
+                order_count=2,
+                create_order=True,
+                summary=summary,
+                meta={},
+            )
+
+        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        with TestClient(app) as client:
+            r = upload(
+                client,
+                "b.xlsx",
+                b"x",
+                data={"create_order": "true"},
+                headers={**AUTH_HEADERS, "sk": "sk-1"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["code"] == "204"
+        assert body["msg"] == "系统没有此箱型：40GOH，请联系客服"
+
 
 def test_unknown_box_type_zero_downstream(monkeypatch):
     """箱型不符（40GOH）create 模式 → 零下游副作用：AddWork/建档/费目自举均不调。

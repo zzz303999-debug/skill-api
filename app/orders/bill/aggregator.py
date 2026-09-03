@@ -377,8 +377,9 @@ def _box_entries(rows: list[BillRow]) -> tuple[list[dict], bool]:
 
 
 def _pick_month_day(row: BillRow) -> str | None:
-    """b_date 候选：日期列优先，做箱时间列回退（#12 默认决策，待业务确认）。"""
-    for value in (row.b_date, row.b_date_time):
+    """b_date 候选：做箱时间列优先，日期列回退
+    「日期」列多为结算/对账日，做箱时间须以「做箱时间」列值为准）。"""
+    for value in (row.b_date_time, row.b_date):
         if value and _MONTH_DAY_RE.match(value.strip()):
             return value.strip()
     return None
@@ -495,7 +496,8 @@ def _build_order(group: list[BillRow], period: BillPeriod) -> BillOrder:
     # box：同箱型累加；无箱型原文才视为缺失（不做格式校验）
     box_entries, has_valid_box = _box_entries(ordered)
 
-    # b_date：日期列优先、做箱时间回退，月-日补年份；组内多日期其余并入 c_note
+    # b_date：做箱时间列优先、日期列回退（2026-09-03 用户拍板），月-日补年份；
+    # 组内多日期其余并入 c_note
     md_list: list[str] = []
     for row in ordered:
         md = _pick_month_day(row)
