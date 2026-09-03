@@ -19,11 +19,11 @@ from pathlib import Path
 import pytest
 
 import app.orders.bill.ai_header as ai_header_module
-from app.errors import BadRequestError
+from app.core.errors import BadRequestError
 from app.orders.bill import build_result_async, parse_bill
 from app.orders.bill.template import (
     BUILTIN_TEMPLATE,
-    compute_fingerprint,
+    compute_legacy_fingerprint,
 )
 from helpers import REAL_XLS, build_bill_bytes, build_bill_xls_bytes
 
@@ -96,7 +96,7 @@ class TestBuiltinTemplate:
         from app.orders.bill.template_store import compute_fingerprint as fp_md5
 
         assert fp_md5(list(BUILTIN_HEADERS)) == "e31deea1"
-        assert compute_fingerprint(list(BUILTIN_HEADERS)) == BUILTIN_TEMPLATE.fingerprint
+        assert compute_legacy_fingerprint(list(BUILTIN_HEADERS)) == BUILTIN_TEMPLATE.fingerprint
 
     async def test_real_bill_no_ai_called(self, monkeypatch):
         """金科信真实账单指纹命中 → 直接模板映射，AI 调用次数 0。"""

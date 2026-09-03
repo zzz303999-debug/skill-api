@@ -40,8 +40,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 

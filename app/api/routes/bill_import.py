@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 
 from app.api.uploads import _read_upload
-from app.errors import BadRequestError
+from app.core.errors import BadRequestError
 from app.orders.bill import BillImportResponse
 
 router = APIRouter()
@@ -61,7 +61,9 @@ async def import_bill(
     request.state.file_size = len(content)
     # 编排入口经 app.main 命名空间解析：测试以 setattr(main_module,
     # "build_result", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）；
-    # main 绑定为 build_result_async（真异步编排，fake 测试替身亦为 async）
+    # main 绑定为 build_result_async（真异步编排，fake 测试替身亦为 async）。
+    # 并发模型（2026-09 用户拍板）：preview（CPU 秒级）不设请求闸；create 的
+    # 下游并发由 client 层进程级共享信号量约束（见 bill/client.py）
     from app.main import build_result
 
     result = await build_result(

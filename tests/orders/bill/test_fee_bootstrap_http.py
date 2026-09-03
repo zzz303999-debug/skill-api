@@ -27,7 +27,7 @@ import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem, build_result_async
 from app.orders.bill.fee_bootstrap import build_price_form, run_fee_bootstrap_async
 from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_registry
+from app.orders.bill.fee_registry import get_fee_registry
 from helpers import FakeResponse, build_bill_bytes
 
 pytestmark = pytest.mark.asyncio
@@ -185,7 +185,7 @@ class TestPriceForm:
         assert req["headers"] == {"sk": "sk-token"}
         assert req["data"]["name"] == "待时费" and req["data"]["sn"] == "AUTO_WAITING"
         # registry 登记 + 当批回填（apply_price_map 经 registry 命中）
-        assert get_registry().lookup("waiting")["price_id"] == 90001
+        assert get_fee_registry().lookup("waiting")["price_id"] == 90001
         order = _make_order("waiting")
         apply_price_map(order.fees)
         assert order.fees[0].price_id == 90001 and order.fees[0].tms_name == "待时费"
@@ -197,7 +197,7 @@ class TestPriceForm:
         report = await run_fee_bootstrap_async([_make_order("waiting", "other")], create_order=True, sk="sk-token")
         assert [c["code"] for c in report["created"]] == ["waiting", "other"]
         assert [r["data"]["sn"] for r in fake_http.captured] == ["AUTO_WAITING", "AUTO_OTHER"]
-        assert get_registry().lookup("other")["price_id"] == 90002
+        assert get_fee_registry().lookup("other")["price_id"] == 90002
 
 
 class TestPriceFailures:
@@ -208,7 +208,7 @@ class TestPriceFailures:
         report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["created"] == [] and report["exists_external"] == []
         assert report["failed"] and "HTTP error: 500" in report["failed"][0]["reason"]
-        assert get_registry().lookup("waiting") is None  # 失败不登记 → 下批重试
+        assert get_fee_registry().lookup("waiting") is None  # 失败不登记 → 下批重试
 
     async def test_failure_non_json(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
@@ -228,8 +228,8 @@ class TestPriceFailures:
         assert report["failed"] == []
         ext = report["exists_external"]
         assert ext and ext[0]["code"] == "waiting" and "已存在" in ext[0]["message"]
-        assert get_registry().lookup("waiting") is None
-        assert get_registry().exists_external("waiting") is True
+        assert get_fee_registry().lookup("waiting") is None
+        assert get_fee_registry().exists_external("waiting") is True
         # 下批不再重试（exists_external 终态；无缺失码 → 不产生报告段）
         assert await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token") is None
 
@@ -241,7 +241,7 @@ class TestPriceFailures:
         report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "未返回主键" in report["failed"][0]["reason"]
         assert report["exists_external"] == [] and report["created"] == []
-        assert get_registry().lookup("waiting") is None
+        assert get_fee_registry().lookup("waiting") is None
 
 
 class TestServiceIntegration:

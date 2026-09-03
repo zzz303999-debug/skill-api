@@ -6,9 +6,9 @@ from collections import deque
 
 import pytest
 
-import app.access_log as access_log
-import app.third_party_log as third_party_log
-from app.config import settings
+import app.core.access_log_store as access_log
+import app.core.third_party_log_store as third_party_log
+from app.core.config import settings
 
 
 @pytest.fixture(autouse=True)

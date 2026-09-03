@@ -10,7 +10,7 @@ import io
 import pytest
 from openpyxl import load_workbook
 
-from app.errors import BadRequestError, ConvertError, UnknownManifestFamilyError
+from app.core.errors import BadRequestError, ConvertError, UnknownManifestFamilyError
 from app.orders.manifest import parse_manifest
 
 

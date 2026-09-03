@@ -18,13 +18,13 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from app.api import error_handlers
-from app.api.health import router as health_router
 from app.api.middleware.access_log import _access_log_middleware
 from app.api.middleware.auth import _auth_middleware
 from app.api.middleware.rate_limit import _rate_limit_middleware
 from app.api.routes import bill_import, manifest_import, meta, orders
+from app.api.routes.health import router as health_router
 from app.api.routes.skills import register_skill_routes
-from app.errors import SkillAPIError
+from app.core.errors import SkillAPIError
 
 
 def create_app() -> FastAPI:

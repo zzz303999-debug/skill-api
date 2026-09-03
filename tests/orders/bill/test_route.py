@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 import app.orders.bill.ai_header as ai_header_module
 import app.orders.bill.service as service_module
 import app.orders.http_client as http_client_module
-from app.config import settings
-from app.errors import ERROR_CODE_DESCRIPTIONS
+from app.core.config import settings
+from app.core.errors import ERROR_CODE_DESCRIPTIONS
 from app.main import app
 from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
 
@@ -409,7 +409,7 @@ def test_error_envelope_rate_limited_429(monkeypatch):
 def test_error_envelope_server_busy_503(monkeypatch):
     """服务繁忙 503 → 统一外壳 code/msg/data（v2.2 起）。"""
     import app.main as main_module
-    from app.errors import ServiceBusyError
+    from app.core.errors import ServiceBusyError
 
     async def fake_build_result(**kwargs):
         raise ServiceBusyError("concurrent tasks full, queue timeout")
@@ -693,7 +693,7 @@ class TestAuth:
         不可达零测试，此处清空豁免验证分支行为（对外开放部署移出豁免时生效）。
         """
         import app.main as main_module
-        from app.errors import ERROR_CODE_DESCRIPTIONS
+        from app.core.errors import ERROR_CODE_DESCRIPTIONS
 
         monkeypatch.setattr(settings, "api_key", "test-secret-key")
         monkeypatch.setattr(main_module, "_AUTH_FREE_PATHS", frozenset())

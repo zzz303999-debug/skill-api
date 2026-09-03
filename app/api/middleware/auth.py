@@ -10,8 +10,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from app.api.response_shell import _unified_error_body, _use_unified_response
-from app.config import settings
-from app.errors import ERROR_CODE_DESCRIPTIONS
+from app.core.config import settings
+from app.core.errors import ERROR_CODE_DESCRIPTIONS
 
 
 async def _auth_middleware(request: Request, call_next: Callable) -> Any:

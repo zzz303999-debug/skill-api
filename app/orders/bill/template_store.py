@@ -1,5 +1,12 @@
 """模板库：YAML 模板加载 + 三级识别（L1 指纹精确 / L2 族级近似 / 未命中触发 L3）。
 
+层级关系（2026-09 命名统一）：本模块是**现役** YAML 模板库
++ 三级识别（L1/L2/L3）；template.py 是旧版单模板持久化（内置模板 +
+历史固化 JSON），仅作为本库未命中时的回退读取——两套指纹算法
+（本模块 md5-8 / template.py sha1-16 经 compute_legacy_fingerprint）
+分别对应各自库键，**不可互相替代**。
+
+
 指纹算法（《模板配置初稿》约定）：md5(表头行非空单元格去空白后以 '¶' 连接)[:8]。
 - L1：扫描前 MAX_HEADER_SCAN_ROWS 行，某行指纹 ∈ 模板 match.fingerprints → 精确命中，
   该行即表头行（列名行；two_row 家族的上方区块行不参与指纹）；
@@ -22,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from app.logging_conf import get_logger
+from app.core.logging_conf import get_logger
 
 from .template import load_template
 

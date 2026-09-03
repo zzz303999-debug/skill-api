@@ -28,7 +28,7 @@ import app.orders.http_client as http_client_module
 from app.orders.bill import build_result_async, group_canonical, parse_bill
 from app.orders.bill.fee_bootstrap import run_fee_bootstrap_async
 from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_registry
+from app.orders.bill.fee_registry import get_fee_registry
 from app.orders.bill.master_data import collect_candidates
 from app.orders.bill.payload import build_order_payload
 from helpers import FakeResponse, inject_price_map
@@ -234,7 +234,7 @@ class TestFieldMapping:
         # 注入 waiting/other 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
         # 预登记待建费目（模拟自举成功后），保证四通道全部可发射
         inject_price_map(monkeypatch, {"waiting": None, "other": None})
-        reg = get_registry()
+        reg = get_fee_registry()
         reg.register("waiting", 90001, "待时费")
         reg.register("other", 90002, "其它费")
         _, orders = parse_mixed(mixed_bill, tmp_path)
@@ -269,7 +269,7 @@ class TestFieldMapping:
 
     async def test_fee_defaults_and_price_type(self, mixed_bill, tmp_path):
         """费目条目六属性键：price_type/is_profit/dai_dian 取模板 fee_defaults。"""
-        reg = get_registry()
+        reg = get_fee_registry()
         reg.register("waiting", 90001, "待时费")
         reg.register("other", 90002, "其它费")
         _, orders = parse_mixed(mixed_bill, tmp_path)
@@ -566,9 +566,9 @@ class TestE2EMock:
         assert driver_form["truck_id"] == "t1"
 
         # 同一文件二次上传：全 skipped（下游 0 次新增调用、无重复建档）
-        from app.orders.bill.master_data_store import get_store
+        from app.orders.bill.master_data_store import get_master_data_store
 
-        counts_after_first = dict(get_store().snapshot())
+        counts_after_first = dict(get_master_data_store().snapshot())
         second = await build_result_async(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert second.summary == {
             "total": 2,
@@ -581,4 +581,4 @@ class TestE2EMock:
         }
         assert state["addwork"] == 2  # 不重复下单
         assert len(state["archives"]) == 6  # 不重复建档（自举/基础档案均零新增）
-        assert get_store().snapshot() == counts_after_first  # 计数不被重导推高
+        assert get_master_data_store().snapshot() == counts_after_first  # 计数不被重导推高

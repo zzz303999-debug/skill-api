@@ -6,7 +6,7 @@ import hashlib
 
 import pytest
 
-from app.errors import BadRequestError, ConvertError
+from app.core.errors import BadRequestError, ConvertError
 from app.orders.bill import BillPeriod, ParseOutput, parse_bill
 from helpers import (
     REAL_RAW_ROWS,

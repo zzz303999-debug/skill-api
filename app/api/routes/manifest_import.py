@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
 from app.api.uploads import _read_upload
-from app.errors import BadRequestError
+from app.core.errors import BadRequestError
 from app.orders.manifest import ManifestImportResponse, build_manifest_result_async
 
 router = APIRouter()

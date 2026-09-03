@@ -10,7 +10,7 @@
 | 项目名 | `skill-api` |
 | 代码仓库 | `https://github.com/zzz303999-debug/skill-api.git` |
 | 部署分支 | `dev`（**手动部署**，无 CI 自动部署） |
-| 语言/运行时 | Python 3.11（镜像内自带） |
+| 语言/运行时 | Python 3.12（镜像内自带） |
 | 服务类型 | HTTP API（内网/受控访问） |
 | 服务端口 | `9000` |
 | 健康检查 | `GET /healthz` |
@@ -50,7 +50,7 @@
   - `skill-api`：CPU 1c / 内存 1Gi 起步。抽取任务本身不吃 CPU（等 LLM 网关返回），主要是内存要存 references 和上传文件
   - MinerU（CPU 模式）：8c / 16Gi 内存 / 30Gi 可用磁盘起步，按真实文档压测调整；模型在首次镜像构建时下载
 - 出站网络：放通到 LLM API、MinerU（同机容器无需）、订单接口（仅 `/orders` 时）
-- 若启用 MinerU 且服务器使用 NVIDIA GPU：需按实际 CUDA 镜像要求替换 `mineru/Dockerfile` 并安装 NVIDIA Container Toolkit；只要镜像仍提供 `mineru-api --host 0.0.0.0 --port 8888`，API 无需修改
+- 若启用 MinerU 且服务器使用 NVIDIA GPU：需按实际 CUDA 镜像要求替换 `deploy/mineru/Dockerfile` 并安装 NVIDIA Container Toolkit；只要镜像仍提供 `mineru-api --host 0.0.0.0 --port 8888`，API 无需修改
 
 ## 4. 首次部署
 
@@ -72,7 +72,7 @@ chmod 600 .env
   （`RATE_LIMIT_ENABLED=true`），可通过 `RATE_LIMIT_HEAVY_MAX_REQUESTS` 等阈值调宽避免误伤
 - 启用 `API_KEY` 后，除 `/healthz`、`/docs` 等豁免路径外，所有接口（含 `/orders`、`/skills/*`、`/api/logs`）
   必须携带 `Authorization: Bearer <API_KEY>` 或 `X-API-Key: <API_KEY>`；
-  日志页面 `/logs` 首次访问会提示输入 API Key 并保存在浏览器本地
+  `/api/logs` 日志数据接口含 PII，必须带凭证访问
 - 完整变量清单见第 5 节；不用的功能（订单接口/MinerU）可保留默认值
 - **`APP_ENV` 必须按环境设置（2026-08-31 事故教训）**：决定加载
   `config/fee_price_map.{env}.yaml` 与 `config/master_data.{env}.yaml`，默认 `test`；
@@ -92,7 +92,7 @@ chmod 600 .env
 # 私有 GHCR 包需先用只读 Packages Token 登录
 echo "$GHCR_READONLY_TOKEN" | docker login ghcr.io -u <用户名> --password-stdin
 
-cd <仓库检出目录>   # 需包含 docker-compose.deploy.yml 与 mineru/Dockerfile
+cd <仓库检出目录>   # 需包含 docker-compose.deploy.yml 与 deploy/mineru/Dockerfile
 export SKILL_API_IMAGE=ghcr.io/zzz303999-debug/skill-api:v0.1.0
 
 docker compose -f docker-compose.deploy.yml config --quiet
@@ -127,12 +127,12 @@ chmod +x scripts/deploy.sh
 
 ### 4.4 方式 C：uv + systemd（非 Docker，备选）
 
-服务器安装 Python 3.11、uv、LibreOffice、`fonts-noto-cjk` 和 `curl`：
+服务器安装 Python 3.12、uv、LibreOffice、`fonts-noto-cjk` 和 `curl`：
 
 ```bash
 sudo useradd --system --home-dir /opt/skill-api --shell /usr/sbin/nologin skill-api
 cd /opt/skill-api
-uv sync --frozen --no-dev --python 3.11
+uv sync --frozen --no-dev --python 3.12
 cp .env.example .env
 # 编辑 .env，填入生产地址和 Secret
 sudo install -d -o skill-api -g skill-api /opt/skill-api/storage
@@ -345,7 +345,7 @@ HTTP 200 且 `status=ok` 表示进程可响应。`dependencies` 反映核心依�
 
 - Docker 镜像自带 HEALTHCHECK，K8s liveness/readiness probe 也用它
 - 建议从另一台机器或云拨测每分钟请求 `/healthz`，连续失败发告警（企业微信等）
-- 请求日志：按天写入 `storage/logs/requests-YYYY-MM-DD.jsonl`（服务重启仍可查近期历史，过期文件按日志时间自动清理），浏览器访问 `http://<host>:9000/logs` 查看，接口为 `GET /api/logs`
+- 请求日志：按天写入 `storage/logs/requests-YYYY-MM-DD.jsonl`（服务重启仍可查近期历史，过期文件按日志时间自动清理），查询接口为 `GET /api/logs`
 
 ## 11. 接口调用示例（含鉴权）
 
@@ -396,7 +396,7 @@ curl -X GET "http://127.0.0.1:9000/api/logs?limit=50" \
 
 ### 豁免路径（无需凭证）
 
-`/healthz`、`/skills`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico` 及 `/logs` 页面本身。
+`/healthz`、`/skills`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico` 。
 `/api/logs`（日志数据接口，含 PII）**不在豁免内**，必须带凭证。
 
 ### Postman / Apifox 配置

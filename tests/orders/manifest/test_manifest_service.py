@@ -36,9 +36,9 @@ class TestPreview:
         assert result.summary is None
         assert result.upstream is None
         assert result.orders[0].create_result is None
-        from app.orders.manifest import registry
+        from app.orders.manifest import imported_registry
 
-        assert registry.get_manifest_registry().snapshot() == {}
+        assert imported_registry.get_manifest_registry().snapshot() == {}
 
     async def test_unit_price_defaults_to_zero(self, auth_bytes):
         """每箱运价恒 0（模版无运价字段）；不登记 unit_price 缺失。"""
@@ -121,9 +121,9 @@ class TestCreate:
         result = await build_manifest_result_async("a.xlsx", auth_bytes, create_order=True, sk="tk")
         assert result.orders[0].create_result["success"] is False
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
-        from app.orders.manifest import registry
+        from app.orders.manifest import imported_registry
 
-        assert registry.get_manifest_registry().snapshot() == {}
+        assert imported_registry.get_manifest_registry().snapshot() == {}
 
 class TestBoxWhitelist:
     """箱型白名单文件级拒绝（复用账单配置；preview 亦拒绝）。"""
@@ -189,9 +189,9 @@ class TestBoxMissing:
         assert order.create_result["error"]["code"] == "manifest_box_missing"
         assert result.summary["failed"] == 1
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
-        from app.orders.manifest import registry
+        from app.orders.manifest import imported_registry
 
-        assert registry.get_manifest_registry().snapshot() == {}
+        assert imported_registry.get_manifest_registry().snapshot() == {}
 
     async def test_si_variant1_no_box_source_rejected(self, si_bytes):
         """SI 变体 1（无底部汇总/明细无箱型列，天然无箱型）→ 同样文件级拒绝。"""

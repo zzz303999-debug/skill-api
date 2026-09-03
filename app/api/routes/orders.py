@@ -6,10 +6,11 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Request, UploadFile
 
-from app.api.executor import _extract_order_text
+from app.api.bridges import _extract_order_text
 from app.api.uploads import _read_upload
-from app.config import settings
-from app.errors import BadRequestError
+from app.core.config import settings
+from app.core.errors import BadRequestError
+from app.core.executor import _inflight_guard
 from app.orders import (
     CreateOrderFromTextRequest,
     CreateOrderFromTextResponse,
@@ -82,6 +83,9 @@ async def parse_order_document(
     request.state.file_size = len(content)
     # 解析经 app.main 命名空间解析：测试以 setattr(main_module,
     # "_parse_document_to_order", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）
+    # LLM 长任务闸（2026-09 用户拍板）：文档解析含 LLM 调用（180s 级），与 skill
+    # 共享进程级在途上限（skill_max_concurrency），防并发打满 LLM 网关
     from app.main import _parse_document_to_order
 
-    return await _parse_document_to_order(content, file.filename or "unnamed")
+    async with _inflight_guard():
+        return await _parse_document_to_order(content, file.filename or "unnamed")

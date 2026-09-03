@@ -1,4 +1,4 @@
-"""OpenAI-compatible LLM client.
+"""LLM 外部适配器：OpenAI 兼容（OpenAI-compatible）网关客户端。
 
 所有 skill 通过 `chat()` 统一调用，禁止绕过。
 
@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import threading
@@ -24,9 +25,9 @@ from openai import (
     OpenAI,
 )
 
-from app.config import settings
-from app.errors import LLMError, ParseError
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.errors import LLMError, ParseError
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
@@ -305,20 +306,28 @@ def chat_json(
 # ---- 异步版本（与同步版逻辑逐项对齐；Phase 2 异步化改造新增）----
 
 _async_client: AsyncOpenAI | None = None
+# 创建时绑定的事件循环：AsyncOpenAI 连接池绑定 loop，跨 loop 复用会报
+# SSLWantReadError/RuntimeError（pytest-asyncio 每测试新 loop 的场景）；
+# 生产单 loop 常驻不受影响，检测到 loop 变化时重建实例（与 http_client 同模式）
+_async_client_loop: asyncio.AbstractEventLoop | None = None
 
 
 def get_async_client() -> AsyncOpenAI:
     """AsyncOpenAI 懒加载单例（参数与同步版一致；探测缓存两版共享）。"""
-    global _async_client
-    if _async_client is None:
-        with _state_lock:
-            if _async_client is None:
-                _async_client = AsyncOpenAI(
-                    base_url=settings.llm_base_url,
-                    api_key=settings.llm_api_key,
-                    timeout=settings.llm_timeout_seconds,
-                    max_retries=settings.llm_max_retries,
-                )
+    global _async_client, _async_client_loop
+    loop = asyncio.get_running_loop()
+    with _state_lock:
+        if _async_client is not None and _async_client_loop is not loop:
+            # 跨事件循环（测试多 loop）：旧实例废弃由 GC 回收，在目标 loop 重建
+            _async_client = None
+        if _async_client is None:
+            _async_client = AsyncOpenAI(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+                timeout=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+            )
+            _async_client_loop = loop
     return _async_client
 
 

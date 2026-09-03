@@ -27,10 +27,10 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.errors import BadRequestError, ConvertError, LLMError, ParseError
+from app.core.errors import BadRequestError, ConvertError, LLMError, ParseError
 
 from . import template_store
-from .fee_map import canonicalize_fee, is_new_fee_schema
+from .fee_name_map import canonicalize_fee, is_new_fee_schema
 from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
 from .schema import (
     HEADER_ALIASES,
@@ -41,7 +41,7 @@ from .schema import (
     BillPeriod,
     BillRow,
 )
-from .template import compute_fingerprint, load_template
+from .template import compute_legacy_fingerprint, load_template
 
 # 表头行最大扫描行数（抬头区通常 1~5 行）
 MAX_HEADER_SCAN_ROWS = 15
@@ -864,7 +864,7 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
             _normalize_header(_header_text(view.merged_cell(row, col)))
             for col in range(1, view.ncols + 1)
         ]
-        template = load_template(compute_fingerprint(headers))
+        template = load_template(compute_legacy_fingerprint(headers))
         if template is None:
             continue
         rows, unmatched = read_data_rows(

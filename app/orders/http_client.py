@@ -28,14 +28,13 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import threading
 import time
 from typing import Any
 
 import httpx
 
-from app.logging_conf import get_logger
-from app.third_party_log import record as record_third_party
+from app.core.logging_conf import get_logger
+from app.core.third_party_log_store import record as record_third_party
 
 log = get_logger(__name__)
 
@@ -129,11 +128,6 @@ _async_client: httpx.AsyncClient | None = None
 # SSLWantReadError/RuntimeError（pytest-asyncio 每测试新 loop 的场景）；
 # 生产单 loop 常驻不受影响，检测到 loop 变化时重建实例
 _async_client_loop: asyncio.AbstractEventLoop | None = None
-# 懒加载互斥锁：并发请求首次调用时的双重检查（事件循环单线程下防御
-# 多事件循环/测试并发场景，与 llm.client._state_lock 同风格）
-_async_client_lock = threading.Lock()
-
-
 def get_async_client() -> httpx.AsyncClient:
     """共享 AsyncClient 懒加载单例（连接池复用；测试可直接 monkeypatch 替换）。"""
     global _async_client, _async_client_loop

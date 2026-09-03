@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-tuoshu-extractor: 任意格式 → Markdown（无损转换）
+tuoshu-extractor：任意格式 → Markdown（无损转换）。
 
-职责单一：xlsx/xls/docx/doc/pdf → stdout markdown。
-不做任何语义抽取、不做归一化、不做 OCR。
+库定位：tuoshu skill 转换链核心，convert_service 经
+``from . import converter`` 调用，承担 xlsx/xls/docx/doc/pdf 的全部
+格式转换。职责单一：格式转换；不做语义抽取、不做归一化、不做 OCR。
 图片和扫描 PDF 输出 SCAN_OR_IMAGE_HINT: <path>，由上层转为 vision 输入。
 
-用法:
-    python3 scripts/to_text.py <file>
+CLI（运维手动转换，兼容保留）:
+    python3 -m app.skills.tuoshu.converter <file>
 """
 
 from __future__ import annotations

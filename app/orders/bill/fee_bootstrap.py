@@ -19,11 +19,11 @@ from typing import Any
 
 import yaml
 
-from app.logging_conf import get_logger
+from app.core.logging_conf import get_logger
 
 from . import fee_price_map as _fee_price_map
 from .fee_price_map import load_price_map, resolve_price_id
-from .fee_registry import get_registry
+from .fee_registry import get_fee_registry
 
 log = get_logger(__name__)
 
@@ -115,7 +115,7 @@ def _collect_missing(orders) -> list[tuple[str, str]]:
     保持出现顺序。
     """
     price_map = load_price_map()
-    registry = get_registry()
+    registry = get_fee_registry()
     seen: set[str] = set()
     missing: list[tuple[str, str]] = []
     for order in orders:
@@ -215,7 +215,7 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
         outcome = (results.get(KIND_PRICE) or {}).get(code) or {}
         if outcome.get("success"):
             price_id = int(outcome["archive_id"])
-            get_registry().register(code, price_id, tms_name)
+            get_fee_registry().register(code, price_id, tms_name)
             log.info(
                 "fee_bootstrap_created",
                 extra={"code": code, "price_id": price_id},
@@ -226,7 +226,7 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
         elif outcome.get("duplicate"):
             # T27b：费目在 TMS 价格表已存在（204 已存在拒单）→ 登记 exists_external
             # 不再重试自举；price_id 无（无查询接口），费用继续降级不录入仅对账
-            get_registry().mark_exists_external(code, tms_name)
+            get_fee_registry().mark_exists_external(code, tms_name)
             log.info(
                 "fee_bootstrap_exists_external",
                 extra={"code": code, "message": (outcome.get("error") or {}).get("message")},

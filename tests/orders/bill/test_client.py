@@ -803,3 +803,47 @@ class TestCreateCanonicalOrdersDedup:
         assert order.create_result["error"]["code"] == "missing_bl_no"
         assert calls["submit"] == 0
         assert client_module.get_imported_registry().snapshot() == {}
+
+
+class TestProcessSharedCreateSlots:
+    """进程级共享下游槽（2026-09 用户拍板）：修复"每请求新建 Semaphore 致 N×C 放大"。
+
+    两批并发 create（各 4 单、互异提单号）共享 _create_downstream_slots（4 槽）：
+    同时进入下游 fake_post 的任务峰值 ≤ bill_create_concurrency，而非 8 路全放。
+    """
+
+    async def test_two_batches_cap_global_inflight(self, urls, monkeypatch):
+        state = {"inflight": 0, "peak": 0, "entered": 0}
+        blocker = asyncio.Event()  # 进入 fake_post 的任务挂起，放大观察窗口
+        fifth = asyncio.Event()  # 第 5 个并发进入 → 说明槽未生效（应永不 set）
+
+        async def fake_post(url, **kwargs):
+            state["inflight"] += 1
+            state["entered"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+            if state["inflight"] > 4:
+                fifth.set()  # 超过共享槽上限，标记失败条件
+            await blocker.wait()
+            state["inflight"] -= 1
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "S1"}]})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+
+        def batch(prefix: str):
+            return [make_order({"order_num1": f"{prefix}{i}", "c_title": "客户A"}) for i in range(4)]
+
+        async def one(orders):
+            await client_module.create_orders_async(orders, "sk")
+
+        async def main():
+            tasks = [one(batch("BL1-")), one(batch("BL2-"))]
+            await asyncio.gather(*tasks)
+
+        with pytest.raises(TimeoutError):
+            # 观察窗口（带超时自旋）：若共享槽未生效，第 5 个任务会并发进入并 set fifth
+            await asyncio.wait_for(fifth.wait(), timeout=0.5)
+        assert state["entered"] <= 4, f"下游并发突破共享槽：entered={state['entered']}"
+        assert state["peak"] <= 4, f"在飞峰值超过 bill_create_concurrency：peak={state['peak']}"
+        blocker.set()  # 放行全部，完成批次
+        await asyncio.wait_for(main(), timeout=10)
+        assert state["entered"] == 8  # 全部 8 单最终都提交（未丢单）

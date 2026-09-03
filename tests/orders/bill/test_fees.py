@@ -26,7 +26,7 @@ from app.orders.bill import (
     parse_bill,
     template_store,
 )
-from app.orders.bill.fee_map import canonicalize_fee, reload_fee_alias_dictionary
+from app.orders.bill.fee_name_map import canonicalize_fee, reload_fee_alias_dictionary
 from app.orders.bill.fee_price_map import apply_price_map, reload_price_map
 from app.orders.bill.payload import build_order_payload
 from helpers import inject_price_map

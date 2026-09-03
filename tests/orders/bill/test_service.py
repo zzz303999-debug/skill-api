@@ -7,7 +7,7 @@ import hashlib
 import pytest
 
 import app.orders.http_client as http_client_module
-from app.errors import BadRequestError, ConvertError
+from app.core.errors import BadRequestError, ConvertError
 from app.orders.bill import BillParseResult, build_result_async
 from helpers import (
     REAL_ORDER_COUNT,
@@ -401,8 +401,8 @@ class TestCreateMode:
         from types import SimpleNamespace
 
         import app.orders.bill.service as service_module
-        from app.config import settings
-        from app.errors import BadRequestError
+        from app.core.config import settings
+        from app.core.errors import BadRequestError
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
         monkeypatch.setattr(
@@ -474,7 +474,7 @@ class TestCreateMode:
         calls = {"addwork": 0}
         self._fake_ok_chain(monkeypatch, calls)
         file_bytes = self._junyu_file()
-        store = master_data_store.get_store()
+        store = master_data_store.get_master_data_store()
         await build_result_async(filename="junyu.xlsx", file_bytes=file_bytes, create_order=True, sk="sk")
         after_first = dict(store.snapshot())
         assert after_first  # 第一次导入产生计数

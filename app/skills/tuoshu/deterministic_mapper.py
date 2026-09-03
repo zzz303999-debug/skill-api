@@ -1,4 +1,4 @@
-"""Exact template fingerprints and deterministic field mapping."""
+"""确定性映射：精确模板指纹 + 模板命中时的字段确定性取值。"""
 
 from __future__ import annotations
 

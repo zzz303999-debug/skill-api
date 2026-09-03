@@ -21,11 +21,11 @@ def _isolate_manifest_registry(tmp_path):
     防止 create 用例（service/路由编排）写入真实 storage/imported_manifests.json
     并在用例间泄漏登记结果（去重命中会掩盖重导/并发断言）。
     """
-    from app.orders.manifest import registry
+    from app.orders.manifest import imported_registry
 
-    registry.reload_registry(tmp_path / "imported_manifests.json")
+    imported_registry.reload_registry(tmp_path / "imported_manifests.json")
     yield
-    registry.reload_registry(tmp_path / "imported_manifests.json")
+    imported_registry.reload_registry(tmp_path / "imported_manifests.json")
 
 
 @pytest.fixture()

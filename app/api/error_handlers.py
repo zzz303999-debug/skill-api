@@ -8,8 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.response_shell import _unified_error_body, _use_unified_response
-from app.errors import ERROR_CODE_DESCRIPTIONS, SkillAPIError
-from app.logging_conf import get_logger
+from app.core.errors import ERROR_CODE_DESCRIPTIONS, SkillAPIError
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 

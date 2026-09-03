@@ -31,7 +31,7 @@ from app.orders.bill.master_data import (
     run_master_data_async,
     sn_for,
 )
-from app.orders.bill.master_data_store import MasterDataStore, get_store
+from app.orders.bill.master_data_store import MasterDataStore, get_master_data_store
 from app.orders.bill.payload import build_order_payload
 
 pytestmark = pytest.mark.asyncio
@@ -179,7 +179,7 @@ class TestThreshold:
         for _ in range(4):
             report = await run_master_data_async([_make_order()], create_order=True)
         assert report["archived"] == [] and report["failed"] == []
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 4
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 4
         assert fake_create.calls == []  # 未达阈值不建档
 
         report = await run_master_data_async([_make_order()], create_order=True)
@@ -191,7 +191,7 @@ class TestThreshold:
             KIND_TRUCK,
             KIND_DRIVER,
         ]
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 5
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 5
         client_calls = [c for c in fake_create.calls if KIND_CLIENT in c]
         assert len(client_calls) == 1
         assert client_calls[0][KIND_CLIENT][client_key("锦煦")]["client_name"] == "锦煦"
@@ -235,7 +235,7 @@ class TestBatchDedupe:
         fake_create()
         orders = [_make_order() for _ in range(5)]
         report = await run_master_data_async(orders, create_order=True)
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 5
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 5
         # 每档案类同批建档只发一次（依赖序：client/factory 各一次；
         # truck 在司机链内嵌调用一次，driver 收尾一次）
         for kind in (KIND_CLIENT, KIND_FACTORY, KIND_TRUCK, KIND_DRIVER):
@@ -254,7 +254,7 @@ class TestBatchDedupe:
         # 第 3 单触发建档，后续 3 单直接取用登记结果（调用仍只一次）
         client_calls = [c for c in fake_create.calls if KIND_CLIENT in c]
         assert len(client_calls) == 1
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 6
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 6
         assert orders[5]._archive_refs[KIND_CLIENT]["archive_id"] == "aid-client-0"
 
 
@@ -272,7 +272,7 @@ class TestDependencyOrder:
         report = await run_master_data_async(orders, create_order=True)
         failed = [f for f in report["failed"] if f["kind"] == KIND_FACTORY]
         assert failed and "所属客户未建档" in failed[0]["reason"]
-        assert get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东"))["count"] == 3
+        assert get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东"))["count"] == 3
         assert fake_create.calls == []  # 客户未建档 → 未触发任何建档调用
 
     async def test_factory_archives_after_client_with_client_id(self, fake_create):
@@ -292,8 +292,8 @@ class TestDependencyOrder:
         report = await run_master_data_async([_make_order()], create_order=True)
         assert any(f["kind"] == KIND_FACTORY for f in report["failed"])
         assert any(f["kind"] == KIND_CLIENT for f in report["failed"])
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
-        assert get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))["count"] == 1
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
+        assert get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))["count"] == 1
 
 
 class TestDriverArchived:
@@ -322,7 +322,7 @@ class TestDriverArchived:
         assert "bailor_title" not in driver_form
         assert "bailor_id" not in driver_form
         # 落库 + 订单标注已建档（不再标未建档）
-        rec = get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))
+        rec = get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))
         assert rec and rec["archive_id"] == "aid-driver-0"
         assert order._archive_refs[KIND_DRIVER]["archive_id"] == "aid-driver-0"
         assert "司机「王师傅/沪A12345」未建档" not in (order.unmapped_note or "")
@@ -337,7 +337,7 @@ class TestDriverArchived:
         assert driver_failed and "无车牌" in driver_failed[0]["reason"]
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
         assert not any(KIND_TRUCK in c for c in fake_create.calls)
-        rec = get_store().get(KIND_DRIVER, driver_key("王师傅", None))
+        rec = get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", None))
         assert rec and rec["count"] == 1 and rec["skip_archive"] is True
         assert "司机「王师傅」未建档(1/1)" in (order.unmapped_note or "")
         # 下批不再重试（skip_archive 终态）
@@ -355,7 +355,7 @@ class TestDriverArchived:
         assert driver_failed and "无手机号" in driver_failed[0]["reason"]
         assert not any(KIND_DRIVER in c for c in fake_create.calls)
         assert not any(KIND_TRUCK in c for c in fake_create.calls)
-        rec = get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))
+        rec = get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))
         assert rec and rec["skip_archive"] is True
         assert "司机「王师傅/沪A12345」未建档(1/1)" in (order.unmapped_note or "")
         # 下批不再重试
@@ -370,8 +370,8 @@ class TestDriverArchived:
             await run_master_data_async([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
         driver_calls = [c for c in fake_create.calls if KIND_DRIVER in c]
         assert len(driver_calls) == 1
-        assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 3
-        assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
+        assert get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 3
+        assert get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
 
     async def test_driver_failed_keeps_counts_and_retries(self, fake_create):
         """司机建档失败 → 计数保留、订单标注未建档、下批重试（与全失败语义一致）。"""
@@ -383,7 +383,7 @@ class TestDriverArchived:
         # 下批重试
         fake_create(_default_cfg(threshold=1))
         await run_master_data_async([_make_order(driver="王师傅", plate="沪A12345")], create_order=True)
-        assert get_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
+        assert get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["archive_id"] == "aid-driver-0"
 
 
 class TestFailureNonBlocking:
@@ -401,7 +401,7 @@ class TestFailureNonBlocking:
         # 订单标注「未建档(x/N)」（不阻塞语义可见；threshold 为注入值 1）
         assert "未建档(1/1)" in (order.unmapped_note or "")
         # 计数保留 → 下批继续累计
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
 
     async def test_retry_next_batch(self, fake_create):
         """建档失败 → 下批再试（每批最多一次）。"""
@@ -465,7 +465,7 @@ class TestDegradedEndpoints:
             "bailor",
         }
         # 计数照常（端点 TODO 不影响计数）
-        assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
         assert endpoint_for(KIND_CLIENT) is None
 
 
@@ -630,7 +630,7 @@ class TestDuplicateExternal:
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_FACTORY]
         assert ext and "未返回主键" in ext[0]["message"]
         assert report["failed"] == []  # no_id 不记 failed
-        rec = get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))
+        rec = get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))
         assert rec and rec.get("exists_external") is True and rec.get("archive_id") is None
         # 第二批：全终态（client/driver/truck 已建档、factory exists_external）→ 零新增调用
         calls_before = len(calls)
@@ -654,7 +654,7 @@ class TestPreviewReadOnly:
         report = await run_master_data_async([_make_order()], create_order=False)
         assert report["mode"] == "preview"
         assert report["candidates"] == {KIND_CLIENT: 1, KIND_FACTORY: 1, KIND_DRIVER: 1}
-        assert get_store().snapshot() == {}  # 零写入
+        assert get_master_data_store().snapshot() == {}  # 零写入
         assert fake_create.calls == []  # 零建档调用
 
     async def test_preview_shows_current_pending(self, fake_create):
@@ -671,7 +671,7 @@ class TestDisabled:
     async def test_disabled_returns_none(self, md_config):
         md_config({"enabled": False, "threshold": 5, "endpoints": {}})
         assert await run_master_data_async([_make_order()], create_order=True) is None
-        assert get_store().snapshot() == {}
+        assert get_master_data_store().snapshot() == {}
 
 
 class TestCandidates:

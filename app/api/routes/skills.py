@@ -8,18 +8,18 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Request, UploadFile
 from pydantic import BaseModel, Field, create_model
 
-from app.api.executor import _run_skill
 from app.api.response_shell import _UNIFIED_RESPONSE_PATHS, _use_unified_response
 from app.api.uploads import _read_upload
-from app.config import settings
-from app.core import registry
-from app.core.skill_base import SkillBase
-from app.errors import (
+from app.core import skill_registry
+from app.core.config import settings
+from app.core.errors import (
     ERROR_CODE_DESCRIPTIONS,
     BadRequestError,
     SkillAPIError,
 )
-from app.logging_conf import get_logger
+from app.core.executor import _run_skill
+from app.core.logging_conf import get_logger
+from app.core.skill_base import SkillBase
 
 log = get_logger(__name__)
 
@@ -175,8 +175,8 @@ def _make_batch_extract_route(skill: SkillBase):
 
 def register_skill_routes(app: FastAPI) -> None:
     """为全部已注册 skill 挂载 extract / batch-extract 路由（create_app 时调用）。"""
-    registry.discover()
-    for skill in registry.all_skills():
+    skill_registry.discover()
+    for skill in skill_registry.all_skills():
         handler = _make_extract_route(skill)
         response_model = _typed_response_model(skill)
         app.add_api_route(

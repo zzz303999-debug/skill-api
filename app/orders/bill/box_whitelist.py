@@ -19,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from app.logging_conf import get_logger
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 

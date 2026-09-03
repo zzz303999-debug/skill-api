@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Query
 
-from app import access_log, third_party_log
-from app.core import registry
+from app.core import access_log_store, skill_registry, third_party_log_store
 from app.core.skill_base import SkillMeta
 
 router = APIRouter()
@@ -13,7 +12,7 @@ router = APIRouter()
 
 @router.get("/skills", response_model=list[SkillMeta], tags=["meta"])
 def list_skills() -> list[SkillMeta]:
-    return [s.meta() for s in registry.all_skills()]
+    return [s.meta() for s in skill_registry.all_skills()]
 
 
 @router.get("/api/logs", tags=["meta"])
@@ -32,7 +31,7 @@ def list_request_logs(
     include_full=true 时返回摘要化条目的完整响应体 response_full
     （大字段，仅导出/取证场景使用；列表默认剥离以保持页面轻量）。
     """
-    return access_log.query(
+    return access_log_store.query(
         limit=limit,
         offset=offset,
         path=path,
@@ -61,7 +60,7 @@ def list_third_party_logs(
     数据源为 http_client 落盘的 third-party-YYYY-MM-DD.jsonl（内存缓冲查询），
     含请求/响应体摘要（body_preview，含业务 PII）——与 /api/logs 同级别鉴权。
     """
-    return third_party_log.query(
+    return third_party_log_store.query(
         limit=limit,
         offset=offset,
         message=message,

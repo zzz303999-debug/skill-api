@@ -15,8 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
@@ -153,7 +153,7 @@ def store_path() -> Path:
 _STORE: MasterDataStore | None = None
 
 
-def get_store() -> MasterDataStore:
+def get_master_data_store() -> MasterDataStore:
     """全局计数存储单例（惰性初始化）。"""
     global _STORE
     if _STORE is None:

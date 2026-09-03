@@ -1,13 +1,22 @@
-"""账单模板库：表头指纹识别 + 模板持久化（storage/bill_templates/）。
+"""旧版账单模板：内置模板定义 + 历史固化 JSON 的回退读取（读取兼容）。
+
+层级关系（2026-09 命名统一）：本模块是**旧版**单模板持久化
+（内置模板 + 历史固化 JSON，sha1-16 指纹 = compute_legacy_fingerprint）；
+现役 YAML 模板库与三级识别在 template_store.py（md5-8 指纹）——
+本模块仅作为模板库未命中时的回退读取，两套库键不可互相替代。
+
 
 模板 = 表头行各列归一化文本（去空白）按列序拼接的 sha1 前 16 位指纹，
 外加列名 → 字段/费用的映射。来源分两类：
 - builtin：内置模板（列名映射 = HEADER_COLUMN_MAP +
   RECEIVABLE_FEE_COLUMNS + HEADER_ALIASES，指纹按真实表头计算），
   代码即模板，不落盘；
-- ai：异构模板经 AI 表头映射并通过校验闸门后固化（verified=False），
-  落盘到 storage/bill_templates/<fingerprint>.json，同指纹再次导入直接命中，
-  不再调 AI。
+- ai（历史管线，写入侧已移除）：设计上 AI 映射通过后自动固化 JSON 到
+  storage/bill_templates/，但该写入链路从未上线；现行固化为人工确认制——
+  L3 候选（template_store.build_template_config）经预览确认后
+  save_yaml_template 落 YAML 库（templates/*.yaml）。本模块保留对
+  历史目录 JSON 的读取兼容（load_template 磁盘分支），目录为空时该
+  分支恒未命中。
 
 保存格式（<fingerprint>.json）：
 {fingerprint, name, source("builtin"|"ai"), column_map, fee_map,
@@ -18,13 +27,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
-from app.config import settings
+from app.core.config import settings
 
 from .schema import HEADER_ALIASES, HEADER_COLUMN_MAP, RECEIVABLE_FEE_COLUMNS
 
@@ -75,7 +82,7 @@ def _normalize(text: str) -> str:
     return _HEADER_WHITESPACE_RE.sub("", text or "")
 
 
-def compute_fingerprint(headers: list[str]) -> str:
+def compute_legacy_fingerprint(headers: list[str]) -> str:
     """表头行指纹：各列归一化文本按列序拼接的 sha1 前 16 位。"""
     payload = "".join(_normalize(h) for h in headers)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
@@ -87,7 +94,7 @@ def _build_builtin() -> BillTemplate:
     fee_map = {name: name for name in RECEIVABLE_FEE_COLUMNS}
     fee_map.update(HEADER_ALIASES)
     return BillTemplate(
-        fingerprint=compute_fingerprint(list(BUILTIN_HEADERS)),
+        fingerprint=compute_legacy_fingerprint(list(BUILTIN_HEADERS)),
         name="应收对账单（内置模板）",
         source="builtin",
         column_map=column_map,
@@ -156,40 +163,3 @@ def load_template(fingerprint: str) -> BillTemplate | None:
     except (json.JSONDecodeError, KeyError, TypeError):
         # 损坏模板文件按未命中处理（可被新 AI 映射覆盖），不阻断导入
         return None
-
-
-def save_template(template: BillTemplate) -> Path:
-    """持久化模板到 storage/bill_templates/<fingerprint>.json（临时文件 + 原子替换）。
-
-    并发导入同一指纹账单时，直接写目标文件可能写出截断/交错 JSON；
-    先写同目录临时文件再 os.replace 原子替换，避免损坏模板。
-    """
-    path = template_dir() / f"{template.fingerprint}.json"
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    try:
-        tmp.write_text(
-            json.dumps(template.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(tmp, path)  # 同分区原子替换，并发下不会写出截断文件
-    finally:
-        tmp.unlink(missing_ok=True)  # 失败路径清理临时文件
-    return path
-
-
-def new_ai_template(
-    fingerprint: str,
-    *,
-    column_map: dict[str, str],
-    fee_map: dict[str, str],
-) -> BillTemplate:
-    """构造待固化的 AI 模板（verified=False，由服务层在导入成功后 save）。"""
-    return BillTemplate(
-        fingerprint=fingerprint,
-        name=f"AI映射-{fingerprint[:8]}",
-        source="ai",
-        column_map=dict(column_map),
-        fee_map=dict(fee_map),
-        created_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        verified=False,
-    )

@@ -15,13 +15,13 @@ import httpx
 import pytest
 
 import app.orders.http_client as http_client_mod
-from app.config import settings
-from app.document_parsers import mineru as mineru_mod
-from app.document_parsers.mineru import MinerUError, parse_document_async
+from app.core.config import settings
 from app.llm import client as llm_client
+from app.mineru import client as mineru_mod
+from app.mineru.client import MinerUError, parse_document_async
 from app.orders.bill import client as bill_client
 from app.orders.bill import master_data_client as md_client
-from app.orders.client import OrderUpstreamError, publish_create_order_async
+from app.orders.text.client import OrderUpstreamError, publish_create_order_async
 
 pytestmark = pytest.mark.asyncio
 
@@ -195,7 +195,7 @@ async def test_publish_create_order_async_success(caplog, monkeypatch):
             payload={"code": "200", "msg": "ok", "data": []},
         )
 
-    monkeypatch.setattr("app.orders.client.post_json_async", fake_post)
+    monkeypatch.setattr("app.orders.text.client.post_json_async", fake_post)
     with caplog.at_level("INFO"):
         result = await publish_create_order_async(
             {"order_num1": "B123"}, room_id="r1", user_id="u1"
@@ -207,7 +207,7 @@ async def test_publish_create_order_async_rejected(monkeypatch):
     async def fake_post(url, payload=None, **kwargs):
         return FakeResponse(text='{"code": 204}', payload={"code": 204, "msg": "no"})
 
-    monkeypatch.setattr("app.orders.client.post_json_async", fake_post)
+    monkeypatch.setattr("app.orders.text.client.post_json_async", fake_post)
     with pytest.raises(OrderUpstreamError) as exc_info:
         await publish_create_order_async({}, room_id="r1", user_id="u1")
     assert exc_info.value.details["upstream_code"] == 204
@@ -217,7 +217,7 @@ async def test_publish_create_order_async_network_error(monkeypatch):
     async def fake_post(url, payload=None, **kwargs):
         raise httpx.TimeoutException("timeout")
 
-    monkeypatch.setattr("app.orders.client.post_json_async", fake_post)
+    monkeypatch.setattr("app.orders.text.client.post_json_async", fake_post)
     with pytest.raises(OrderUpstreamError) as exc_info:
         await publish_create_order_async({}, room_id="r1", user_id="u1")
     assert exc_info.value.details["error_type"] == "TimeoutException"
@@ -459,7 +459,7 @@ def _llm_ok_response(content: str):
 
 async def test_achat_returns_content_and_meta(monkeypatch):
     captured = _install_fake_llm(monkeypatch, lambda _kw: _llm_ok_response("hello"))
-    monkeypatch.setattr("app.config.settings.llm_thinking_mode", "enabled")
+    monkeypatch.setattr("app.core.config.settings.llm_thinking_mode", "enabled")
     content, meta = await llm_client.achat([{"role": "user", "content": "hi"}])
     assert content == "hello"
     assert meta["model"] == "test-model"
@@ -472,7 +472,7 @@ async def test_achat_json_with_schema(monkeypatch):
     _install_fake_llm(
         monkeypatch, lambda _kw: _llm_ok_response('{"bl_no": "B123"}')
     )
-    monkeypatch.setattr("app.config.settings.llm_thinking_mode", "enabled")
+    monkeypatch.setattr("app.core.config.settings.llm_thinking_mode", "enabled")
     data, _meta = await llm_client.achat_json(
         [{"role": "user", "content": "hi"}],
         json_schema={"type": "object", "properties": {"bl_no": {"type": "string"}}},
@@ -492,7 +492,7 @@ async def test_achat_thinking_fallback_retry(monkeypatch):
         return _llm_ok_response("ok")
 
     captured = _install_fake_llm(monkeypatch, responder)
-    monkeypatch.setattr("app.config.settings.llm_thinking_mode", "disabled")
+    monkeypatch.setattr("app.core.config.settings.llm_thinking_mode", "disabled")
     content, _meta = await llm_client.achat([{"role": "user", "content": "hi"}])
     assert content == "ok"
     assert len(captured) == 2  # 首次带 thinking 拒绝 + 去参重试

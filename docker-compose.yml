@@ -29,7 +29,7 @@ services:
     # is much larger than the API service and may require a GPU-enabled image.
     build:
       context: .
-      dockerfile: mineru/Dockerfile
+      dockerfile: deploy/mineru/Dockerfile
       args:
         MINERU_VERSION: ${MINERU_VERSION:-2.5.4}
         MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}

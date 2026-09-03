@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import app.orders.bill.ai_header as ai_header_module
-from app.errors import LLMError
+from app.core.errors import LLMError
 from app.orders.bill import BillOrder, group_orders, parse_bill
 from helpers import REAL_XLS, build_bill_bytes
 
@@ -109,16 +109,67 @@ def _no_real_archive_calls(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_concurrency_primitives():
+    """进程级并发原语隔离：每用例重建共享信号量并清空 per-key 异步锁。
+
+    信号量首次竞争等待时绑定运行事件循环（pytest-asyncio 每用例新 loop）；
+    重建避免遗留 waiter 跨用例触发 "bound to a different event loop"；
+    锁字典清空防 per-bl_no 锁对象随用例历史无限累积。
+    """
+    import asyncio
+
+    import app.orders.bill.client as bill_client_mod
+    import app.orders.bill.imported_registry as imported_registry_mod
+    from app.core.config import settings
+
+    def _reset():
+        bill_client_mod._create_batch_guard = asyncio.Semaphore(
+            settings.bill_create_concurrency
+        )
+        bill_client_mod._create_downstream_slots = asyncio.Semaphore(
+            settings.bill_create_concurrency
+        )
+        imported_registry_mod._ASYNC_LOCKS.clear()
+
+    _reset()
+    yield
+    _reset()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_template_cache():
+    """模板库缓存隔离：用例 monkeypatch _TEMPLATES_DIR 后还原真实模板库。
+
+    teardown 里先保存的 real_dir 显式恢复目录再 reload（不依赖 monkeypatch
+    的还原时序——pytest 的 autouse fixture 与测试参数 fixture 的 teardown
+    顺序不可靠，实测 monkeypatch 还原晚于本 fixture）。test_template 固化
+    用例会把 _TEMPLATE_CACHE 留在 tmp_path 内容上，污染后续文件上传识别。
+    """
+    from app.orders.bill import template_store
+
+    real_dir = template_store._TEMPLATES_DIR  # setup 时捕获（尚未被用例 patch）
+    yield
+    template_store._TEMPLATES_DIR = real_dir  # 显式恢复目录（不依赖 monkeypatch）
+    template_store.reload_templates()  # 重载真实模板库
+
+
+@pytest.fixture(autouse=True)
 def _isolate_fee_mapping_caches():
     """费用映射/自举/基础资料配置缓存重置（每用例后）：防止配置注入用例
     （monkeypatch 临时文件路径）在 teardown 后残留缓存污染后续用例；
     幂等无副作用（各模块配置重载即读回真实配置文件）。
     """
     yield
-    from app.orders.bill import fee_bootstrap, fee_map, fee_price_map, master_data, template_store
+    from app.orders.bill import (
+        fee_bootstrap,
+        fee_name_map,
+        fee_price_map,
+        master_data,
+        template_store,
+    )
 
     try:
-        fee_map.reload_fee_alias_dictionary()
+        fee_name_map.reload_fee_alias_dictionary()
         fee_price_map.reload_price_map()
         fee_bootstrap.reload_bootstrap_config()
         master_data.reload_config()

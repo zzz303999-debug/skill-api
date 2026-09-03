@@ -16,8 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
@@ -129,7 +129,7 @@ def store_path() -> Path:
 _REGISTRY: FeeRegistry | None = None
 
 
-def get_registry() -> FeeRegistry:
+def get_fee_registry() -> FeeRegistry:
     """全局费目注册表单例（惰性初始化）。"""
     global _REGISTRY
     if _REGISTRY is None:

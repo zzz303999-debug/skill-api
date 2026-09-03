@@ -27,12 +27,13 @@ LLM 层      →  app/llm/client.py（唯一出口）
 本服务通过 OpenAI-compatible API 调用外部 LLM。服务地址、API Key、模型名和并发数
 必须通过部署环境变量注入，不要把真实凭证或固定环境地址写进代码和 `.env.example`。
 
-`SkillBase.run()` 保持同步契约，但 FastAPI handler **不得直接调用同步 run()**。
-`app/main.py` 会统一把 Skill 放进有界线程池执行：
+`SkillBase.run()` 是 **async 抽象契约**（2026-09 异步化）：转换段（LibreOffice/
+PDF 渲染等 CPU 与子进程）内部用 `asyncio.to_thread` 包裹，网络 I/O 直接 await
+（LLM 走 `achat_json`；MinerU 解析在 to_thread 段调同步客户端，async 版已提供待接入）。
 
-- 避免文件转换和最长数分钟的 LLM 请求阻塞 asyncio 事件循环
-- `SKILL_MAX_CONCURRENCY` 限制单进程同时运行的 Skill 数量
-- 新接口应复用 `_run_skill()`，不要自行创建无限制线程池或 `asyncio.gather`
+- LLM 长调用链（skill 抽取、文档解析）由 `core/executor._run_skill`/`_inflight_guard`
+  做进程级在途限制（`SKILL_MAX_CONCURRENCY`），排队超 `SKILL_QUEUE_WAIT_SECONDS` 返 503
+- 新接口走路由 → 编排（async）→ client（`*_async`）链路，不要自行创建线程池或裸 `asyncio.gather` 放飞
 - `.venv` 是运行环境产物，不跨机器复制，不纳入项目交付
 
 **LLM 调用必须走 `app.llm` 模块**。禁止在 skill 里直接 `import openai` 或写 http 请求。这样：
@@ -161,7 +162,7 @@ class SkillBase:
 ```
 
 **约定**：
-- `run` 抛 `app.errors.*` 里的异常，会被 FastAPI 全局处理器转成对应状态码
+- `run` 抛 `app.core.errors.*` 里的异常，会被 FastAPI 全局处理器转成对应状态码
 - 不要在 `run` 里做 I/O 写文件（要写走 `settings.storage_dir`）
 - 结果必须过 `output_model.model_validate()` 校验
 - `model_validate()` 的 `ValidationError` 必须转换为 `ParseError`，不要让原始异常变成 500
@@ -187,7 +188,7 @@ messages = [
 ]
 ```
 
-模型默认名以 `app/config.py` 和部署环境的 `LLM_MODEL_DEFAULT` 为准。
+模型默认名以 `app/core/config.py` 和部署环境的 `LLM_MODEL_DEFAULT` 为准。
 文档中不要假定部署环境一定使用某个特定 LLM 供应商。
 需要指定其他模型时向 `chat()` / `chat_json()` 传 `model=`，不要直接读取不存在的配置项。
 
@@ -203,20 +204,20 @@ messages = [
 
 ## 错误处理
 
-统一错误契约：`app/errors.py` 的 `SkillAPIError` 基类 + `main.py` 全局异常处理器，
+统一错误契约：`app/core/errors.py` 的 `SkillAPIError` 基类 + `main.py` 全局异常处理器，
 对外固定输出 `{"error": {"code", "message", "description", "details"}}`。
-**完整「公开错误码速查表」（HTTP 状态 / code / 中文说明）见 `app/errors.py` 模块 docstring**，
+**完整「公开错误码速查表」（HTTP 状态 / code / 中文说明）见 `app/core/errors.py` 模块 docstring**，
 新增错误码时必须同步更新。
 
 ### 新增错误码 checklist（强制）
 
 1. **继承**：定义 `class XxxError(SkillAPIError)`，设置 `http_status` 与 `code`；业务错误可定义在业务模块（如 `orders/client.py` 的 `OrderUpstreamError`）
 2. **登记中文说明**：在 `ERROR_CODE_DESCRIPTIONS` 注册，否则 description 会 fallback 为英文 message，调用方无法判断含义
-3. **同步映射表**：更新 `app/errors.py` docstring 速查表 + 本节，避免 HTTP 状态码与 code 语义漂移
+3. **同步映射表**：更新 `app/core/errors.py` docstring 速查表 + 本节，避免 HTTP 状态码与 code 语义漂移
 
 ### 私有异常模式（解析/转换模块）
 
-解析/转换模块（如 `document_parsers/mineru.py` 的 `MinerUError`）内部可用私有异常
+解析/转换模块（如 `mineru/client.py` 的 `MinerUError`）内部可用私有异常
 （继承普通 Exception），但必须在模块边界被上层捕获并转换为公开 `SkillAPIError`
 （如 `parse_error` / `convert_error`）。**禁止私有异常直接穿透到 API 层**，
 其他解析/转换模块必须遵循同样模式。
@@ -234,7 +235,7 @@ messages = [
 批量接口对单文件错误使用同样的 `code/message/details` 结构，但整体请求可以继续处理
 其他文件。意外异常只记录服务端日志，对外统一返回 `internal_error`，不得暴露原始堆栈。
 
-全局 handler 已在 `main.py` 注册，抛出即可。
+全局 handler 注册于 `app/api/error_handlers.py`（由 `create_app()` 挂载），抛出即可。
 
 ## 不做什么
 
@@ -243,7 +244,7 @@ messages = [
 - **不做 per-template 的 if/else 硬编码**：模板变化交给 LLM + few-shot
 - **不合并多柜/多行**：一票多条时展开为数组
 - **不打包独立 OCR 引擎**：图片和扫描 PDF 直接走 vision 模型；如需专门 OCR skill，另建子包
-- **不在同步接口里扩展超长任务**：现有 LLM 请求由有界线程池承载；需要多阶段、长批次处理时另建异步任务方案
+- **不在接口里裸放长任务**：LLM 长调用链必须受 `_inflight_guard`/进程级信号量约束（防并发打满网关）；需要多阶段、长批次处理时另建异步任务方案
 
 ## 分支管理
 

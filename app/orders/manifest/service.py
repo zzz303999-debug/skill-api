@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 
-from app.logging_conf import get_logger
+from app.core.logging_conf import get_logger
 
 from .client import submit_manifest_async
 from .parser import parse_manifest

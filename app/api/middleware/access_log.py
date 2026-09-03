@@ -11,12 +11,12 @@ from typing import Any
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
-from app import access_log
 from app.api.middleware.rate_limit import _resolve_client_ip
 from app.api.response_shell import _unified_error_body, _use_unified_response
-from app.config import settings
-from app.errors import ERROR_CODE_DESCRIPTIONS
-from app.logging_conf import get_logger
+from app.core import access_log_store
+from app.core.config import settings
+from app.core.errors import ERROR_CODE_DESCRIPTIONS
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
@@ -298,7 +298,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
                 "message": f"HTTP {status_code}",
                 "details": None,
             }
-        access_log.record(
+        access_log_store.record(
             {
                 "request_id": request_id,
                 "ip": client_ip,

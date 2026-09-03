@@ -11,8 +11,8 @@ import re
 from datetime import datetime
 from typing import Any
 
-from app.errors import ParseError
-from app.logging_conf import get_logger
+from app.core.errors import ParseError
+from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
@@ -567,7 +567,7 @@ def is_known_container_type(value: str) -> bool:
     return lookup_key in KNOWN_CONTAINER_TYPES
 
 
-# ---------- 通用文本工具（deterministic_mapper / postprocessor 共用） ----------
+# ---------- 通用文本工具（deterministic_mapper / finalize 共用） ----------
 
 
 def normalize_label(value: str) -> str:

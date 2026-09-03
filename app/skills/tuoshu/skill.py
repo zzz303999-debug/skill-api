@@ -10,12 +10,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from app.config import settings
+from app.core.config import settings
+from app.core.errors import BadRequestError, ConvertError, ParseError
+from app.core.logging_conf import get_logger
 from app.core.skill_base import SkillBase
-from app.document_parsers import mineru
-from app.errors import BadRequestError, ConvertError, ParseError
 from app.llm import achat_json, image_to_data_url
-from app.logging_conf import get_logger
+from app.mineru import client as mineru
 
 from .convert_service import (
     convert_image_to_parse_result,
@@ -25,8 +25,8 @@ from .convert_service import (
     render_pdf_pages,
 )
 from .deterministic_mapper import map_template, merge_deterministic_values
+from .finalize import finalize_extraction
 from .normalizer import normalize_llm_output
-from .postprocessor import finalize_extraction
 from .prompt import (
     build_few_shot_messages,
     build_system_prompt,

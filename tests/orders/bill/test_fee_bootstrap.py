@@ -27,7 +27,7 @@ from app.orders.bill.fee_bootstrap import (
     run_fee_bootstrap_async,
 )
 from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_registry
+from app.orders.bill.fee_registry import get_fee_registry
 from app.orders.bill.master_data import KIND_PRICE
 from helpers import inject_price_map
 
@@ -96,7 +96,7 @@ def price_cfg(tmp_path, monkeypatch):
         fp_module.reload_price_map()
         fb_module.reload_bootstrap_config()
         for code, rec in (registry or {}).items():
-            get_registry().register(code, rec["price_id"], rec.get("tms_name"))
+            get_fee_registry().register(code, rec["price_id"], rec.get("tms_name"))
 
     yield _set
     # 先还原路径再重载（monkeypatch 撤销在 fixture teardown 之后，需手动还原防残留缓存）
@@ -233,7 +233,7 @@ class TestLazyCreate:
         assert forms["waiting"]["name"] == "待时费"
         assert forms["yangshan"]["sn"] == "TST_YANGSHAN"
         # 建档即登记 registry（当批回填由 apply_price_map 命中）
-        assert get_registry().lookup("waiting")["price_id"] == 9000
+        assert get_fee_registry().lookup("waiting")["price_id"] == 9000
 
     async def test_no_missing_returns_none(self, price_cfg, md_endpoint, fake_create):
         """全码有 id → 不建档、无报告段。"""
@@ -317,7 +317,7 @@ class TestFailureRetry:
             }
         ]
         # registry 不记失败 → 下批重试
-        assert get_registry().lookup("waiting") is None
+        assert get_fee_registry().lookup("waiting") is None
         # 当批降级：apply_price_map 仍走现状语义（excluded + dropped，不抛断）
         fee = _fee(code="waiting", money="50.00")
         (updated, dropped) = apply_price_map([fee])
@@ -382,7 +382,7 @@ class TestPreviewReadOnly:
         assert report["planned"] == [{"code": "waiting", "tms_name": "待时费"}]
         assert report["created"] == [] and report["failed"] == []
         assert fake_create.calls == []  # 零建档请求
-        assert get_registry().snapshot() == {}  # 零 registry 写入
+        assert get_fee_registry().snapshot() == {}  # 零 registry 写入
 
     async def test_preview_keeps_downgrade_semantics(self, price_cfg, md_endpoint, fake_create):
         """preview 不建档 → apply_price_map 仍按现状降级（dropped 非空）。"""
@@ -442,8 +442,8 @@ class TestDuplicateExternal:
         assert report["exists_external"] and report["exists_external"][0]["code"] == "waiting"
         assert report["failed"] == [] and report["created"] == []
         assert len(calls) == 1
-        assert get_registry().exists_external("waiting") is True
-        assert get_registry().lookup("waiting") is None  # price_id 保持 null（无查询接口）
+        assert get_fee_registry().exists_external("waiting") is True
+        assert get_fee_registry().lookup("waiting") is None  # price_id 保持 null（无查询接口）
         # 下批：不再重试建档
         report2 = await run_fee_bootstrap_async(orders, create_order=True)
         assert len(calls) == 1
@@ -472,7 +472,7 @@ class TestDuplicateExternal:
         orders = [_make_order([_fee(code="waiting")])]
         report = await run_fee_bootstrap_async(orders, create_order=True)
         assert report["failed"] and report["exists_external"] == []
-        assert get_registry().exists_external("waiting") is False
+        assert get_fee_registry().exists_external("waiting") is False
         assert len(calls) == 1
         await run_fee_bootstrap_async(orders, create_order=True)
         assert len(calls) == 2  # 下批重试
@@ -648,7 +648,7 @@ class TestGoldenBootstrap:
         assert bootstrap["mode"] == "preview"
         assert bootstrap["planned"] and bootstrap["created"] == []
         assert reports.get("price_null_dropped")  # 现状：未建档 → 降级清单非空
-        assert get_registry().snapshot() == {}  # 零 registry 写入
+        assert get_fee_registry().snapshot() == {}  # 零 registry 写入
 
     @pytest.mark.skipif(
         not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
@@ -702,6 +702,6 @@ class TestGoldenBootstrap:
         registered = {
             c["code"]: c["price_id"]
             for c in bootstrap["created"]
-            if get_registry().lookup(c["code"]) is not None
+            if get_fee_registry().lookup(c["code"]) is not None
         }
         assert registered == {c["code"]: c["price_id"] for c in bootstrap["created"]}

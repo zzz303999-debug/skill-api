@@ -26,42 +26,60 @@
 ```
 skill-api/
 ├── app/
-│   ├── main.py                  # FastAPI 入口：路由注册、鉴权、限流、统一错误处理、访问日志
-│   ├── config.py                # 环境变量（pydantic-settings，基于 __file__ 定位 .env）
-│   ├── errors.py                # 统一错误类型（SkillAPIError）
-│   ├── logging_conf.py          # JSON 结构化日志
-│   ├── access_log.py            # 请求审计日志：按天 JSONL + 内存环形缓冲 + 查询
-│   ├── rate_limit.py            # 按 IP 滑动窗口限流
-│   ├── core/
+│   ├── main.py                  # 入口：create_app() + 拆分前 app.main 命名空间（测试接缝）
+│   ├── api/                     # 表现层：薄路由 + 中间件 + 统一错误处理（不承载业务）
+│   │   ├── app_factory.py       # create_app()：中间件注册顺序即层级契约
+│   │   ├── bridges.py           # 路由→orders 域适配（app.main 测试接缝符号宿主）
+│   │   ├── routes/              # APIRouter 薄路由（orders / bill_import / manifest_import / skills / meta）
+│   │   ├── middleware/          # access_log（审计）→ auth（鉴权）→ rate_limit（限流）
+│   │   ├── error_handlers.py    # 全局异常处理器（统一错误外壳）
+│   │   ├── response_shell.py    # 统一响应外壳 {code, msg, data}
+│   │   ├── uploads.py           # 上传文件读取与校验（各上传路由共用）
+│   │   └── health.py            # /healthz 健康检查
+│   ├── core/                    # 横切设施：只被依赖，不依赖域与表现层
+│   │   ├── config.py            # 环境变量（pydantic-settings，基于 __file__ 定位 .env）
+│   │   ├── errors.py            # 统一错误类型（SkillAPIError + 错误码速查表 docstring）
+│   │   ├── logging_conf.py      # JSON 结构化日志
 │   │   ├── skill_base.py        # SkillBase 抽象基类 + SkillMeta
-│   │   └── registry.py          # Skill 注册中心 + 自动发现
+│   │   ├── skill_registry.py    # Skill 注册中心 + 自动发现
+│   │   ├── executor.py          # Skill 并发控制（信号量上限 + 排队超时 503）
+│   │   ├── access_log_store.py  # 请求审计日志存储：按天 JSONL + 内存环形缓冲 + 查询
+│   │   └── third_party_log_store.py  # 第三方调用日志存储（按天 JSONL）
 │   ├── llm/
 │   │   └── client.py            # OpenAI-compatible 客户端（唯一 LLM 出口；thinking/json_schema 探测降级）
-│   ├── document_parsers/
-│   │   ├── mineru.py            # MinerU HTTP 客户端与响应解析
-│   │   └── models.py            # 解析结果共享数据结构
-│   ├── orders/                  # 订单链路
-│   │   ├── schema.py            # /orders 输入输出契约
-│   │   ├── extractor.py         # 自由文本只读显式“字段：值”抽取（不调 LLM）
-│   │   ├── mapper.py            # 校验抽取结果并生成下游 data 参数
-│   │   ├── client.py            # 订单创建 HTTP 客户端（创建请求不自动重试）
-│   │   ├── document.py          # /orders/parse-document：文档 → 订单字段（走 LLM）
-│   │   └── bill/                # 竞品账单导入（/orders/bill/import）
-│   │       ├── parser.py        # 模板驱动解析 + AI 表头映射（ai_header.py）
-│   │       ├── aggregator.py    # 四类归集（业务/财务/基础/费用）
-│   │       ├── template.py      # 账单模板库（内置 8 家族 + 自动固化）
-│   │       ├── fee_map.py       # 费目映射与对账（fee_price_map.yaml + 别名词典）
-│   │       ├── fee_registry.py  # 费用管理注册表（按单计，去重）
-│   │       ├── imported_registry.py  # 导入成功单去重（提单号 first-write-wins）
-│   │       ├── master_data*.py  # 客户/门点/司机/车辆建档与计数
-│   │       ├── payload.py       # 下游 AddWork/publishCreateOrder 载荷构建
-│   │       ├── client.py        # 竞品账单下游（GetWebKey → login → AddWork）
-│   │       ├── service.py       # 编排（parse → aggregate → create）
-│   │       └── schema.py        # 账单导入响应契约
+│   ├── mineru/
+│   │   ├── client.py            # MinerU HTTP 客户端与响应解析
+│   │   └── schema.py            # 解析结果共享数据结构
+│   ├── orders/                  # 业务域：订单链路 + 账单/舱单导入（自包含）
+│   │   ├── http_client.py       # 异步 HTTP 底座（post_json_async / unpack_json）
+│   │   ├── text/                # 自由文本下单子域（/orders）
+│   │   │   ├── schema.py        # /orders 输入输出契约
+│   │   │   ├── extractor.py     # 自由文本只读显式“字段：值”抽取（不调 LLM）
+│   │   │   ├── mapper.py        # 校验抽取结果并生成下游 data 参数
+│   │   │   └── client.py        # 订单创建 HTTP 客户端（创建请求不自动重试）
+│   │   └── document/            # 附件文档抽取子域（/orders/parse-document）
+│   │       ├── schema.py        # 文档抽取契约（ParseDocumentResponse 等）
+│   │       ├── service.py       # 文档 → 订单字段（走 LLM；编排层）
+│   │       └── rules.py         # 文档链路规则族（解析结果的业务校验与兜底）
+│   │   ├── bill/                # 竞品账单导入（/orders/bill/import）
+│   │   │   ├── parser.py        # 模板驱动解析 + AI 表头映射（ai_header.py）
+│   │   │   ├── aggregator.py    # 四类归集（业务/财务/基础/费用）
+│   │   │   ├── template.py      # 账单模板库（内置 8 家族；template_store.py 固化存取）
+│   │   │   ├── fee_map.py       # 费目映射与对账（fee_price_map.yaml + 别名词典）
+│   │   │   ├── fee_registry.py  # 费用管理注册表（按单计，去重）
+│   │   │   ├── imported_registry.py  # 导入成功单去重（提单号 first-write-wins）
+│   │   │   ├── master_data*.py  # 客户/门点/司机/车辆建档与计数
+│   │   │   ├── box_whitelist.py # 箱型白名单（文件级拒绝，TMS 箱型口径）
+│   │   │   ├── fee_bootstrap.py / fee_name_map.py / fee_price_map.py  # 费目自举与费率配置
+│   │   │   ├── normalizers.py   # 数值/文本归一化
+│   │   │   ├── payload.py       # 下游 AddWork/publishCreateOrder 载荷构建
+│   │   │   ├── client.py        # 竞品账单下游（AddWork，sk 头透传）
+│   │   │   ├── service.py       # 编排（parse → aggregate → create）
+│   │   │   └── schema.py        # 账单导入响应契约
 │   │   └── manifest/            # 舱单导入（/orders/manifest/import）
 │   │       ├── parser.py        # 家族识别 + label 定位提取 + 箱明细模式识别
 │   │       ├── payload.py       # TMS addBill 载荷构建（每箱运价恒 0）
-│   │       ├── registry.py      # 成功单去重注册表（提单号 first-write-wins）
+│   │       ├── imported_registry.py  # 导入单登记（提单号；v1.9 起不用于去重拦截）
 │   │       ├── client.py        # 舱单下游 addBill 提交（JSON body + sk 头）
 │   │       ├── service.py       # 编排（parse → 白名单 → preview/create）
 │   │       └── schema.py        # 舱单导入响应契约
@@ -71,12 +89,14 @@ skill-api/
 │           ├── schema.py        # Pydantic 输出 schema（强类型，进 OpenAPI）
 │           ├── converter.py     # doc/docx/xlsx/pdf/图片 → markdown 转换器
 │           ├── deterministic_mapper.py  # 模板指纹 + 确定性字段映射
-│           ├── postprocessor.py # 后处理编排：确定性映射 + review_issues 复核
+│           ├── finalize.py      # 后处理编排（finalize_extraction）：确定性映射 + review_issues 复核
 │           └── references/      # 业务知识（ports/carriers/aliases/…）+ few-shot examples
 ├── config/                      # 费率与主数据配置（fee_price_map.{env}.yaml、master_data.{env}.yaml，APP_ENV 选择）
 ├── templates/                   # 内置账单模板（8 家族 yaml）
-├── mineru/
-│   └── Dockerfile               # MinerU CPU 镜像构建（模型随镜像发布）
+├── deploy/
+│   ├── nginx/                   # 反代配置
+│   └── mineru/
+│       └── Dockerfile           # MinerU CPU 镜像构建（模型随镜像发布）
 ├── scripts/
 │   └── deploy.sh                # 服务器部署脚本（拉码、构建、健康检查、回滚）
 ├── docs/                        # 需求/设计/接口文档（托书、竞品账单导入、舱单）
@@ -106,7 +126,6 @@ make dev                         # uvicorn --reload
 - `http://localhost:9000/docs`  — Swagger UI
 - `http://localhost:9000/healthz`
 - `http://localhost:9000/skills` — 已注册的 skill 列表
-- `http://localhost:9000/logs`   — 请求日志页面
 
 ## 生产部署交接
 
@@ -131,7 +150,7 @@ chmod +x scripts/deploy.sh
 - `Authorization: Bearer <API_KEY>`
 - `X-API-Key: <API_KEY>`
 
-豁免路径（无需凭证）：`GET /healthz`、`GET /skills`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico`、`GET /logs`（日志页面本身无数据）。注意：`GET /api/logs` 含 PII，**不在豁免内**，必须鉴权才能查看。未配置 `API_KEY` 时鉴权关闭（仅限可信内网/本地开发）。
+豁免路径（无需凭证）：`GET /healthz`、`GET /skills`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico`。注意：`GET /api/logs` 含 PII，**不在豁免内**，必须鉴权才能查看。未配置 `API_KEY` 时鉴权关闭（仅限可信内网/本地开发）。
 
 ## 接口
 
@@ -140,16 +159,6 @@ chmod +x scripts/deploy.sh
 
 ### `GET /healthz`
 存活检查，返回 API 状态、已注册 skill 与依赖探测（LLM/MinerU/订单上游配置与可达状态）。探测失败不影响 `200`（`status` 恒为 `ok`，仅 `dependencies` 展示），避免网络抖动误判容器不健康。
-
-### `GET /logs`
-内置的请求日志查看页面（浏览器直接访问，云审计留痕入口）。表格展示每条
-请求的**时间、客户端 IP、方法、路径、上传文件名与大小、耗时、状态码、错误码
-和请求 ID**，IP 单元格悬停可看 UA 与 `X-Forwarded-For`；**点击带 ▼ 的行可
-展开查看完整请求体 JSON**（JSON 请求自动美化格式化，截断会标注）。支持按
-IP/文件名/路径/状态码筛选、自动刷新（10s）与分页加载。日志按天写入
-`storage/logs/requests-YYYY-MM-DD.jsonl`（服务重启后仍可查询近期历史），
-过期文件按日志时间自动整文件清理（保留时长由 `STORAGE_KEEP_HOURS` 控制）；
-`/logs` 与 `/api/logs` 自身的请求不记录。
 
 ### `GET /api/logs`
 请求访问日志查询接口，返回 JSON（时间倒序）：
@@ -353,7 +362,7 @@ curl -X POST http://localhost:9000/orders/manifest/import \
 | `MINERU_TIMEOUT_SECONDS` | 单次 MinerU 请求超时秒数，默认 120 |
 | `MINERU_FALLBACK_ENABLED` | MinerU 失败/版本不符时是否回退原有解析流程，默认 `true` |
 | `MINERU_OCR_CONCURRENCY` | MinerU OCR 并发数，默认 4 |
-| `MINERU_VERSION` | MinerU 镜像构建版本锁，默认 `2.5.4`（`mineru/Dockerfile` 构建用） |
+| `MINERU_VERSION` | MinerU 镜像构建版本锁，默认 `2.5.4`（`deploy/mineru/Dockerfile` 构建用） |
 | `MINERU_IMAGE` | MinerU 本地镜像标签，默认 `skill-api-mineru:2.5.4` |
 | `MINERU_MODEL_SOURCE` | MinerU 模型下载源，默认 `modelscope`（可选 `huggingface`） |
 | `MINERU_SHM_SIZE` | MinerU 容器共享内存，默认 `8g` |
@@ -381,7 +390,7 @@ curl -X POST http://localhost:9000/orders/manifest/import \
 
 MinerU 接管**低质量 PDF 页**（文本层不足/乱码率超阈值）和**原始图片**，将其解析为 markdown 结构化内容；合格的 PDF 文本层仍走 `pdfplumber`。MinerU 之后的分析流程（模板 Mapper、LLM 补全和业务 JSON schema）不变，`MINERU_ENABLED=false` 时服务仍可启动：普通 PDF 由 `pdfplumber` 处理，图片和扫描件由配置的视觉模型处理——关闭 MinerU 不等于完全离线，LLM 服务仍是必需依赖。
 
-**部署形态**：Docker Compose 从 `mineru/Dockerfile` 构建锁定版本的 CPU 镜像（模型随镜像发布，构建版本由 `MINERU_VERSION` 锁定，模型下载源 `MINERU_MODEL_SOURCE` 可选 `modelscope`/`huggingface`），通过 Compose 内网地址 `http://mineru:8888` 访问；也保留了对独立部署 MinerU 服务的 HTTP 客户端兼容。
+**部署形态**：Docker Compose 从 `deploy/mineru/Dockerfile` 构建锁定版本的 CPU 镜像（模型随镜像发布，构建版本由 `MINERU_VERSION` 锁定，模型下载源 `MINERU_MODEL_SOURCE` 可选 `modelscope`/`huggingface`），通过 Compose 内网地址 `http://mineru:8888` 访问；也保留了对独立部署 MinerU 服务的 HTTP 客户端兼容。
 
 **契约保护**：客户端校验响应版本头（`x-mineru-version`/`mineru-version`），必须与 `MINERU_EXPECTED_VERSION` 完全一致，版本不符或解析失败时按 `MINERU_FALLBACK_ENABLED` 决定是否回退原有解析流程（默认回退，保证解析不中断）。图片 OCR 高置信时跳过 LLM vision 交叉核验以提速（`IMAGE_VISION_SKIP_WHEN_CONFIDENT`）。
 

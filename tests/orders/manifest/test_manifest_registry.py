@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from app.orders.manifest.registry import (
+from app.orders.manifest.imported_registry import (
     ManifestRegistry,
     get_manifest_registry,
     lock_for,
@@ -77,8 +77,8 @@ class TestSingleton:
     def test_reload_injects_path(self, tmp_path):
         injected = tmp_path / "injected.json"
         reloaded = get_manifest_registry()  # noqa: F841
-        from app.orders.manifest import registry
+        from app.orders.manifest import imported_registry
 
-        new_reg = registry.reload_registry(injected)
+        new_reg = imported_registry.reload_registry(injected)
         assert new_reg.path == injected
         assert isinstance(new_reg.path, Path)

@@ -60,5 +60,6 @@ class SkillBase(ABC):
         """核心方法（异步契约）：给定文件字节 → 返回符合 `output_model` 的 dict。
 
         CPU 密集段（文档转换/PDF 渲染）用 asyncio.to_thread 包裹，
-        网络 I/O 直接 await（LLM 走 achat_json、MinerU 走 parse_document_async）。"""
+        网络 I/O 直接 await（LLM 走 achat_json）；MinerU 解析在转换段
+    to_thread 内调用同步客户端（async 版已提供，接入待后续）。"""
         raise NotImplementedError

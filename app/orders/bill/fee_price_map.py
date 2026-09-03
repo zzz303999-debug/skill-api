@@ -16,10 +16,10 @@ from pathlib import Path
 
 import yaml
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
-from .fee_registry import get_registry
+from .fee_registry import get_fee_registry
 
 log = get_logger(__name__)
 
@@ -85,7 +85,7 @@ def lookup(code: str) -> dict | None:
     entry = load_price_map().get(code)
     if entry and entry.get("price_id") is not None:
         return entry
-    rec = get_registry().lookup(code)
+    rec = get_fee_registry().lookup(code)
     if rec:
         return {
             "tms_name": str(rec.get("tms_name") or "") or (entry or {}).get("tms_name"),
@@ -104,7 +104,7 @@ def resolve_price_id(code: str) -> int | None:
     entry = load_price_map().get(code) or {}
     if entry.get("price_id") is not None:
         return entry["price_id"]
-    rec = get_registry().lookup(code)
+    rec = get_fee_registry().lookup(code)
     return int(rec["price_id"]) if rec else None
 
 

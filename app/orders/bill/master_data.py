@@ -22,10 +22,10 @@ from typing import Any
 
 import yaml
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
-from .master_data_store import get_store
+from .master_data_store import get_master_data_store
 from .schema import CanonicalOrder
 
 log = get_logger(__name__)
@@ -468,7 +468,7 @@ async def run_master_data_async(
         return None
     from .master_data_client import create_archives_async
 
-    store = get_store()
+    store = get_master_data_store()
     threshold = int(config["threshold"])
     candidates = collect_candidates(orders)
     report: dict[str, Any] = {

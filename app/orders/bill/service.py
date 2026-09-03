@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from app.errors import BadRequestError
+from app.core.errors import BadRequestError
 
 from .aggregator import group_canonical, group_orders
 from .client import create_canonical_orders_async, create_orders_async
@@ -70,7 +70,7 @@ def _build_fee_reports(
     bootstrap_report 由调用方先执行费目自举（run_fee_bootstrap_async）后传入
     （含 None：自举未执行/无缺失时无报告段）。
     """
-    from app.config import settings
+    from app.core.config import settings
 
     dropped: list[dict] = []
     mismatch: list[dict] = []
@@ -337,7 +337,7 @@ async def build_result_async(
     """
     import asyncio
 
-    from app.config import settings
+    from app.core.config import settings
 
     # 防御性校验（置于解析前，零 IO 快速失败）：服务层公开入口语义
     if create_order and not (sk or "").strip():

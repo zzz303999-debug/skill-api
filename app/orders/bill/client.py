@@ -25,8 +25,9 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.errors import ServiceBusyError
+from app.core.logging_conf import get_logger
 
 from ..http_client import post_form_async, unpack_json
 from .imported_registry import (
@@ -508,6 +509,17 @@ async def _create_one_async(
             )
 
 
+# ---- 进程级 create 下游闸（2026-09 用户拍板，修复"每请求新建 Semaphore 致 N×C 放大"）----
+# 两个共享信号量配合：_create_batch_guard 限制并发导入批数（超出排队超时 503，
+# 与旧线程池时代"排队 10s 返 503"同语义）；_create_downstream_slots 限制全进程
+# AddWork 提交在飞路数（无论多少并发请求，全局 ≤ bill_create_concurrency），
+# 防止并发导入打满 TMS。覆盖范围 = 本模块 AddWork 提交段：批闸 acquire 前执行的
+# 费目自举/建档段（service 层）不在闸内，但其 TMS 建档带 registry/store 幂等登记，
+# 503 重试不会重复建档（见 fee_bootstrap/master_data）。
+_create_batch_guard = asyncio.Semaphore(settings.bill_create_concurrency)
+_create_downstream_slots = asyncio.Semaphore(settings.bill_create_concurrency)
+
+
 async def create_orders_async(
     orders: list[BillOrder], sk: str, source_sha256: str | None = None
 ) -> None:
@@ -519,20 +531,29 @@ async def create_orders_async(
     if not orders:
         return
     owner = owner_key(sk)
-    semaphore = asyncio.Semaphore(settings.bill_create_concurrency)
-    await asyncio.gather(
-        *[
-            _create_one_async(
-                order,
-                sk=sk,
-                submit=lambda sk_, order_: add_work_async(sk_, order_.order_data or {}),
-                owner=owner,
-                source_sha256=source_sha256,
-                semaphore=semaphore,
-            )
-            for order in orders
-        ]
-    )
+    # 批级占位：并发导入请求排队（超 skill_queue_wait_seconds 返 503 server_busy）
+    try:
+        await asyncio.wait_for(
+            _create_batch_guard.acquire(), timeout=settings.skill_queue_wait_seconds
+        )
+    except TimeoutError:
+        raise ServiceBusyError("server is busy, too many concurrent tasks") from None
+    try:
+        await asyncio.gather(
+            *[
+                _create_one_async(
+                    order,
+                    sk=sk,
+                    submit=lambda sk_, order_: add_work_async(sk_, order_.order_data or {}),
+                    owner=owner,
+                    source_sha256=source_sha256,
+                    semaphore=_create_downstream_slots,
+                )
+                for order in orders
+            ]
+        )
+    finally:
+        _create_batch_guard.release()
 
 
 async def create_canonical_orders_async(orders, sk: str, source_sha256: str | None = None) -> None:
@@ -540,17 +561,26 @@ async def create_canonical_orders_async(orders, sk: str, source_sha256: str | No
     if not orders:
         return
     owner = owner_key(sk)
-    semaphore = asyncio.Semaphore(settings.bill_create_concurrency)
-    await asyncio.gather(
-        *[
-            _create_one_async(
-                order,
-                sk=sk,
-                submit=lambda sk_, order_: submit_canonical_async(sk_, order_),
-                owner=owner,
-                source_sha256=source_sha256,
-                semaphore=semaphore,
-            )
-            for order in orders
-        ]
-    )
+    # 批级占位：并发导入请求排队（超 skill_queue_wait_seconds 返 503 server_busy）
+    try:
+        await asyncio.wait_for(
+            _create_batch_guard.acquire(), timeout=settings.skill_queue_wait_seconds
+        )
+    except TimeoutError:
+        raise ServiceBusyError("server is busy, too many concurrent tasks") from None
+    try:
+        await asyncio.gather(
+            *[
+                _create_one_async(
+                    order,
+                    sk=sk,
+                    submit=lambda sk_, order_: submit_canonical_async(sk_, order_),
+                    owner=owner,
+                    source_sha256=source_sha256,
+                    semaphore=_create_downstream_slots,
+                )
+                for order in orders
+            ]
+        )
+    finally:
+        _create_batch_guard.release()

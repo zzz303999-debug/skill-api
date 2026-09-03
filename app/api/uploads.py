@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from fastapi import UploadFile
 
-from app.config import settings
-from app.errors import BadRequestError
+from app.core.config import settings
+from app.core.errors import BadRequestError
 
 
 async def _read_upload(file: UploadFile) -> bytes:

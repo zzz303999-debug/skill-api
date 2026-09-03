@@ -19,8 +19,8 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
-from app.logging_conf import get_logger
+from app.core.config import settings
+from app.core.logging_conf import get_logger
 
 from ..http_client import post_form_async, unpack_json
 from .master_data import (
