@@ -487,3 +487,101 @@ def test_mineru_markdown_is_sent_to_llm_in_full(monkeypatch):
     user_message = captured["messages"][-1]["content"]
     assert markdown in user_message
     assert "文档末尾唯一字段" in user_message
+
+
+# ---------- async 页级路由（收尾计划改造项 D/4.1：gather + Semaphore） ----------
+
+
+def _make_fake_pdf(pages_text):
+    """构造 pdfplumber 替身（FakePage/FakePdf），供页级路由测试复用。"""
+    import pdfplumber
+
+    class FakePage:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+        def extract_tables(self):
+            return []
+
+        def extract_words(self):
+            return []
+
+    class FakePdf:
+        pages = [FakePage(t) for t in pages_text]
+
+        def close(self):
+            return None
+
+    return pdfplumber, FakePdf
+
+
+@pytest.mark.asyncio
+async def test_mixed_pdf_async_routes_only_bad_page_to_mineru(monkeypatch):
+    """async 版与同步版同语义：合格页 pdfplumber 直出，仅不合格页送 OCR。"""
+    import app.skills.tuoshu.convert_service as convert_service
+
+    pdfplumber, FakePdf = _make_fake_pdf(
+        ["提单号 船名 件数 " + "有效文本" * 20, ""]
+    )
+    mineru_calls: list[str] = []
+
+    async def fake_mineru(_bytes, filename, **_kwargs):
+        mineru_calls.append(filename)
+        return MinerUParseResult(markdown="| 提单号 | OCR000001 |", table_count=1)
+
+    monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
+    monkeypatch.setattr(
+        convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png"
+    )
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+
+    result = await convert_service._convert_pdf_with_page_routing_async(
+        b"pdf", "mixed.pdf"
+    )
+
+    assert [page.parser for page in result.pages] == ["pdfplumber", "mineru"]
+    assert mineru_calls == ["mixed-page-2.png"]
+
+
+@pytest.mark.asyncio
+async def test_pdf_page_routing_async_bounds_ocr_concurrency(monkeypatch):
+    """多页 OCR：gather 并发受 mineru_ocr_concurrency 有界（峰值 = 上限而非任务数），
+    结果按文档序合并（页序不因完成顺序漂移）。"""
+    import app.skills.tuoshu.convert_service as convert_service
+
+    pdfplumber, FakePdf = _make_fake_pdf(["", "", ""])  # 3 页全不合格 → 全 OCR
+
+    state = {"inflight": 0, "peak": 0}
+    done_order: list[int] = []
+
+    async def fake_mineru(_bytes, filename, **_kwargs):
+        state["inflight"] += 1
+        state["peak"] = max(state["peak"], state["inflight"])
+        await asyncio.sleep(0.001)
+        state["inflight"] -= 1
+        done_order.append(filename)
+        return MinerUParseResult(markdown=f"ocr-{filename}")
+
+    monkeypatch.setattr(settings, "mineru_ocr_concurrency", 2)
+    monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
+    monkeypatch.setattr(
+        convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png"
+    )
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+
+    result = await convert_service._convert_pdf_with_page_routing_async(
+        b"pdf", "multi.pdf"
+    )
+
+    assert state["peak"] == 2  # 有界：3 任务共享 2 槽
+    assert [page.parser for page in result.pages] == ["mineru"] * 3
+    # 页序与文档序一致（合并不看完成顺序）
+    assert [page.markdown for page in result.pages] == [
+        "ocr-multi-page-1.png",
+        "ocr-multi-page-2.png",
+        "ocr-multi-page-3.png",
+    ]
+    assert len(done_order) == 3

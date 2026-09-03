@@ -373,7 +373,79 @@ def _parse_ocr_page(file_bytes: bytes, filename: str, page_index: int, quality: 
     )
 
 
-def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseResult:
+async def _parse_ocr_page_async(
+    file_bytes: bytes, filename: str, page_index: int, quality: PageQuality
+) -> ParsedPage:
+    """_parse_ocr_page 的异步版（收尾计划改造项 D/4.1）：渲染 to_thread（CPU）
+    + await parse_document_async（网络，共享连接池）；ContractError/失败回退/
+    低置信分支语义逐行对齐同步版。"""
+    import asyncio
+
+    image = await asyncio.to_thread(
+        _render_pdf_page,
+        file_bytes,
+        page_index,
+        scale=settings.vision_pdf_render_scale,
+    )
+    page_number = page_index + 1
+    page_filename = f"{Path(filename).stem}-page-{page_number}.png"
+    try:
+        parsed = await mineru.parse_document_async(
+            image, page_filename, mime_type="image/png"
+        )
+    except mineru.MinerUContractError as exc:
+        raise ConvertError(f"MinerU contract check failed: {exc}") from exc
+    except Exception as exc:
+        if not settings.mineru_fallback_enabled:
+            raise ConvertError(
+                f"MinerU convert failed on page {page_number}: {exc.__class__.__name__}"
+            ) from exc
+        return ParsedPage(
+            page_number=page_number,
+            parser="vision",
+            quality=quality,
+            confidence="low",
+            vision_image=image,
+            vision_mime="image/png",
+            issues=[
+                ParseIssue(
+                    code="mineru_failed",
+                    message="MinerU 页面解析失败，已转 vision，必须人工复核",
+                    page=page_number,
+                    source_values=(exc.__class__.__name__,),
+                )
+            ],
+        )
+
+    if parsed.low_confidence:
+        return ParsedPage(
+            page_number=page_number,
+            parser="vision",
+            markdown=parsed.markdown,
+            quality=quality,
+            confidence="low",
+            vision_image=image,
+            vision_mime="image/png",
+            issues=[
+                ParseIssue(
+                    code="mineru_low_confidence",
+                    message="MinerU 页面结果低置信，已转 vision，必须人工复核",
+                    page=page_number,
+                    source_values=parsed.low_confidence_reasons,
+                )
+            ],
+        )
+    return ParsedPage(
+        page_number=page_number,
+        parser="mineru",
+        markdown=parsed.markdown,
+        quality=quality,
+    )
+
+def _probe_pdf_pages(file_bytes: bytes) -> tuple[list[tuple[int, PageQuality]], dict[int, ParsedPage], int]:
+    """Phase 1（纯 CPU）：pdfplumber 打开 → 逐页质量探测，合格页就地格式化；
+    返回 (ocr_jobs, formatted_pages, total_pages)。同步版与 async 版共用
+    （page 对象仅在 PDF 打开期间有效，必须在同一线程内完成探测与格式化）。"""
     import pdfplumber
 
     try:
@@ -405,6 +477,42 @@ def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseRes
 
     if not total_pages:
         raise ConvertError("PDF has no pages")
+    return ocr_jobs, formatted_pages, total_pages
+
+def _merge_pdf_pages(
+    ocr_results: dict[int, ParsedPage],
+    formatted_pages: dict[int, ParsedPage],
+    total_pages: int,
+) -> ParseResult:
+    """Phase 3（纯 CPU）：按文档序合并页面，视觉页数上限校验。同步版与 async 版共用。"""
+    pages = [
+        ocr_results.get(i) or formatted_pages.get(i)
+        for i in range(total_pages)
+    ]
+    if any(p is None for p in pages):
+        raise ConvertError("PDF page routing left a gap")
+
+    # Enforce vision page limit after the fact.  Pre-checking would be
+    # stricter, but counting actual vision_image pages keeps the original
+    # semantics: a page that MinerU handles with high confidence does not
+    # carry a vision_image and should not count against the budget.
+    vision_page_count = sum(page.vision_image is not None for page in pages)
+    if vision_page_count > settings.vision_max_pdf_pages:
+        raise ConvertError(
+            "PDF has too many pages for complete vision conversion",
+            code="pdf_page_limit_exceeded",
+            details={
+                "vision_page_count": vision_page_count,
+                "max_pages": settings.vision_max_pdf_pages,
+            },
+        )
+    return ParseResult(input_format="pdf", pages=pages)
+
+
+def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseResult:
+    """同步版页级路由（CLI 与既有测试用；生产 async 链路走
+    _convert_pdf_with_page_routing_async）。Phase 1/3 为共享纯函数。"""
+    ocr_jobs, formatted_pages, total_pages = _probe_pdf_pages(file_bytes)
 
     # Phase 2: run MinerU OCR on unqualified pages in parallel.  Each call
     # opens its own httpx client and pypdfium2 document, so they are safe to
@@ -462,6 +570,34 @@ def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseRes
             },
         )
     return ParseResult(input_format="pdf", pages=pages)
+
+
+async def _convert_pdf_with_page_routing_async(file_bytes: bytes, filename: str) -> ParseResult:
+    """异步版页级路由（收尾计划改造项 D/4.1）：Phase 1/3 共享纯函数经
+    to_thread；Phase 2 改 asyncio.gather + Semaphore——单页路径与多页统一
+    走 async 版（删除原双形态），OCR 页级网络等待让出事件循环。"""
+    import asyncio
+
+    ocr_jobs, formatted_pages, total_pages = await asyncio.to_thread(
+        _probe_pdf_pages, file_bytes
+    )
+    semaphore = asyncio.Semaphore(settings.mineru_ocr_concurrency)
+
+    async def _one(page_index: int, quality: PageQuality) -> ParsedPage:
+        async with semaphore:
+            return await _parse_ocr_page_async(
+                file_bytes, filename, page_index, quality
+            )
+
+    ocr_results: dict[int, ParsedPage] = {
+        job[0]: page
+        for job, page in zip(
+            ocr_jobs,
+            await asyncio.gather(*[_one(i, q) for i, q in ocr_jobs]),
+            strict=True,
+        )
+    }
+    return _merge_pdf_pages(ocr_results, formatted_pages, total_pages)
 
 
 def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResult:
@@ -896,9 +1032,9 @@ async def convert_to_markdown_async(file_bytes: bytes, filename: str) -> str:
     """convert_to_markdown 的异步版（收尾计划改造项 D）：
 
     - 校验/图片 hint 轻段直接执行（纯 CPU 毫秒级）；
-    - PDF + MinerU 启用：页级路由暂经 to_thread 复用同步版（页级 OCR 并行
-      改 asyncio.gather 为后续独立提交）；非标准 PDF 兜底走
-      parse_document_async（parse_pdf 的异步等价）；
+    - PDF + MinerU 启用：页级路由走 _convert_pdf_with_page_routing_async
+      （Phase 1/3 to_thread，Phase 2 asyncio.gather + Semaphore）；非标准
+      PDF 兜底走 parse_document_async（parse_pdf 的异步等价）；
     - 本地转换段（Word/Excel）to_thread 复用 _convert_local。
     错误类型/code/msg/details 与同步版逐字一致。
     """
@@ -920,9 +1056,7 @@ async def convert_to_markdown_async(file_bytes: bytes, filename: str) -> str:
     # PDF 启用 MinerU 后先做页级质量探测，只把不合格页送去 OCR。
     if ext == ".pdf" and settings.mineru_enabled:
         try:
-            result = await asyncio.to_thread(
-                _convert_pdf_with_page_routing, file_bytes, filename
-            )
+            result = await _convert_pdf_with_page_routing_async(file_bytes, filename)
             log.info(
                 "pdf_page_routing_succeeded",
                 extra={"file": filename, "page_routes": result.meta()["page_routes"]},
