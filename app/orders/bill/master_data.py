@@ -25,7 +25,8 @@ import yaml
 from app.config import settings
 from app.logging_conf import get_logger
 
-from .master_data_store import get_store
+from .imported_registry import owner_key
+from .master_data_store import DEFAULT_OWNER, get_store
 from .schema import CanonicalOrder
 
 log = get_logger(__name__)
@@ -261,6 +262,15 @@ def defaults_for(kind: str) -> dict[str, Any]:
 # ---- 阈值编排（service 管线挂点入口） ----
 
 
+def _owner_for(sk: str, create_order: bool) -> str | None:
+    """建档维度键（2026-09 统一按 sk 判断，与去重注册表同口径）：
+    create 有 sk → owner_key(sk)；无 sk（测试直调）→ DEFAULT_OWNER 槽；
+    preview 无 sk → None（只读探测无归属：不标注、不列 pending）。"""
+    if sk:
+        return owner_key(sk)
+    return DEFAULT_OWNER if create_order else None
+
+
 def run_master_data(
     orders: list[CanonicalOrder], *, create_order: bool, sk: str = ""
 ) -> dict[str, Any] | None:
@@ -277,6 +287,7 @@ def run_master_data(
     from .master_data_client import create_archives
 
     store = get_store()
+    owner = _owner_for(sk, create_order)
     threshold = int(config["threshold"])
     candidates = collect_candidates(orders)
     report: dict[str, Any] = {
@@ -296,14 +307,18 @@ def run_master_data(
     }
 
     if not create_order:
-        # 只读探测：标注基于当前累计计数（不含本批），不写存储
-        _annotate_pending(candidates, store, threshold)
-        report["pending_top"] = _pending_top(store, threshold)
+        # 只读探测：标注基于当前累计计数（不含本批），不写存储；
+        # 无 sk → 无归属维度，不标注不列 pending（2026-09 owner 化）
+        if owner is not None:
+            _annotate_pending(candidates, store, threshold, owner)
+            report["pending_top"] = _pending_top(store, threshold, owner)
+        else:
+            report["pending_top"] = []
         return report
 
-    # 1) 计数：按单计（一单一次）；计数先于建档（当批累计、当批判定）
+    # 1) 计数：按单计（一单一次）；计数先于建档（当批累计、当批判定）；owner 隔离
     for candidate in candidates:
-        store.record(candidate.kind, candidate.key)
+        store.record(candidate.kind, candidate.key, owner)
     report["incremented"] = dict(
         Counter(c.kind for c in candidates)
     )
@@ -320,7 +335,7 @@ def run_master_data(
             if (kind, key) in attempted:
                 continue
             attempted.add((kind, key))
-            rec = store.get(kind, key)
+            rec = store.get(kind, key, owner)
             if rec and (rec.get("archive_id") or rec.get("exists_external") or rec.get("skip_archive")):
                 continue  # 历史已建档 / TMS 已存在（T27b）/ 本侧不可建档终态（无车牌司机）——均不再重试
             if int(rec.get("count") or 0) < threshold:
@@ -328,21 +343,28 @@ def run_master_data(
             url = endpoint_for(kind)
             if url is None:
                 continue  # 端点 TODO → 只计数不建档（degraded 已在报告）
+            if kind == KIND_FACTORY:
+                # 依赖委托（2026-09-03 止血）：代表候选（首单）所属客户未达终态
+                # 时换同键首个已就绪客户候选建档——防低频客户代表永久拦死整键
+                candidate = _factory_dependency_candidate(
+                    candidate, candidates, store, owner
+                )
             result = _create_one(
-                kind, candidate, rec, store, create_archives, attempted, archived, failed, exists_external, sk
+                kind, candidate, rec, store, create_archives, attempted, archived, failed, exists_external, sk,
+                owner=owner,
             )
             if result:
                 archived[(kind, key)] = result
 
-    # 3) 当批回填 + 订单标注（全部候选，按当前记录取数）
+    # 3) 当批回填 + 订单标注（全部候选，按当前记录取数；owner 隔离）
     for candidate in candidates:
-        rec = store.get(candidate.kind, candidate.key)
+        rec = store.get(candidate.kind, candidate.key, owner)
         if rec and rec.get("archive_id"):
             candidate.order._archive_refs[candidate.kind] = {
                 "archive_id": rec["archive_id"],
                 "key": candidate.key,
             }
-    _annotate_pending(candidates, store, threshold)
+    _annotate_pending(candidates, store, threshold, owner)
 
     report["archived"] = [
         {"kind": kind, "key": key, "display": result["display"], "archive_id": result["archive_id"]}
@@ -350,7 +372,7 @@ def run_master_data(
     ]
     report["failed"] = failed
     report["exists_external"] = exists_external
-    report["pending_top"] = _pending_top(store, threshold)
+    report["pending_top"] = _pending_top(store, threshold, owner)
     return report
 
 
@@ -379,6 +401,8 @@ def _create_one(
     failed: list[dict[str, Any]],
     exists_external: list[dict[str, Any]] | None = None,
     sk: str = "",
+    *,
+    owner: str | None = None,
 ) -> dict[str, Any] | None:
     """建档一次（依赖前置检查 + 建档调用 + 结果登记）；失败进 failed 不抛断。
 
@@ -386,7 +410,7 @@ def _create_one(
     （不再重试，archive_id 保持 null），进 exists_external 报告段（与 failed 区分）。
     """
     forms: dict[str, dict[str, str]] = {}
-
+    no_client_id = False  # 工厂建档无客户 id（客户已存在但无查询接口），失败需登记终态
     if kind == KIND_CLIENT:
         from .master_data_client import build_client_form
 
@@ -394,8 +418,13 @@ def _create_one(
     elif kind == KIND_FACTORY:
         from .master_data_client import build_factory_form
 
-        client_archive_id = _client_archive_id(candidate, store)
-        if not client_archive_id:
+        client_rec = _client_record(candidate, store, owner)
+        # 前置满足 = 所属客户已达终态（本侧建档 archive_id / TMS 已存在
+        # exists_external）；仅计数（从未建档成功）→ 依赖未就绪，工厂缓建
+        # （计数保留下批重试）
+        if not client_rec or not (
+            client_rec.get("archive_id") or client_rec.get("exists_external")
+        ):
             failed.append(
                 {
                     "kind": kind,
@@ -405,7 +434,13 @@ def _create_one(
                 }
             )
             return None
+        # 2026-09-03 修复：客户 exists_external（TMS 已存在、无本地 id）不再本地
+        # 拦截——工厂照常尝试（client_id 空值省略键，仅带 client_name；TMS 是否
+        # 接受由响应登记：成功→archive；已存在→exists_external；其余拒绝→
+        # skip_archive 防每批重发，见下）
+        client_archive_id = str(client_rec.get("archive_id") or "")
         forms[kind] = {candidate.key: build_factory_form(candidate, rec, client_archive_id)}
+        no_client_id = not client_archive_id
     elif kind == KIND_DRIVER:
         from .master_data_client import build_driver_form, build_truck_form
 
@@ -414,7 +449,7 @@ def _create_one(
             # live 实证拒单「请重新选择车牌」）→ 登记 skip_archive 终态不再重试
             # （避免每批都发注定被拒的请求）；订单保留「未建档」标注，计数照常
             # （后续订单带车牌 → 新计数键 → 恢复正常建档）
-            store.mark_skip_archive(kind, candidate.key)
+            store.mark_skip_archive(kind, candidate.key, owner)
             failed.append(
                 {
                     "kind": kind,
@@ -427,7 +462,7 @@ def _create_one(
         if not candidate.phone:
             # TMS CarDriver.php 校验 phone 必填（缺键 500 / 空串 no: phone，2026-08-14
             # live 实证）——无手机号司机同样永久无法建档 → skip_archive 终态
-            store.mark_skip_archive(kind, candidate.key)
+            store.mark_skip_archive(kind, candidate.key, owner)
             failed.append(
                 {
                     "kind": kind,
@@ -441,7 +476,7 @@ def _create_one(
         truck_archive_id = ""
         if candidate.plate:
             plate_key_ = plate_key(candidate.plate)
-            truck_rec = store.get(KIND_TRUCK, plate_key_)
+            truck_rec = store.get(KIND_TRUCK, plate_key_, owner)
             if truck_rec and truck_rec.get("archive_id"):
                 truck_archive_id = truck_rec["archive_id"]
             elif endpoint_for(KIND_TRUCK) is not None and (
@@ -456,7 +491,7 @@ def _create_one(
                 truck_out = (truck_result.get(KIND_TRUCK) or {}).get(plate_key_) or {}
                 if truck_out.get("success"):
                     truck_archive_id = str(truck_out["archive_id"])
-                    store.set_archive(KIND_TRUCK, plate_key_, truck_archive_id)
+                    store.set_archive(KIND_TRUCK, plate_key_, truck_archive_id, owner)
                     archived[(KIND_TRUCK, plate_key_)] = {
                         "display": candidate.plate,
                         "archive_id": truck_archive_id,
@@ -479,13 +514,13 @@ def _create_one(
     results = create_archives(forms, sk)
     outcome = (results.get(kind) or {}).get(candidate.key) or {}
     if outcome.get("success"):
-        store.set_archive(kind, candidate.key, outcome["archive_id"])
+        store.set_archive(kind, candidate.key, outcome["archive_id"], owner)
         return {"display": candidate.display, "archive_id": outcome["archive_id"]}
     if outcome.get("duplicate") or outcome.get("no_id_created"):
         # T27b：TMS 已存在（唯一约束拒单）/ 已添加但响应无主键（no_id_created）→
         # 档案已在 TMS（无查询接口无法取 id）→ 登记 exists_external 不再重试
         # （后者若不登记，每次重试都会再建一条档案——AddCarFactory 实证）
-        store.mark_exists_external(kind, candidate.key)
+        store.mark_exists_external(kind, candidate.key, owner)
         if exists_external is not None:
             exists_external.append(
                 {
@@ -504,15 +539,55 @@ def _create_one(
             "reason": _failure_reason(outcome) or "未知错误",
         }
     )
+    if kind == KIND_FACTORY and no_client_id:
+        # 空 client_id（省略键）被 TMS 拒（非「已存在」类）→ 本侧无法补齐客户 id
+        # （无查询接口）→ 登记 skip_archive 终态，避免每批重发注定被拒的请求
+        store.mark_skip_archive(kind, candidate.key, owner)
     return None
 
 
-def _client_archive_id(candidate: MasterDataCandidate, store) -> str:
-    """工厂候选的所属客户档案 id（同单客户归一键查登记；未建档 → ""）。"""
+def _client_record(candidate: MasterDataCandidate, store, owner: str):
+    """工厂候选的所属客户记录（同单客户归一键查登记；无记录 → None）。
+
+    按 owner 隔离查询：建档维度与计数一致，不同用户互不串扰。
+    返回记录含终态：archive_id（本侧建档）/ exists_external（TMS 已存在）。"""
     if not candidate.client_key:
-        return ""
-    rec = store.get(KIND_CLIENT, candidate.client_key)
-    return str(rec.get("archive_id") or "") if rec else ""
+        return None
+    rec = store.get(KIND_CLIENT, candidate.client_key, owner)
+    return rec if rec else None
+
+
+def _client_finalized(candidate: MasterDataCandidate, store, owner: str) -> bool:
+    """工厂候选的所属客户是否已达终态：本侧建档（archive_id）/ TMS 已存在
+    （exists_external）。仅计数（从未建档成功）不算就绪。"""
+    client_rec = _client_record(candidate, store, owner)
+    return bool(
+        client_rec
+        and (client_rec.get("archive_id") or client_rec.get("exists_external"))
+    )
+
+
+def _factory_dependency_candidate(
+    candidate: MasterDataCandidate,
+    candidates: list[MasterDataCandidate],
+    store,
+    owner: str,
+) -> MasterDataCandidate:
+    """工厂依赖委托（2026-09-03 止血修复）：同键任一所属客户就绪即可建档。
+
+    工厂键按「名+地址」聚合（地址缺失退化按名）→ 跨客户同名门点合并一键；
+    若仅以代表候选（首单）的客户判依赖，该客户永不达阈值（低频）时整键每批
+    被依赖前置拦截、永不建档（生产「工厂宜兴 764/5」同构案例）。委托：代表
+    未就绪时在同键候选中取首个所属客户达终态的候选建档（client_id 挂该客户）；
+    全部未就绪回退代表（failed 缓建，下批重试——与既有语义一致）。"""
+    if _client_finalized(candidate, store, owner):
+        return candidate
+    for alt in candidates:
+        if alt.kind != KIND_FACTORY or alt.key != candidate.key:
+            continue
+        if _client_finalized(alt, store, owner):
+            return alt
+    return candidate
 
 
 def _failure_reason(outcome: dict[str, Any]) -> str:
@@ -527,12 +602,13 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
 
 
 def _annotate_pending(
-    candidates: list[MasterDataCandidate], store, threshold: int
+    candidates: list[MasterDataCandidate], store, threshold: int, owner: str
 ) -> None:
     """订单标注：未建档（有计数、未达阈值）→ unmapped_note 追加「未建档(x/N)」；
-    T27b：exists_external（TMS 已存在）不标注（档案已在，仅无 id 可回填）。"""
+    T27b：exists_external（TMS 已存在）不标注（档案已在，仅无 id 可回填）。
+    按 owner 隔离：不同 sk 各自状态（preview 无 sk 不调用本函数）。"""
     for candidate in candidates:
-        rec = store.get(candidate.kind, candidate.key)
+        rec = store.get(candidate.kind, candidate.key, owner)
         if not rec or rec.get("archive_id") or rec.get("exists_external"):
             continue
         count = int(rec.get("count") or 0)
@@ -542,12 +618,17 @@ def _annotate_pending(
             candidate.order.unmapped_note = "；".join(p for p in (existing, note) if p)
 
 
-def _pending_top(store, threshold: int) -> list[dict[str, Any]]:
+def _pending_top(store, threshold: int, owner: str) -> list[dict[str, Any]]:
     """未达阈值 TOP 清单（count 降序，上限 PENDING_TOP_N；预览与创建共用；
-    T27b：exists_external 已存在外部，不列入 pending）。"""
+    T27b：exists_external 已存在外部，不列入 pending）。
+
+    按 owner 过滤：只列当前 sk 维度记录（owner 化，2026-09）。"""
     rows: list[dict[str, Any]] = []
     for kind, entries in store.snapshot().items():
-        for key, rec in entries.items():
+        for key, owners in entries.items():
+            rec = owners.get(owner)
+            if not rec:
+                continue
             count = int(rec.get("count") or 0)
             if count <= 0 or count >= threshold or rec.get("archive_id") or rec.get("exists_external"):
                 continue

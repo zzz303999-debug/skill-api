@@ -292,6 +292,49 @@ class TestDependencyOrder:
         assert get_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
         assert get_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))["count"] == 1
 
+    def test_factory_archives_via_ready_client_when_lead_low_freq(
+        self, fake_create
+    ):
+        """依赖委托（2026-09-03 止血）：同门点多客户合并一键，代表候选（首单）
+        客户永不达阈值（低频）不再拦死整键——任一所属客户就绪即建档，
+        client_id 挂首个就绪客户（生产「工厂宜兴 764/5」同构案例复现）。"""
+        fake_create(_default_cfg(threshold=3))
+        # 甲仅 2 单（2/3 永不达阈值）；乙 3 单当批建档；门点共用仓 5 单达阈值，
+        # 首单恰为甲的订单 → 委托到乙建档
+        orders = [
+            _make_order(customer="客户甲", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户甲", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户乙", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户乙", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户乙", door="共用仓", address="共用仓地址", driver=None),
+        ]
+        report = run_master_data(orders, create_order=True)
+        factory_archived = [a for a in report["archived"] if a["kind"] == KIND_FACTORY]
+        assert factory_archived and factory_archived[0]["display"] == "共用仓"
+        # 委托建档：factory 调用在 client 之后，form 挂首个就绪客户乙的 id
+        factory_form = fake_create.calls[-1][KIND_FACTORY][
+            factory_key("共用仓", "共用仓地址")
+        ]
+        assert factory_form["client_id"] == "aid-client-0"
+        assert factory_form["client_name"] == "客户乙"
+
+    def test_factory_still_blocked_when_all_clients_pending(self, fake_create):
+        """委托边界：同键全部所属客户均未就绪（仅计数/失败）→ 仍 failed 缓建。
+
+        与 test_factory_skipped_without_client 同构的另一种形态：代表候选客户
+        已就绪的假设不存在时，委托不得误放行。"""
+        fake_create(_default_cfg(threshold=3))
+        # 门点 3 单达阈值，但甲 2/3、乙 1/3 均未达 → 委托无就绪客户可换 → 拦截
+        orders = [
+            _make_order(customer="客户甲", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户甲", door="共用仓", address="共用仓地址", driver=None),
+            _make_order(customer="客户乙", door="共用仓", address="共用仓地址", driver=None),
+        ]
+        report = run_master_data(orders, create_order=True)
+        failed = [f for f in report["failed"] if f["kind"] == KIND_FACTORY]
+        assert failed and "所属客户未建档" in failed[0]["reason"]
+        assert not any(a["kind"] == KIND_FACTORY for a in report["archived"])
+
 
 class TestDriverArchived:
     """司机建档（2026-08-14 实证启用：/Car/CarDriver/AddCarDriver——bailor_title/
@@ -656,10 +699,18 @@ class TestPreviewReadOnly:
 
     def test_preview_shows_current_pending(self, fake_create):
         fake_create()
-        run_master_data([_make_order()], create_order=True)  # 计数 1
-        report = run_master_data([_make_order()], create_order=False)
+        # 2026-09 owner 化：建档状态按 sk 隔离；preview 带同 sk 才展示该用户计数
+        run_master_data([_make_order()], create_order=True, sk="sk-preview")  # 计数 1
+        report = run_master_data([_make_order()], create_order=False, sk="sk-preview")
         pending = [p for p in report["pending_top"] if p["kind"] == KIND_CLIENT]
         assert pending and pending[0]["count"] == 1 and pending[0]["threshold"] == 5
+
+    def test_preview_without_sk_no_pending_note(self, fake_create):
+        """owner 化：preview 不带 sk（无归属维度）→ 不标注、不列 pending。"""
+        fake_create()
+        run_master_data([_make_order()], create_order=True)  # 计数 1（default 槽）
+        report = run_master_data([_make_order()], create_order=False)
+        assert report["pending_top"] == []
 
 
 class TestDisabled:
@@ -741,3 +792,57 @@ class TestGoldenIntegration:
             o.unmapped_note and "未建档" in o.unmapped_note
             for o in result.canonical_orders
         )
+
+
+class TestOwnerIsolation:
+    """2026-09 owner 化：建档状态按 sk 维度隔离（与去重注册表同口径）。
+
+    不同 sk（不同 TMS 用户）各自计数/建档/终态，互不串扰；旧版全局条目
+    加载迁入 _legacy 槽保留审计、不再参与判定。
+    """
+
+    def test_store_record_get_isolated_by_owner(self, md_config):
+        md_config(_default_cfg(threshold=5))
+        store = get_store()
+        owner_a = md_module.owner_key("sk-a")
+        owner_b = md_module.owner_key("sk-b")
+        store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
+        store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
+        store.record(KIND_CLIENT, client_key("锦煦"), owner_b)
+        # A 累计 2、B 累计 1，互不可见
+        assert store.get(KIND_CLIENT, client_key("锦煦"), owner_a)["count"] == 2
+        assert store.get(KIND_CLIENT, client_key("锦煦"), owner_b)["count"] == 1
+        # 无 sk 槽（default）为空：不误读他人状态
+        assert store.get(KIND_CLIENT, client_key("锦煦")) is None
+
+    def test_archive_terminal_state_isolated_by_owner(self, md_config):
+        """A 已建档/已存在不阻塞 B 建档（TMS 各 su 空间独立）。"""
+        store = get_store()
+        owner_a = md_module.owner_key("sk-a")
+        owner_b = md_module.owner_key("sk-b")
+        store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
+        store.set_archive(KIND_CLIENT, client_key("锦煦"), "c-a", owner_a)
+        # B 侧无终态 → 建档判定应重试（run_master_data 建档循环中 get 只取 B 槽）
+        rec = store.get(KIND_CLIENT, client_key("锦煦"), owner_b)
+        assert rec is None
+
+    def test_legacy_flat_file_migrated_to_legacy_slot(self, tmp_path, md_config):
+        """旧版全局格式 {kind: {key: rec}} 加载 → 迁入 _legacy 槽，不再参与判定。"""
+        md_config(_default_cfg(threshold=1))
+        path = tmp_path / "master_data.json"
+        import json as _json
+
+        path.write_text(
+            _json.dumps(
+                {"client": {client_key("锦煦"): {"count": 764, "archive_id": None}}},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        store = MasterDataStore(path)
+        # 迁移保留审计（_legacy 槽）
+        snap = store.snapshot()
+        owners = snap["client"][client_key("锦煦")]
+        assert owners["_legacy"]["count"] == 764
+        # 真实 owner 不受 legacy 影响（从 0 计，不误判已存在/已建档）
+        assert store.get(KIND_CLIENT, client_key("锦煦"), md_module.owner_key("sk-new")) is None

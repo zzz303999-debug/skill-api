@@ -54,6 +54,8 @@ def _source_col_names(template: dict) -> set[str]:
     因为 L2 扫描的是列名行；「列名#N」取 # 前部分（同名列消歧不影响列名集合）。
     fees 段仅旧 schema（费目名 → 源列名，jinxin_v1 既有语义）参与；新 schema
     （T10 费用通道配置，含 channels 键）费用列自动发现/配置声明，不参与 L2。
+    2026-09-03：match.optional_headers（识别可选列，如新式样手机号/车牌——抽取
+    需要但缺列不应降重合度）从期望集合剔除，避免加列挤掉精简/旧式样文件的 L2 命中。
     """
     names: set[str] = set()
     for value in template.get("columns", {}).values():
@@ -66,13 +68,16 @@ def _source_col_names(template: dict) -> set[str]:
             if col:
                 names.add(_normalize(col))
     fees = template.get("fees", {}) or {}
-    if isinstance(fees, dict) and "channels" in fees:
-        return names
-    for value in fees.values():
-        for col in value if isinstance(value, list) else [value]:
-            col = str(col).strip()
-            if col:
-                names.add(_normalize(col))
+    if not (isinstance(fees, dict) and "channels" in fees):
+        # 旧 fees schema（费目名 → 源列名）参与 L2；新 schema 自动发现不参与
+        for value in fees.values():
+            for col in value if isinstance(value, list) else [value]:
+                col = str(col).strip()
+                if col:
+                    names.add(_normalize(col))
+    optional = template.get("match", {}).get("optional_headers") or []
+    if optional:
+        names -= {_normalize(str(h)) for h in optional if str(h).strip()}
     return names
 
 
