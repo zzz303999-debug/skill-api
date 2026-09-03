@@ -3,13 +3,15 @@
 兼容常见的 ``mineru-api`` ``POST /file_parse`` 接口。客户端保留 Markdown、
 结构块和低置信依据，支持 JSON、直接 Markdown 或 ZIP 响应。
 
-异步版本（parse_document_async，2026-09 异步化改造新增）：网络段走
-httpx.AsyncClient，前置校验/响应解码/质量评估复用同步纯函数，语义与
-同步版逐项一致；同步版本保留至异步链路全部切换后统一清理（双轨过渡）。
+异步版本（parse_document_async，2026-09 异步化改造新增）：网络段走共享
+AsyncClient 懒加载单例（收尾计划 §8 拍板，连接池复用，页级 OCR 并行收益
+最大），前置校验/响应解码/质量评估复用同步纯函数，语义与同步版逐项一致；
+同步版本保留至异步链路全部切换后统一清理（双轨过渡）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import mimetypes
@@ -328,13 +330,34 @@ def parse_pdf(file_bytes: bytes, filename: str) -> str:
     return parse_document(file_bytes, filename, mime_type="application/pdf").markdown
 
 
+# ---- 共享 AsyncClient 单例（2026-09 收尾计划 §8 拍板，对齐 orders/http_client 模式）----
+# 连接池复用（页级 OCR 并行时收益最大）；timeout 在构造时固定（MinerU 全端点同超时）。
+# 跨 loop 检测重建：AsyncClient 连接池绑定事件循环，pytest-asyncio 每测试新 loop
+# 的场景检测到 loop 变化时重建，生产单 loop 常驻不受影响。
+_async_client: httpx.AsyncClient | None = None
+_async_client_loop: asyncio.AbstractEventLoop | None = None
+
+
+def get_async_client() -> httpx.AsyncClient:
+    """共享 AsyncClient 懒加载单例（连接池复用；测试可直接 monkeypatch 替换）。"""
+    global _async_client, _async_client_loop
+    loop = asyncio.get_running_loop()
+    if _async_client is not None and _async_client_loop is not loop:
+        # 跨事件循环（测试多 loop）：旧实例废弃由 GC 回收
+        _async_client = None
+    if _async_client is None:
+        _async_client = httpx.AsyncClient(timeout=settings.mineru_timeout_seconds)
+        _async_client_loop = loop
+    return _async_client
+
+
 async def parse_document_async(
     file_bytes: bytes,
     filename: str,
     *,
     mime_type: str | None = None,
 ) -> MinerUParseResult:
-    """parse_document 的异步版：网络段走 AsyncClient，其余逻辑逐行一致
+    """parse_document 的异步版：网络段走共享 AsyncClient 单例，其余逻辑逐行一致
     （前置校验/表单构造/版本契约/解码/质量评估复用同步纯函数）。"""
     if not settings.mineru_base_url.strip():
         raise MinerUError("MINERU_BASE_URL is empty")
@@ -354,15 +377,15 @@ async def parse_document_async(
 
     start = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=settings.mineru_timeout_seconds) as client:
-            response = await client.post(
-                url,
-                headers=headers,
-                data=form,
-                files={"files": (safe_filename, file_bytes, upload_mime)},
-                follow_redirects=True,
-            )
-            response.raise_for_status()
+        client = get_async_client()
+        response = await client.post(
+            url,
+            headers=headers,
+            data=form,
+            files={"files": (safe_filename, file_bytes, upload_mime)},
+            follow_redirects=True,
+        )
+        response.raise_for_status()
     except httpx.HTTPError as exc:
         raise MinerUError(f"MinerU request failed: {exc.__class__.__name__}") from exc
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -232,13 +233,28 @@ def _build_user_message_vision(
         ],
     ]
 
+@dataclass(frozen=True)
+class _NeedsMineruOcr:
+    """扫描 PDF 无视觉分支的中间信号（收尾计划改造项 B）。
+
+    _convert_file（CPU 段）不再内联 MinerU 网络调用，遇到「扫描 PDF +
+    llm_vision_enabled=False」时返回本哨兵；_convert_file_async 编排层
+    await parse_document_async 后完成组装/错误抛出（语义与原内联分支
+    逐字一致）。"""
+
+    file_bytes: bytes
+    filename: str
+    doc_format: str
+
+
 def _convert_file(
     file_bytes: bytes, filename: str
-) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
-    """把附件转成 LLM 可用的输入。
+) -> tuple[str | None, str, dict[str, Any], list[dict] | str] | _NeedsMineruOcr:
+    """把附件转成 LLM 可用的输入（CPU 段；调用方为 _convert_file_async）。
 
-    返回 (source_text, doc_format, conversion_meta, user_content)。
+    返回 (source_text, doc_format, conversion_meta, user_content)；
     user_content 为字符串（纯文本）或 list[dict]（vision 消息）。
+    扫描 PDF 无视觉分支返回 _NeedsMineruOcr 哨兵，由编排层接管网络段。
     """
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_EXTS:
@@ -335,40 +351,10 @@ def _convert_file(
                 },
             )
         if not settings.llm_vision_enabled:
-            # 扫描 PDF：模型无视觉，改交 MinerU OCR 解析而不是直接拒绝
-            try:
-                scanned = mineru.parse_document(
-                    file_bytes, filename, mime_type="application/pdf"
-                )
-            except Exception as exc:
-                raise ConvertError(
-                    "scan PDF has no extractable text and MinerU OCR failed; "
-                    "check the MinerU service or use a text-based PDF",
-                    code="vision_disabled_no_ocr",
-                    details={
-                        "file": Path(filename).name,
-                        "mineru_error": f"{exc.__class__.__name__}: {exc}",
-                    },
-                ) from exc
-            if not scanned.markdown.strip():
-                raise ConvertError(
-                    "scan PDF has no extractable text and MinerU OCR returned "
-                    "empty; check the MinerU service or use a text-based PDF",
-                    code="vision_disabled_no_ocr",
-                    details={"file": Path(filename).name},
-                )
-            # MinerU OCR 成功：走纯文本抽取；扫描件无独立文本层可交叉核验
-            conversion_meta = {
-                "parser": "mineru",
-                "parser_fallback": True,
-                "input_format": "pdf",
-                "ocr_unverified": True,
-            }
-            return (
-                scanned.markdown,
-                doc_format,
-                conversion_meta,
-                _build_user_message_text(scanned.markdown, filename, doc_format),
+            # 扫描 PDF：模型无视觉，交 MinerU OCR——网络调用提升到编排层
+            # await（收尾计划改造项 B：CPU 段返回哨兵信号，不再内联同步网络）
+            return _NeedsMineruOcr(
+                file_bytes=file_bytes, filename=filename, doc_format=doc_format
             )
         page_images = render_pdf_pages(
             file_bytes,
@@ -422,6 +408,58 @@ def _convert_file(
     else:
         user_content = _build_user_message_text(source_text, filename, doc_format)
     return source_text, doc_format, conversion_meta, user_content
+
+
+async def _convert_file_async(
+    file_bytes: bytes, filename: str
+) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
+    """两段式转换编排（收尾计划改造项 B）：CPU 段 to_thread，网络段 await。
+
+    扫描件哨兵（_NeedsMineruOcr）→ await mineru.parse_document_async（共享
+    AsyncClient 单例）；异常/空 markdown 抛 ConvertError(vision_disabled_no_ocr)，
+    错误类型/code/msg/details 与原同步内联分支逐字一致。"""
+    import asyncio
+
+    result = await asyncio.to_thread(_convert_file, file_bytes, filename)
+    if not isinstance(result, _NeedsMineruOcr):
+        return result
+    try:
+        scanned = await mineru.parse_document_async(
+            result.file_bytes, result.filename, mime_type="application/pdf"
+        )
+    except Exception as exc:
+        raise ConvertError(
+            "scan PDF has no extractable text and MinerU OCR failed; "
+            "check the MinerU service or use a text-based PDF",
+            code="vision_disabled_no_ocr",
+            details={
+                "file": Path(result.filename).name,
+                "mineru_error": f"{exc.__class__.__name__}: {exc}",
+            },
+        ) from exc
+    if not scanned.markdown.strip():
+        raise ConvertError(
+            "scan PDF has no extractable text and MinerU OCR returned "
+            "empty; check the MinerU service or use a text-based PDF",
+            code="vision_disabled_no_ocr",
+            details={"file": Path(result.filename).name},
+        )
+    # MinerU OCR 成功：走纯文本抽取；扫描件无独立文本层可交叉核验
+    conversion_meta = {
+        "parser": "mineru",
+        "parser_fallback": True,
+        "input_format": "pdf",
+        "ocr_unverified": True,
+    }
+    return (
+        scanned.markdown,
+        result.doc_format,
+        conversion_meta,
+        _build_user_message_text(
+            scanned.markdown, result.filename, result.doc_format
+        ),
+    )
+
 
 def build_document_order_data(
     extracted: OrderDocumentExtraction,
@@ -504,16 +542,15 @@ async def parse_document_to_order_async(
 ) -> dict[str, Any]:
     """parse_document_to_order（2026-09 异步化改造后为生产唯一入口）（Phase 3 路由异步化）：
 
-    - 转换段（_convert_file：LibreOffice 转换/PDF 渲染 CPU 密集 + MinerU 网络）
-      整体入线程池——不阻塞事件循环；MinerU 的异步化需拆分 _convert_file
-      内部管线（~200 行混合 CPU/网络），留待后续迭代（此处注释标记）；
+    - 转换段两段式（收尾计划改造项 B）：_convert_file_async 编排——CPU 段
+      （LibreOffice 转换/PDF 渲染）to_thread，扫描件 MinerU OCR 走
+      parse_document_async（共享 AsyncClient 单例，不再占用线程池槽位）；
     - LLM 抽取（最长等待段，timeout 180s）走 achat_json 真异步；
     - 兑底修复/归一化/组装段。
     """
-    import asyncio
 
-    source_text, doc_format, conversion_meta, user_content = await asyncio.to_thread(
-        _convert_file, file_bytes, filename
+    source_text, doc_format, conversion_meta, user_content = await _convert_file_async(
+        file_bytes, filename
     )
     extracted_at = datetime.now(UTC).replace(microsecond=0).isoformat()
 

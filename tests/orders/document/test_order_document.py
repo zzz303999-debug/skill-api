@@ -1560,3 +1560,103 @@ async def test_parse_document_to_order_keeps_multi_row_data(monkeypatch):
     ]
     assert result["order_data"]["data"] == result["extracted"]["data"]
     assert result["missing_fields"] == []
+
+
+# ---------- 扫描件哨兵路径（收尾计划改造项 B：两段式转换编排） ----------
+
+
+def _scan_sentinel(file_bytes=b"fake-scanned-pdf", filename="order.pdf"):
+    return document_module._NeedsMineruOcr(
+        file_bytes=file_bytes, filename=filename, doc_format="pdf"
+    )
+
+
+class _FakeMineruResult:
+    """MinerUParseResult 最小替身（哨兵路径仅消费 markdown 字段）。"""
+
+    def __init__(self, markdown: str):
+        self.markdown = markdown
+
+
+async def test_scan_pdf_sentinel_awaits_mineru_async(monkeypatch):
+    """哨兵路径：CPU 段返回 _NeedsMineruOcr → 编排层 await parse_document_async，
+    透传参数（mime_type=application/pdf）与 conversion_meta 标记逐项对齐。"""
+    captured = {}
+    monkeypatch.setattr(
+        document_module, "_convert_file", lambda fb, fn: _scan_sentinel(fb, fn)
+    )
+
+    async def fake_parse(file_bytes, filename, *, mime_type=None):
+        captured.update(
+            file_bytes=file_bytes, filename=filename, mime_type=mime_type
+        )
+        return _FakeMineruResult("提单号：KMTCSHAP950393\n件数：100 CTNS")
+
+    monkeypatch.setattr(
+        document_module.mineru, "parse_document_async", fake_parse
+    )
+
+    result = await document_module._convert_file_async(b"fake-scanned-pdf", "order.pdf")
+
+    source_text, doc_format, meta, user_content = result
+    assert captured == {
+        "file_bytes": b"fake-scanned-pdf",
+        "filename": "order.pdf",
+        "mime_type": "application/pdf",
+    }
+    assert source_text == "提单号：KMTCSHAP950393\n件数：100 CTNS"
+    assert doc_format == "pdf"
+    assert meta == {
+        "parser": "mineru",
+        "parser_fallback": True,
+        "input_format": "pdf",
+        "ocr_unverified": True,
+    }
+    assert isinstance(user_content, str)
+    assert "KMTCSHAP950393" in user_content
+    assert "===== 文档内容开始 =====" in user_content
+
+
+async def test_scan_pdf_sentinel_mineru_error_raises_convert_error(monkeypatch):
+    """MinerU 异常 → ConvertError(vision_disabled_no_ocr)，details 含 mineru_error。"""
+    monkeypatch.setattr(
+        document_module, "_convert_file", lambda fb, fn: _scan_sentinel(fb, fn)
+    )
+
+    async def fake_parse(*_args, **_kwargs):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(
+        document_module.mineru, "parse_document_async", fake_parse
+    )
+
+    from app.core.errors import ConvertError
+
+    with pytest.raises(ConvertError) as exc_info:
+        await document_module._convert_file_async(b"x", "order.pdf")
+    assert exc_info.value.code == "vision_disabled_no_ocr"
+    assert exc_info.value.details == {
+        "file": "order.pdf",
+        "mineru_error": "RuntimeError: connection refused",
+    }
+
+
+async def test_scan_pdf_sentinel_empty_markdown_raises_convert_error(monkeypatch):
+    """MinerU 返回空 markdown → ConvertError(vision_disabled_no_ocr)（空文档绝不喂 LLM）。"""
+    monkeypatch.setattr(
+        document_module, "_convert_file", lambda fb, fn: _scan_sentinel(fb, fn)
+    )
+
+    async def fake_parse(*_args, **_kwargs):
+        return _FakeMineruResult("   \n  ")
+
+    monkeypatch.setattr(
+        document_module.mineru, "parse_document_async", fake_parse
+    )
+
+    from app.core.errors import ConvertError
+
+    with pytest.raises(ConvertError) as exc_info:
+        await document_module._convert_file_async(b"x", "order.pdf")
+    assert exc_info.value.code == "vision_disabled_no_ocr"
+    assert exc_info.value.details == {"file": "order.pdf"}
