@@ -39,9 +39,11 @@ master_data:
     driver_create: "https://s3.jxt56.com/Car/CarDriver/AddCarDriver"
     price_create: "https://s3.jxt56.com/Car/CarPrice/AddCarPrice"
   # 建档默认值（逆推规范 §14 最小字段集之外的必要值；未配键不发送）
+  # 归属字段动态化
+  # 归属键，由 TMS 按 sk 会话自动分发
   defaults:
-    client:  { cg_id: "4", cg_name: 同行, sys_type: "1", su_id: "15478" }
-    truck:   { section_id: "6987", remind_id: "15478", sys_type: "1", type: bill }
+    client:  { cg_id: "4", cg_name: 同行, sys_type: "1" }
+    truck:   { section_id: "6987", sys_type: "1", type: bill }
     driver:  { sinout: 自做, sys_type: "1" }
     factory: { sys_type: "1" }
     bailor:  { sys_type: "1", is_involve: "1", is_quoted: "0" }
