@@ -253,6 +253,55 @@ class TestConstructed:
         assert [o.order_data["driver"][0]["b_date"] for o in orders] == ["2015-09-01", "2015-09-02"]
         assert all("c_note" not in o.order_data for o in orders)
 
+    def test_work_time_priority_over_date(self):
+        """「日期」列（结算/对账日）与「做箱时间」列并存 → 做箱时间优先
+        （2026-09-03 用户拍板：导入 TMS 的做箱时间以表格「做箱时间」列为准）。"""
+        row = BillRow(
+            seq="1",
+            c_title="甲",
+            order_num1="TESTBL10021",
+            b_type="40HQ",
+            b_date="9-1",  # 「日期」列（结算日，导错对象）
+            b_date_time="8-20",  # 「做箱时间」列（应导入 TMS 的值）
+        )
+        o = go([row], PERIOD_2015)[0]
+        assert o.order_data["driver"][0]["b_date"] == "2015-08-20"
+        assert o.order_data["month"] == "2015-08"
+
+    def test_date_column_fallback_when_no_work_time(self):
+        """仅「日期」列（无做箱时间列）→ 回退日期列（既有语义不变）。"""
+        o = go(
+            [BillRow(seq="1", c_title="乙", order_num1="TESTBL10022", b_type="40HQ", b_date="9-1")],
+            PERIOD_2015,
+        )[0]
+        assert o.order_data["driver"][0]["b_date"] == "2015-09-01"
+
+    def test_work_time_alone(self):
+        """仅「做箱时间」列（无日期列）→ 直接用做箱时间。"""
+        o = go(
+            [
+                BillRow(
+                    seq="1", c_title="丙", order_num1="TESTBL10023", b_type="40HQ", b_date_time="8-20"
+                )
+            ],
+            PERIOD_2015,
+        )[0]
+        assert o.order_data["driver"][0]["b_date"] == "2015-08-20"
+
+    def test_work_time_column_not_leaked_to_c_note(self):
+        """两列并存时日期列值仅作回退不丢失（防信息丢，但不再充当 b_date）。"""
+        row = BillRow(
+            seq="1",
+            c_title="丁",
+            order_num1="TESTBL10024",
+            b_type="40HQ",
+            b_date="12-31",
+            b_date_time="1-1",
+        )
+        o = go([row], PERIOD_2015)[0]
+        # 做箱时间 1-1 → 2015-01-01（跨年区间起始年），日期列 12-31 不进 b_date
+        assert o.order_data["driver"][0]["b_date"] == "2015-01-01"
+
     def test_c_note_segments(self):
         """c_note 段顺序与分隔符；全空段省略。"""
         row = BillRow(
