@@ -311,14 +311,25 @@ def _reject(raw: dict, reasons: list[str], zone_lines: list[str]) -> None:
     )
 
 
-def map_header(view) -> AiHeaderResult:
-    """AI 表头映射主入口（含校验闸门）。
+def build_llm_request(
+    zone_lines: list[str],
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """构造 LLM 表头映射请求（纯函数）：返回 (messages, json_schema)。
 
-    指纹未命中模板库时由 parser 调用；LLM 不可用/响应非法 → LLMError /
-    ParseError 上抛（调用方回退精确匹配）；校验闸门不过 → BadRequestError。
+    两段式编排在 async 层持本请求调用 achat_json（网络段真异步）；同步路径
+    map_header 内部走 chat_json——两个入口的 messages/schema 完全一致。
     """
-    zone_lines = format_header_zone(view)
-    raw, meta = chat_json(_build_messages(zone_lines), json_schema=_AI_SCHEMA)
+    return _build_messages(zone_lines), _AI_SCHEMA
+
+
+def validate_ai_result(
+    view, raw: dict, meta: dict, zone_lines: list[str]
+) -> AiHeaderResult:
+    """校验闸门 + 结果组装（纯 CPU，无 LLM 调用）：同步/两段两入口共用。
+
+    四道闸门不过 → BadRequestError(header_mapping_rejected)（details 含
+    AI 映射 / 失败原因 / 表头原文）；raw 非法形态（header_row/mapping 缺失
+    等）同样闸门拒绝。编排层经 to_thread 执行（CPU 密集）。"""
     log.info(
         "ai_header_mapped",
         extra={
@@ -444,6 +455,20 @@ def map_header(view) -> AiHeaderResult:
         ignored_cols=ignored_cols,
         raw=raw,
     )
+
+
+def map_header(view) -> AiHeaderResult:
+    """AI 表头映射主入口（同步，含校验闸门）——parse_bill 同步解析路径使用。
+
+    生产两段式编排在 service 层走 build_llm_request + achat_json +
+    validate_ai_result（网络段真异步），本函数仅供同步 parse_bill 与测试
+    使用；LLM 不可用/响应非法 → LLMError / ParseError 上抛（调用方回退
+    精确匹配）；校验闸门不过 → BadRequestError。
+    """
+    zone_lines = format_header_zone(view)
+    messages, schema = build_llm_request(zone_lines)
+    raw, meta = chat_json(messages, json_schema=schema)
+    return validate_ai_result(view, raw, meta, zone_lines)
 
 
 def _strip_whitespace(text: str) -> str:

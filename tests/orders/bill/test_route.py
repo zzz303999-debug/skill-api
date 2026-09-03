@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import app.orders.bill.ai_header as ai_header_module
 import app.orders.bill.service as service_module
 import app.orders.http_client as http_client_module
 from app.core.config import settings
@@ -595,11 +594,11 @@ class TestFileErrors:
         from types import SimpleNamespace
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
-        monkeypatch.setattr(
-            service_module,
-            "parse_bill",
-            lambda _path: SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None),
-        )
+
+        async def fake_parse_stage(_filename, _file_bytes):
+            return SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None)
+
+        monkeypatch.setattr(service_module, "_parse_stage_async", fake_parse_stage)
         with TestClient(app) as client:
             r = self._upload(client, "many.xlsx", b"x")
             assert r.status_code == 400
@@ -620,11 +619,11 @@ class TestFileErrors:
         from types import SimpleNamespace
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
-        monkeypatch.setattr(
-            service_module,
-            "parse_bill",
-            lambda _path: SimpleNamespace(rows=[], canonical_rows=[None] * 3, period=None),
-        )
+
+        async def fake_parse_stage(_filename, _file_bytes):
+            return SimpleNamespace(rows=[], canonical_rows=[None] * 3, period=None)
+
+        monkeypatch.setattr(service_module, "_parse_stage_async", fake_parse_stage)
         with TestClient(app) as client:
             r = self._upload(client, "many.xlsx", b"x")
             assert r.status_code == 400
@@ -638,11 +637,11 @@ class TestFileErrors:
         from app.orders.bill import imported_registry
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
-        monkeypatch.setattr(
-            service_module,
-            "parse_bill",
-            lambda _path: SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None),
-        )
+
+        async def fake_parse_stage(_filename, _file_bytes):
+            return SimpleNamespace(rows=[None] * 3, canonical_rows=None, period=None)
+
+        monkeypatch.setattr(service_module, "_parse_stage_async", fake_parse_stage)
         calls = {"addwork": 0, "lookup": 0, "register": 0}
         registry = imported_registry.get_imported_registry()
 
@@ -1017,13 +1016,16 @@ def _build_hetero_bill(tmp_path) -> Path:
 def test_header_mapping_rejected_unified_envelope_400(monkeypatch, tmp_path):
     """AI 映射校验失败（缺必映射字段 box_type_qty）→ 400 统一外壳三字段。
 
-    贯通链路：异构表头 → 模板未命中 → map_header（LLM mock 返回缺字段映射）
-    → 校验闸门拒绝 → BadRequestError(header_mapping_rejected) → 路由统一外壳
-    {code, msg, data}；msg 对照 errors.py 注册表客服文案，不硬编码。
+    贯通链路：异构表头 → 模板未命中 → 两段式编排 achat_json（LLM mock
+    返回缺字段映射）→ 校验闸门拒绝 → BadRequestError(header_mapping_rejected)
+    → 路由统一外壳 {code, msg, data}；msg 对照 errors.py 注册表客服文案，
+    不硬编码。
     """
+    import app.orders.bill.service as service_module
+
     calls = {"n": 0}
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_achat_json(messages, **_kwargs):
         calls["n"] += 1
         return (
             {
@@ -1041,7 +1043,7 @@ def test_header_mapping_rejected_unified_envelope_400(monkeypatch, tmp_path):
             {"model": "fake", "usage": None},
         )
 
-    monkeypatch.setattr(ai_header_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(service_module, "achat_json", fake_achat_json)
     path = _build_hetero_bill(tmp_path)
     with TestClient(app) as client:
         r = upload(client, path.name, path.read_bytes())

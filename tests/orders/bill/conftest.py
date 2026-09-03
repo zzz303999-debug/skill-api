@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import app.orders.bill.ai_header as ai_header_module
+import app.orders.bill.service as service_module
 from app.core.errors import LLMError
 from app.orders.bill import BillOrder, group_orders, parse_bill
 from helpers import REAL_XLS, build_bill_bytes
@@ -19,15 +20,21 @@ _REAL_MISSING = "golden 样本未入库（表格文件不入库），本地放�
 def _llm_unavailable_for_bill(monkeypatch):
     """既有用例默认回退路径：AI 表头映射视为 LLM 不可用（测试环境无网关）。
 
-    指纹未命中的构造账单会触发 AI 流程；此 fixture 让 chat_json 抛 LLMError，
-    parser 回退现有精确匹配，行为与改造前一致。需要真实 AI 映射的用例
-    （test_template.py）自行 monkeypatch 覆盖 ai_header.chat_json。
+    指纹未命中的构造账单会触发 AI 流程；此 fixture 让两条链路均抛 LLMError，
+    回退现有精确匹配，行为与改造前一致：同步链路 parse_bill 走
+    ai_header.chat_json；生产两段式编排（_parse_stage_async）走
+    service.achat_json。需要真实 AI 映射的用例（test_template.py 同步 /
+    test_ai_header_async.py 两段式）自行 monkeypatch 覆盖对应入口。
     """
 
     def _unavailable(*_args, **_kwargs):
         raise LLMError("LLM unavailable in tests")
 
+    async def _unavailable_async(*_args, **_kwargs):
+        raise LLMError("LLM unavailable in tests")
+
     monkeypatch.setattr(ai_header_module, "chat_json", _unavailable)
+    monkeypatch.setattr(service_module, "achat_json", _unavailable_async)
 
 
 @pytest.fixture(autouse=True)

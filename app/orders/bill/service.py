@@ -26,13 +26,21 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from app.core.errors import BadRequestError
+from app.core.errors import BadRequestError, LLMError, ParseError
+from app.llm import achat_json
 
 from .aggregator import group_canonical, group_orders
+from .ai_header import build_llm_request, validate_ai_result
 from .client import create_canonical_orders_async, create_orders_async
 from .fee_bootstrap import run_fee_bootstrap_async
 from .fee_price_map import apply_price_map
-from .parser import parse_bill
+from .parser import (
+    AiHeaderNeeded,
+    ParseOutput,
+    open_and_identify,
+    parse_ai_header,
+    parse_exact_fallback,
+)
 from .schema import BillParseResult, to_canonical
 
 
@@ -247,17 +255,48 @@ def _reject_unknown_box_types(orders: list) -> bool:
 # ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义 ----
 
 
-def _parse_stage(filename: str, file_bytes: bytes):
-    """解析段（CPU 密集，to_thread 执行）：写临时文件 → parse_bill。"""
+def _write_tempfile(suffix: str, file_bytes: bytes) -> str:
+    """写临时文件（磁盘 IO，编排层 to_thread 执行），返回路径。"""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp.flush()
+        return tmp.name
+
+
+async def _parse_stage_async(filename: str, file_bytes: bytes) -> ParseOutput:
+    """解析编排（两段式，2026-09 收尾改造）：CPU 段 to_thread、LLM 网络段真异步。
+
+    - 常见路径（L1/L2 指纹命中）：open_and_identify 单段完成，零额外开销；
+    - L3 未命中：AiHeaderNeeded 信号 → achat_json 表头映射（真异步）→
+      闸门/解析二次进段；LLM 不可用/响应非法回退精确匹配（与同步
+      parse_bill 语义一致，找不到表头照旧 400）；
+    - 资源生命周期由本函数统一管理：临时文件与 workbook 均在 finally
+      释放（needed.close 幂等）。同步 parse_bill 仅供 tests 直调。
+    """
     suffix = Path(filename).suffix.lower()
     tmp_path = ""
+    import asyncio
+
+    needed: AiHeaderNeeded | None = None
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp_path = tmp.name
-            tmp.write(file_bytes)
-            tmp.flush()
-            return parse_bill(tmp_path)
+        tmp_path = await asyncio.to_thread(_write_tempfile, suffix, file_bytes)
+        outcome = await asyncio.to_thread(open_and_identify, tmp_path)
+        if not isinstance(outcome, AiHeaderNeeded):
+            return outcome
+        needed = outcome
+        messages, schema = build_llm_request(needed.zone_lines)
+        try:
+            raw, meta = await achat_json(messages, json_schema=schema)
+        except (LLMError, ParseError):
+            # LLM 不可用/响应非法 → 回退精确匹配（找不到表头照旧 400）
+            return await asyncio.to_thread(parse_exact_fallback, needed)
+        ai = await asyncio.to_thread(
+            validate_ai_result, needed.view, raw, meta, needed.zone_lines
+        )
+        return await asyncio.to_thread(parse_ai_header, needed, ai)
     finally:
+        if needed is not None:
+            needed.close()
         if tmp_path:
             os.unlink(tmp_path)
 
@@ -353,8 +392,9 @@ async def build_result_async(
             },
         )
 
-    # 解析 + 归集 + 预判 + 箱型校验（CPU 密集段入线程池，不阻塞事件循环）
-    output = await asyncio.to_thread(_parse_stage, filename, file_bytes)
+    # 解析 + 归集 + 预判 + 箱型校验（CPU 密集段入线程池，不阻塞事件循环；
+    # L3 表头映射 LLM 调用经 _parse_stage_async 真异步）
+    output = await _parse_stage_async(filename, file_bytes)
 
     # 单次导入行数上限（一柜一行）：preview/create 一致拦截，超限零副作用直接拒绝
     total_rows = len(output.rows) + len(output.canonical_rows or [])

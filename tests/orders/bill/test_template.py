@@ -318,7 +318,17 @@ class TestTemplatePersist:
 
         path = tmp_path / "hetero.xlsx"
         path.write_bytes(build_bill_bytes(HETERO_HEADERS, HETERO_ROWS))
-        _patch_ai(monkeypatch, AI_MAPPING_OK)
+        # 第一次导入走生产两段式编排（build_result_async → _parse_stage_async
+        # → service.achat_json），同步/异步两入口均 mock 且共享计数
+        import app.orders.bill.service as service_module
+
+        calls1 = _patch_ai(monkeypatch, AI_MAPPING_OK)
+
+        async def fake_achat_json(_messages, **_kwargs):
+            calls1["n"] += 1
+            return dict(AI_MAPPING_OK), {"model": "fake", "usage": None}
+
+        monkeypatch.setattr(service_module, "achat_json", fake_achat_json)
         result = await build_result_async(filename=path.name, file_bytes=path.read_bytes())
         # 预览：候选模板配置在 meta.l3_template，不自动落盘（人工确认前置）
         assert result.meta["template"]["source"] == "template"

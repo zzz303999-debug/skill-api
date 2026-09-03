@@ -851,9 +851,15 @@ def _parse_with_template(
     )
 
 
-def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutput:
-    """统一解析核心：YAML 模板库识别（L1 指纹/L2 族级近似）→ 配置驱动解析；
-    未命中 → 旧指纹库/AI 映射（回退精确匹配）。"""
+def _match_template_and_parse(
+    view: _SheetView, engine: str, filename: str
+) -> ParseOutput | None:
+    """L1/L2 模板识别解析段（纯 CPU，无 LLM 调用）：命中 → 配置驱动解析。
+
+    YAML 模板库（L1 指纹/L2 族级近似）与旧指纹库两级识别；未命中返回 None
+    （交 L3：同步路径 _parse_sheet 走 map_header，生产两段式编排走
+    open_and_identify 信号）。同步/两段两入口共用，命中路径零额外开销。
+    """
     match = template_store.identify(view)
     if match is not None:
         return _parse_with_template(view, match, engine, filename)
@@ -885,15 +891,16 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
                 "name": template.name,
             },
         )
-    # 2) 未命中模板库 → L3 AI 表头映射（标准字段映射 + 模板结构判定；
-    #    四道校验闸门不过抛 400；LLM 不可用/响应非法 → 回退现有精确匹配）
-    try:
-        from .ai_header import map_header
+    return None
 
-        ai = map_header(view)
-    except (LLMError, ParseError):
-        # LLM 不可用/响应非法 → 回退现有精确匹配（找不到表头照旧 400）
-        return _parse_exact(view, engine)
+
+def _parse_with_ai_result(
+    view: _SheetView, engine: str, filename: str, ai
+) -> ParseOutput:
+    """L3 AI 映射解析段（纯 CPU）：AiHeaderResult → 临时模板配置 → 配置驱动解析。
+
+    同步 _parse_sheet 与两段式 parse_ai_header 共用；与 YAML 模板同一条
+    解析代码路径。"""
     headers = [
         _normalize_header(_header_text(view.merged_cell(ai.header_row, col)))
         for col in range(1, view.ncols + 1)
@@ -928,6 +935,29 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
     return out
 
 
+def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutput:
+    """统一解析核心（同步完整路径，parse_bill 入口）：L1/L2 模板识别 →
+    未命中 → AI 映射（map_header 内 chat_json 同步 LLM）→ 回退精确匹配。
+
+    生产两段式编排在 service 层走 open_and_identify + achat_json（网络段
+    真异步，见 _parse_stage_async）；本函数保持同步 parse_bill 完整语义
+    （tests 直调依赖），两条路径的 L1/L2/L3 解析段共用同一实现。
+    """
+    out = _match_template_and_parse(view, engine, filename)
+    if out is not None:
+        return out
+    # 2) 未命中模板库 → L3 AI 表头映射（标准字段映射 + 模板结构判定；
+    #    四道校验闸门不过抛 400；LLM 不可用/响应非法 → 回退现有精确匹配）
+    try:
+        from .ai_header import map_header
+
+        ai = map_header(view)
+    except (LLMError, ParseError):
+        # LLM 不可用/响应非法 → 回退现有精确匹配（找不到表头照旧 400）
+        return _parse_exact(view, engine)
+    return _parse_with_ai_result(view, engine, filename, ai)
+
+
 def _parse_exact(view: _SheetView, engine: str) -> ParseOutput:
     """现状精确匹配路径（LLM 不可用回退）：找不到表头照旧 400，无模板信息。"""
     header_row = find_header_row(view)
@@ -936,11 +966,12 @@ def _parse_exact(view: _SheetView, engine: str) -> ParseOutput:
     return ParseOutput(rows=rows, period=period, engine=engine, unmatched_headers=unmatched)
 
 
-def _parse_with_engine(path: str | Path, engine: str) -> ParseOutput:
-    """按指定引擎打开并解析：返回完整 ParseOutput（含未识别列清单）。
+def _open_view(path: str | Path, engine: str):
+    """打开 workbook 并构造统一视图：返回 (view, 引擎名, 文件名, 资源释放回调)。
 
-    文件损坏/无法打开抛 ConvertError（422 convert_error）；
-    结算区间识别不到时返回空 BillPeriod（不报错）。
+    资源释放责任在调用方：同步路径（_parse_with_engine）finally 即时释放；
+    两段式（open_and_identify）经 AiHeaderNeeded 移交编排层统一释放。
+    文件损坏/无法打开抛 ConvertError（与 parse_bill 同口径）。
     """
     if engine == "xls":
         try:
@@ -950,17 +981,14 @@ def _parse_with_engine(path: str | Path, engine: str) -> ParseOutput:
                 "failed to open workbook: file is corrupted, encrypted, or not a valid xls",
                 details={"path": str(path)},
             ) from exc
-        try:
-            sheet = book.sheet_by_index(0)
-            view = _SheetView(
-                sheet.nrows,
-                sheet.ncols,
-                _xls_merged_map(sheet),
-                lambda row, col: _xls_cell_value(sheet, row - 1, col - 1),
-            )
-            return _parse_sheet(view, "xlrd", Path(path).name)
-        finally:
-            book.release_resources()
+        sheet = book.sheet_by_index(0)
+        view = _SheetView(
+            sheet.nrows,
+            sheet.ncols,
+            _xls_merged_map(sheet),
+            lambda row, col: _xls_cell_value(sheet, row - 1, col - 1),
+        )
+        return view, "xlrd", Path(path).name, book.release_resources
     try:
         wb = load_workbook(path, data_only=True)
     except (InvalidFileException, zipfile.BadZipFile, KeyError) as exc:
@@ -968,17 +996,27 @@ def _parse_with_engine(path: str | Path, engine: str) -> ParseOutput:
             "failed to open workbook: file is corrupted, encrypted, or not a valid xlsx",
             details={"path": str(path)},
         ) from exc
+    ws = wb.active
+    view = _SheetView(
+        ws.max_row,
+        ws.max_column,
+        _openpyxl_merged_map(ws),
+        lambda row, col: ws.cell(row, col).value,
+    )
+    return view, "openpyxl", Path(path).name, wb.close
+
+
+def _parse_with_engine(path: str | Path, engine: str) -> ParseOutput:
+    """按指定引擎打开并解析（同步完整路径）：返回完整 ParseOutput（含未识别列清单）。
+
+    文件损坏/无法打开抛 ConvertError（422 convert_error）；
+    结算区间识别不到时返回空 BillPeriod（不报错）。
+    """
+    view, engine_name, filename, closer = _open_view(path, engine)
     try:
-        ws = wb.active
-        view = _SheetView(
-            ws.max_row,
-            ws.max_column,
-            _openpyxl_merged_map(ws),
-            lambda row, col: ws.cell(row, col).value,
-        )
-        return _parse_sheet(view, "openpyxl", Path(path).name)
+        return _parse_sheet(view, engine_name, filename)
     finally:
-        wb.close()
+        closer()
 
 
 def parse_xlsx(path: str | Path) -> tuple[list[BillRow], BillPeriod]:
@@ -1011,11 +1049,12 @@ def _detect_format(head: bytes) -> str:
     )
 
 
-def parse_bill(path: str | Path) -> ParseOutput:
-    """按内容格式分发解析：返回 ParseOutput（rows / period / engine / unmatched_headers）。
+def _detect_format_checked(path: str | Path) -> str:
+    """扩展名与内容格式校验（前置闸门）：返回内容格式（'xlsx' / 'xls'）。
 
-    扩展名不受支持 → BadRequestError（400 bad_request）；
-    扩展名与内容格式不符 → BadRequestError code=file_format_mismatch（400）。
+    扩展名不受支持 → BadRequestError（400 bad_request）；扩展名与内容格式
+    不符 → BadRequestError code=file_format_mismatch（400）。同步 parse_bill
+    与两段式 open_and_identify 共用，保证两入口前置校验一致。
     """
     ext = Path(path).suffix.lower()
     if ext not in SUPPORTED_EXTS:
@@ -1032,6 +1071,81 @@ def parse_bill(path: str | Path) -> ParseOutput:
             code="file_format_mismatch",
             details={"extension": ext, "detected_format": engine},
         )
-    if engine == "xls":
-        return _parse_with_engine(path, "xls")
-    return _parse_with_engine(path, "xlsx")
+    return engine
+
+
+def parse_bill(path: str | Path) -> ParseOutput:
+    """按内容格式分发解析（同步完整路径）：返回 ParseOutput（rows / period / engine / unmatched_headers）。
+
+    生产两段式编排走 open_and_identify 阶段 API（LLM 网络段真异步）；
+    本函数保持同步完整语义（tests 直调依赖），L3 走 map_header 同步 LLM。
+    """
+    return _parse_with_engine(path, _detect_format_checked(path))
+
+
+# ---- 两段式阶段 API（生产编排：service._parse_stage_async；CPU 段均经 ----
+# ---- to_thread 执行，LLM 网络段在编排层真异步）--------------------
+
+
+class AiHeaderNeeded:
+    """L3 两段式信号：open_and_identify 未命中模板库时返回，待编排层
+    完成 LLM 表头映射后二次进段。
+
+    持有跨段资源（view 与 workbook 释放回调；同一时间仅单线程使用 view，
+    无并发访问）；资源责任由第一段移交给调用方，完成后须调 close()。
+    """
+
+    __slots__ = ("view", "engine", "filename", "zone_lines", "_closer", "_closed")
+
+    def __init__(self, view, engine: str, filename: str, zone_lines, closer) -> None:
+        self.view = view
+        self.engine = engine
+        self.filename = filename
+        self.zone_lines = zone_lines
+        self._closer = closer
+        self._closed = False
+
+    def close(self) -> None:
+        """释放 workbook 资源（幂等）。"""
+        if not self._closed:
+            self._closed = True
+            self._closer()
+
+
+def open_and_identify(path: str | Path) -> ParseOutput | AiHeaderNeeded:
+    """阶段 1（同步 CPU，编排层 to_thread 执行）：打开 workbook → L1/L2 指纹识别解析。
+
+    命中模板库 → ParseOutput（workbook 资源已释放，与 parse_bill 同口径，
+    常见路径零额外开销）；未命中 → AiHeaderNeeded（view 跨段传递，资源
+    责任移交调用方）。扩展名/内容格式前置校验与 parse_bill 完全一致。
+    """
+    from .ai_header import format_header_zone
+
+    engine = _detect_format_checked(path)
+    view, engine_name, filename, closer = _open_view(path, engine)
+    out = _match_template_and_parse(view, engine_name, filename)
+    if out is not None:
+        closer()
+        return out
+    return AiHeaderNeeded(
+        view=view,
+        engine=engine_name,
+        filename=filename,
+        zone_lines=format_header_zone(view),
+        closer=closer,
+    )
+
+
+def parse_ai_header(needed: AiHeaderNeeded, ai) -> ParseOutput:
+    """阶段 2（同步 CPU，编排层 to_thread 执行）：AI 映射结果 → 候选模板
+    → 配置驱动解析（与同步路径共用 _parse_with_ai_result）。
+
+    workbook 资源不在本函数释放（异常路径也要释放）——由编排层 finally
+    统一 close。"""
+    return _parse_with_ai_result(needed.view, needed.engine, needed.filename, ai)
+
+
+def parse_exact_fallback(needed: AiHeaderNeeded) -> ParseOutput:
+    """LLM 不可用/响应非法回退（同步 CPU，编排层 to_thread 执行）：
+    精确匹配（找不到表头照旧 400），与同步路径回退分支同实现。"""
+    return _parse_exact(needed.view, needed.engine)

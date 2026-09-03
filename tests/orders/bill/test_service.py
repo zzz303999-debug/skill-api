@@ -405,13 +405,15 @@ class TestCreateMode:
         from app.core.errors import BadRequestError
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
-        monkeypatch.setattr(
-            service_module,
-            "parse_bill",
-            lambda _path: SimpleNamespace(
+
+        async def fake_parse_stage(_filename, _file_bytes):
+            # 两段式编排后解析段为 _parse_stage_async（async 编排入口），
+            # 仅注入解析结果，语义与旧 parse_bill 替身一致
+            return SimpleNamespace(
                 rows=[None] * 3, canonical_rows=[None] * 3, period=None
-            ),
-        )
+            )
+
+        monkeypatch.setattr(service_module, "_parse_stage_async", fake_parse_stage)
         with pytest.raises(BadRequestError) as caught:
             await build_result_async(filename="many.xlsx", file_bytes=b"x")
         assert caught.value.http_status == 400
