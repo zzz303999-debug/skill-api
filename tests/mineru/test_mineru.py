@@ -467,10 +467,13 @@ def test_mineru_markdown_is_sent_to_llm_in_full(monkeypatch):
 
     markdown = "# 做箱通知书\n" + ("完整正文字段\n" * 2000) + "文档末尾唯一字段"
     captured: dict = {}
+    async def _fake_convert_to_markdown(_file_bytes, _filename):
+        return ConversionText(markdown, parser="mineru")
+
     monkeypatch.setattr(
         skill_module,
-        "convert_to_markdown",
-        lambda _file_bytes, _filename: ConversionText(markdown, parser="mineru"),
+        "convert_to_markdown_async",
+        _fake_convert_to_markdown,
     )
 
     async def fake_chat_json(messages, **_kwargs):

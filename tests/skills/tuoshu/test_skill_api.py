@@ -82,12 +82,13 @@ def test_batch_extract_calls_keyword_only_skill(monkeypatch):
 def test_extract_response_has_no_independent_summary(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 
+    async def _fake_convert_to_markdown(_file_bytes, _filename):
+        return "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
+
     monkeypatch.setattr(
         skill_module,
-        "convert_to_markdown",
-        lambda _file_bytes, _filename: (
-            "提单号：HLCUSHA12345678\n承运人：HMM\n柜1备注：博特装柜"
-        ),
+        "convert_to_markdown_async",
+        _fake_convert_to_markdown,
     )
 
     async def fake_achat_json(_messages, **_kwargs):
@@ -152,10 +153,13 @@ def test_scanned_pdf_is_sent_as_vision_pages(monkeypatch):
     # 启用 LLM 视觉能力，验证扫描 PDF 转 vision 页面的路径
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
     captured: dict = {}
+    async def _fake_convert_to_markdown_scan(_file_bytes, _filename):
+        return "SCAN_OR_IMAGE_HINT: scan.pdf"
+
     monkeypatch.setattr(
         skill_module,
-        "convert_to_markdown",
-        lambda _file_bytes, _filename: "SCAN_OR_IMAGE_HINT: scan.pdf",
+        "convert_to_markdown_async",
+        _fake_convert_to_markdown_scan,
     )
     monkeypatch.setattr(
         skill_module,
@@ -302,7 +306,10 @@ def test_parser_fallback_issue_reaches_final_output(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
     async def fake_achat_json(*_args, **_kwargs):
         return (
             {
@@ -353,7 +360,10 @@ def test_high_confidence_mineru_image_skips_vision_for_speed(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
 
     async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
@@ -394,7 +404,10 @@ def test_low_confidence_mineru_image_keeps_vision_cross_check(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
     # 启用 LLM 视觉能力，验证低置信图片携原图走 vision 交叉核验
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
@@ -437,7 +450,10 @@ def test_oversized_image_degrades_to_text_and_flags_manual_review(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
     # 启用 LLM 视觉能力，验证超限降级路径
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
@@ -485,7 +501,10 @@ def test_oversized_image_without_ocr_text_rejected(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
     # 启用 LLM 视觉能力，验证“超限且无 OCR”拒绝路径
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
 
@@ -516,7 +535,10 @@ def test_image_without_ocr_text_rejected_when_vision_disabled(monkeypatch):
             )
         ],
     )
-    monkeypatch.setattr(skill_module, "convert_image_to_parse_result", lambda *_args: parse_result)
+    async def _fake_convert_image_to_parse_result(*_args):
+        return parse_result
+
+    monkeypatch.setattr(skill_module, "convert_image_to_parse_result_async", _fake_convert_image_to_parse_result)
 
     with pytest.raises(ConvertError) as exc_info:
         asyncio.run(
@@ -533,7 +555,10 @@ def test_scan_pdf_vision_bytes_budget(monkeypatch):
 
     # 启用 LLM 视觉能力，验证扫描 PDF 转 vision 的字节预算路径
     monkeypatch.setattr(settings, "llm_vision_enabled", True)
-    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
+    async def _fake_convert_to_markdown(*_f):
+        return "SCAN_OR_IMAGE_HINT: order.pdf"
+
+    monkeypatch.setattr(skill_module, "convert_to_markdown_async", _fake_convert_to_markdown)
     monkeypatch.setattr(
         skill_module,
         "render_pdf_pages",
@@ -550,14 +575,17 @@ def test_scan_pdf_goes_to_mineru_when_vision_disabled(monkeypatch):
     import app.skills.tuoshu.skill as skill_module
 
     captured: dict = {}
-    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
-    monkeypatch.setattr(
-        skill_module.mineru,
-        "parse_document",
-        lambda *_args, **_kwargs: type(
-            "Scanned", (), {"markdown": "提单号：KMTCSHAP950393\n托运人：某托运人公司"}
-        )(),
-    )
+    async def _fake_convert_to_markdown(*_f):
+        return "SCAN_OR_IMAGE_HINT: order.pdf"
+
+    monkeypatch.setattr(skill_module, "convert_to_markdown_async", _fake_convert_to_markdown)
+
+    async def _fake_parse_document(*_args, **_kwargs):
+        return type(
+            "Scanned", (), {"markdown": "提单号：KMTCSHAP950393\n托运人：某托运 人公司"}
+        )()
+
+    monkeypatch.setattr(skill_module.mineru, "parse_document_async", _fake_parse_document)
 
     async def fake_chat_json(messages, **_kwargs):
         captured["messages"] = messages
@@ -584,12 +612,14 @@ def test_scan_pdf_rejected_when_mineru_fails_and_vision_disabled(monkeypatch):
     """无视觉模型且 MinerU 也失败时，扫描 PDF 才报错（明确归因 MinerU）。"""
     import app.skills.tuoshu.skill as skill_module
 
-    monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_f: "SCAN_OR_IMAGE_HINT: order.pdf")
-    monkeypatch.setattr(
-        skill_module.mineru,
-        "parse_document",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("mineru down")),
-    )
+    async def _fake_convert_to_markdown(*_f):
+        return "SCAN_OR_IMAGE_HINT: order.pdf"
+
+    monkeypatch.setattr(skill_module, "convert_to_markdown_async", _fake_convert_to_markdown)
+    async def _fake_parse_document_fail(*_args, **_kwargs):
+        raise RuntimeError("mineru down")
+
+    monkeypatch.setattr(skill_module.mineru, "parse_document_async", _fake_parse_document_fail)
 
     with pytest.raises(ConvertError) as exc_info:
         asyncio.run(TuoshuSkill().run(file_bytes=b"%PDF-1.7\n", filename="order.pdf"))
@@ -698,10 +728,14 @@ def test_skill_uses_deterministic_route_when_llm_misclassifies_doc_type(monkeypa
     import app.skills.tuoshu.skill as skill_module
 
     markdown = "门点装箱通知\n车队将于 2019-09-12 14:00 以前到门点装柜"
+
+    async def _fake_convert_to_markdown_route(_file_bytes, _filename):
+        return markdown
+
     monkeypatch.setattr(
         skill_module,
-        "convert_to_markdown",
-        lambda _file_bytes, _filename: markdown,
+        "convert_to_markdown_async",
+        _fake_convert_to_markdown_route,
     )
 
     async def fake_achat_json(_messages, **_kwargs):

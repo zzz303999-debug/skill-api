@@ -317,10 +317,8 @@ def test_tuoshu_llm_golden_regression(case, monkeypatch):
     expected = _canonical_expected(case, markdown)
     filename = expected["source"]["file"]
     if case["parser_mode"] == "mineru_image":
-        monkeypatch.setattr(
-            skill_module,
-            "convert_image_to_parse_result",
-            lambda *_args: ParseResult(
+        async def _fake_convert_image(*_args):
+            return ParseResult(
                 input_format="jpeg",
                 pages=[
                     ParsedPage(
@@ -330,10 +328,18 @@ def test_tuoshu_llm_golden_regression(case, monkeypatch):
                         vision_image=_case_path(case, "document").read_bytes(),
                     )
                 ],
-            ),
+            )
+
+        monkeypatch.setattr(
+            skill_module,
+            "convert_image_to_parse_result_async",
+            _fake_convert_image,
         )
     else:
-        monkeypatch.setattr(skill_module, "convert_to_markdown", lambda *_args: markdown)
+        async def _fake_convert_to_markdown(*_args):
+            return markdown
+
+        monkeypatch.setattr(skill_module, "convert_to_markdown_async", _fake_convert_to_markdown)
 
     response = asyncio.run(
         skill_module.TuoshuSkill().run(
