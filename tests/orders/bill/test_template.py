@@ -324,6 +324,7 @@ class TestTemplatePersist:
         # → service.achat_json），同步/异步两入口均 mock 且共享计数
         calls1 = _patch_ai(monkeypatch, AI_MAPPING_OK)
         result = await build_result_async(filename=path.name, file_bytes=path.read_bytes())
+        assert calls1["n"] >= 1  # 首次导入确实走了 AI（下方 calls2 归零断言的前提）
         # 预览：候选模板配置在 meta.l3_template，不自动落盘（人工确认前置）
         assert result.meta["template"]["source"] == "template"
         candidate = result.meta["l3_template"]
