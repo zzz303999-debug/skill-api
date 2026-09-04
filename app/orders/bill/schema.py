@@ -19,6 +19,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 # 识别有效账单必需的列：表头需同时包含「客户编号」「提单号」两列
 REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
 
+# 表头行最大扫描行数（抬头区通常 1~5 行）：parser/ai_header/template_store
+# 三方共用同一口径，归位契约层统一引用（2026-09 治理：消除 template_store
+# 复制粘贴定义与 parser↔ai_header 常量循环）
+MAX_HEADER_SCAN_ROWS = 15
+
 # 应收费用列名：按费用中文名建立 shou 条目（如 shou[0][运费][money]），
 # 同费用名多行金额累加。本常量仅服务旧 BillRow.fees 流程（jinxin_v1 语义）；
 # 标准通道（模板驱动）的费用列发现见 parser.py T9：fees.channels 已支持应付/

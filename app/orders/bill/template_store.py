@@ -31,13 +31,10 @@ import yaml
 
 from app.core.logging_conf import get_logger
 
+from .schema import MAX_HEADER_SCAN_ROWS
 from .template import load_template
 
 log = get_logger(__name__)
-
-# 表头行最大扫描行数：与 parser.MAX_HEADER_SCAN_ROWS 同值同口径（抬头区通常 1~5 行）；
-# 此处自持常量避免 parser ↔ template_store 循环导入（template_store 被 parser 引用）
-MAX_HEADER_SCAN_ROWS = 15
 
 # 模板配置目录（项目根 templates/，与 storage 运行时数据分离）
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates"

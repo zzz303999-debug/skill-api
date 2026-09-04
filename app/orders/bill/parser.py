@@ -30,6 +30,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from app.core.errors import BadRequestError, ConvertError
 
 from . import template_store
+from .ai_header import format_header_zone
 from .columns import (
     business_end_col,
     discover_fee_columns,
@@ -42,15 +43,13 @@ from .schema import (
     HEADER_ALIASES,
     HEADER_COLUMN_MAP,
     IGNORED_HEADERS,
+    MAX_HEADER_SCAN_ROWS,
     RECEIVABLE_FEE_COLUMNS,
     REQUIRED_HEADERS,
     BillPeriod,
     BillRow,
 )
 from .template import compute_legacy_fingerprint, load_template
-
-# 表头行最大扫描行数（抬头区通常 1~5 行）
-MAX_HEADER_SCAN_ROWS = 15
 
 # 支持的扩展名 → 期望的内容格式（与 _detect_format 的返回值对应）
 SUPPORTED_EXTS: dict[str, str] = {".xls": "xls", ".xlsx": "xlsx", ".xlsm": "xlsx"}
@@ -906,8 +905,6 @@ def open_and_identify(path: str | Path) -> ParseOutput | AiHeaderNeeded:
     常见路径零额外开销）；未命中 → AiHeaderNeeded（view 跨段传递，资源
     责任移交调用方）。扩展名/内容格式前置校验与 parse_bill 完全一致。
     """
-    from .ai_header import format_header_zone
-
     engine = _detect_format_checked(path)
     view, engine_name, filename, closer = _open_view(path, engine)
     out = _match_template_and_parse(view, engine_name, filename)

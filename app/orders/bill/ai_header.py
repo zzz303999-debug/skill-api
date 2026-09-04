@@ -25,8 +25,12 @@ from typing import Any
 from app.core.errors import BadRequestError
 from app.core.logging_conf import get_logger
 
-from .parser import MAX_HEADER_SCAN_ROWS
-from .schema import HEADER_ALIASES, IGNORED_HEADERS, RECEIVABLE_FEE_COLUMNS
+from .schema import (
+    HEADER_ALIASES,
+    IGNORED_HEADERS,
+    MAX_HEADER_SCAN_ROWS,
+    RECEIVABLE_FEE_COLUMNS,
+)
 from .template_store import alias_dictionary
 
 log = get_logger(__name__)
