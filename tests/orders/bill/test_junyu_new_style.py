@@ -80,18 +80,18 @@ def test_ignore_headers_in_fee_discovery(tmp_path):
     """模板级 ignore_headers 排除生效：去掉声明后箱量列会被费用发现（机制对照）。"""
     store.reload_templates()
     # 读模板内嵌字典直接调用费用发现（私有函数同包测试惯例），验证 ignore 集生效
-    from app.orders.bill.parser import _discover_fee_columns
+    from app.orders.bill.columns import discover_fee_columns
 
     names = ["序号", "箱量", "运费", "其它费", "应收备注"]
     fees_cfg = {"channels": {"应收": "shou"}, "ignore_headers": ["箱量"]}
-    fee_cols, _anchors = _discover_fee_columns(
+    fee_cols, _anchors = discover_fee_columns(
         fees_cfg, names, [], {}, row_anchor="序号"
     )
     # 箱量被排除；运费/其它费/备注列不被误列（备注关键字排除）——断言排除后的列集
     assert {names[c - 1] for c in fee_cols} == {"运费", "其它费"}
 
     # 对照：无 ignore_headers 声明 → 箱量列会被自动发现为费用列（证明机制必要性）
-    fee_cols2, _ = _discover_fee_columns(
+    fee_cols2, _ = discover_fee_columns(
         {"channels": {"应收": "shou"}}, names, [], {}, row_anchor="序号"
     )
     assert {names[c - 1] for c in fee_cols2} == {"箱量", "运费", "其它费"}
