@@ -16,37 +16,29 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-import yaml
-
-from app.core.config import settings
 from app.core.logging_conf import get_logger
 
 from ..schema import CanonicalOrder
 from ..submission.imported_registry import owner_key
+from .config import (
+    ARCHIVE_ORDER,
+    KIND_BAILOR,
+    KIND_CLIENT,
+    KIND_DRIVER,
+    KIND_FACTORY,
+    KIND_PRICE,
+    KIND_TRUCK,
+    MasterDataCandidate,
+    endpoint_for,
+    kind_label,
+    load_config,
+    sn_for,
+)
 from .store import DEFAULT_OWNER, get_master_data_store
 
 log = get_logger(__name__)
-
-# 档案类常量（代码零竞品名零 TMS 值硬编码；分组/部门等默认值全走配置）
-KIND_CLIENT = "client"      # 客户
-KIND_FACTORY = "factory"    # 工厂地址
-KIND_BAILOR = "bailor"      # 委托人（本阶段只计数不建档，留配置位）
-KIND_TRUCK = "truck"        # 车辆（按车牌登记，随司机组合键触发建档）
-KIND_DRIVER = "driver"      # 司机（组合键「司机名+车牌」）
-KIND_PRICE = "price"        # 价格费目（建档走 fee_bootstrap 自举管线 T24/T25，不在此编排）
-
-# 建档依赖序（逆推规范 §14）：客户 → 工厂；车辆 → 司机；委托人/费目独立
-ARCHIVE_ORDER: tuple[str, ...] = (
-    KIND_CLIENT,
-    KIND_FACTORY,
-    KIND_TRUCK,
-    KIND_DRIVER,
-    KIND_BAILOR,
-)
 
 # 计数档案类（collect_candidates 会收集的候选类型）
 COUNT_KINDS: tuple[str, ...] = (KIND_CLIENT, KIND_FACTORY, KIND_DRIVER)
@@ -54,25 +46,10 @@ COUNT_KINDS: tuple[str, ...] = (KIND_CLIENT, KIND_FACTORY, KIND_DRIVER)
 # 报告未达阈值 TOP 清单条数上限
 PENDING_TOP_N = 10
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
-# 按环境解析：config/master_data.{env}.yaml（APP_ENV 选择，与 fee_price_map 同模式）。
-# 双份随镜像分发，环境切换零 Git 改动——本地联调永远 test，生产永远 prod。
-_CONFIG_PATH = _CONFIG_DIR / f"master_data.{settings.env}.yaml"
-
 # 空白归一：全部空白（含全角空格/连续空白）一律删除——任何空白差异都不产生
 # 新计数键（防「锦煦 」/「锦　煦」/「锦 煦」算两个；宁合并不拆分）
 _WHITESPACE_RE = re.compile(r"\s+")
 _FULL_WIDTH_RE = re.compile(r"[\uFF01-\uFF5E]")
-
-# 档案类 → 中文展示名（报告/标注用；通用业务语义，非 TMS 内部值）
-_KIND_LABELS: dict[str, str] = {
-    KIND_CLIENT: "客户",
-    KIND_FACTORY: "工厂",
-    KIND_BAILOR: "委托人",
-    KIND_TRUCK: "车辆",
-    KIND_DRIVER: "司机",
-    KIND_PRICE: "费目",
-}
 
 
 def _to_half_width(text: str) -> str:
@@ -113,22 +90,6 @@ def driver_key(name: str | None, plate: str | None) -> str:
     """司机+车辆计数键：「司机名+车牌」组合键（口径 2——同人换车/同车换人
     算不同档案；车牌缺失时退化为按司机名）。"""
     return f"{normalize_key(name)}|{plate_key(plate)}"
-
-
-@dataclass
-class MasterDataCandidate:
-    """一个计数候选（一单一候选，按单计）。"""
-
-    kind: str                                  # 档案类（client/factory/driver）
-    order: CanonicalOrder                      # 来源订单（回填/标注用）
-    key: str                                   # 计数键（归一键）
-    display: str                               # 展示名（报告/标注用）
-    phone: str | None = None                   # 司机手机（建档用）
-    plate: str | None = None                   # 车牌原文（建档用）
-    client_key: str | None = None              # 工厂候选：所属客户归一键（依赖前置）
-
-    def __hash__(self) -> int:
-        return hash((self.kind, self.key))
 
 
 def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate]:
@@ -185,78 +146,8 @@ def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate
     return candidates
 
 
-def kind_label(kind: str) -> str:
-    """档案类 → 中文展示名（报告/标注）。"""
-    return _KIND_LABELS.get(kind, kind)
 
 
-# ---- 配置加载（config/master_data.{env}.yaml；缺文件 → 全局禁用 + warning，不 fail fast） ----
-
-_DEFAULTS: dict[str, Any] = {
-    "enabled": True,
-    "threshold": 5,
-    "sn_prefix": {},
-    "endpoints": {},
-    "defaults": {},
-    "duplicate_markers": ["已存在"],
-}
-_CACHE: dict[str, Any] | None = None
-
-
-def load_config() -> dict[str, Any]:
-    """加载主数据配置（模块缓存；测试可用 reload_config 重置）。
-
-    缺文件/YAML 错误 → 全局禁用（enabled: false）+ warning：阶段三是渐进式
-    增强，配置缺失不应阻塞既有导入（与 fee_price_map 的 fail fast 语义不同）。
-    """
-    global _CACHE
-    if _CACHE is not None:
-        return _CACHE
-    config = dict(_DEFAULTS)
-    try:
-        data = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        log.warning("master_data_config_missing", extra={"path": str(_CONFIG_PATH), "error": str(exc)})
-        config["enabled"] = False
-        _CACHE = config
-        return config
-    section = data.get("master_data") or {}
-    if isinstance(section, dict):
-        for key in _DEFAULTS:
-            if key in section:
-                config[key] = section[key]
-    if not isinstance(config.get("threshold"), int) or config["threshold"] < 1:
-        log.warning("master_data_config_invalid_threshold", extra={"threshold": config.get("threshold")})
-        config["enabled"] = False
-    _CACHE = config
-    return config
-
-
-def reload_config() -> dict[str, Any]:
-    """重置配置缓存（测试用）。"""
-    global _CACHE
-    _CACHE = None
-    return load_config()
-
-
-def endpoint_for(kind: str) -> str | None:
-    """档案类 → 建档端点 URL；TODO/空/未配置 → None（该档案类降级只计数不建档）。"""
-    url = str((load_config().get("endpoints") or {}).get(f"{kind}_create") or "").strip()
-    if not url or url.upper() == "TODO":
-        return None
-    return url
-
-
-def sn_for(kind: str, count: int) -> str:
-    """建档编码：{prefix}{5 位序号}（序号取该键累计计数；防存量撞名避让位）。"""
-    prefix = str((load_config().get("sn_prefix") or {}).get(kind) or kind[:3].upper())
-    return f"{prefix}{int(count):05d}"
-
-
-def defaults_for(kind: str) -> dict[str, Any]:
-    """档案类默认值（defaults 段；缺省空字典——未配键不发送）。"""
-    section = load_config().get("defaults") or {}
-    return dict(section.get(kind) or {})
 
 
 # ---- 阈值编排（service 管线挂点入口） ----

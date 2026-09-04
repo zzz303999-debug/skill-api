@@ -162,14 +162,14 @@ def _isolate_fee_mapping_caches():
     """
     yield
     from app.orders.bill.fees import fee_bootstrap, fee_name_map, fee_price_map
-    from app.orders.bill.master_data import orchestrator as master_data
+    from app.orders.bill.master_data import config as master_data_cfg
     from app.orders.bill.parsing import template_store
 
     try:
         fee_name_map.reload_fee_alias_dictionary()
         fee_price_map.reload_price_map()
         fee_bootstrap.reload_bootstrap_config()
-        master_data.reload_config()
+        master_data_cfg.reload_config()
         template_store.reload_alias_dictionary()
     except RuntimeError:
         pass  # 真实配置文件缺失时容错跳过（与 test_fees._fee_caches 同口径）

@@ -22,7 +22,7 @@ import yaml
 from openpyxl import Workbook
 
 import app.orders.bill.master_data.client as md_client_module
-import app.orders.bill.master_data.orchestrator as md_module
+import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.bill.parsing.template_store as ts_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import build_result_async, group_canonical, parse_bill
@@ -471,17 +471,17 @@ def _md_config_dict() -> dict:
 @pytest.fixture()
 def md_config(tmp_path, monkeypatch):
     """注入 master_data 配置（临时文件 + 缓存重置）；teardown 恢复真实配置缓存。"""
-    real_path = md_module._CONFIG_PATH
+    real_path = md_cfg_module._CONFIG_PATH
     path = tmp_path / "master_data.yaml"
     path.write_text(
         yaml.safe_dump({"master_data": _md_config_dict()}, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
-    monkeypatch.setattr(md_module, "_CONFIG_PATH", path)
-    md_module.reload_config()
+    monkeypatch.setattr(md_cfg_module, "_CONFIG_PATH", path)
+    md_cfg_module.reload_config()
     yield
-    md_module._CONFIG_PATH = real_path
-    md_module.reload_config()
+    md_cfg_module._CONFIG_PATH = real_path
+    md_cfg_module.reload_config()
 
 
 class TestE2EMock:

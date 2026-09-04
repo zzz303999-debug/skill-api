@@ -15,7 +15,7 @@ import pytest
 import yaml
 
 import app.orders.bill.master_data.client as md_client_module
-import app.orders.bill.master_data.orchestrator as md_module
+import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.master_data.orchestrator import (
@@ -69,7 +69,7 @@ def _md_cfg(threshold: int = 5) -> dict:
 @pytest.fixture()
 def md_config(tmp_path, monkeypatch):
     """注入 master_data 配置（临时文件 + 缓存重置）；teardown 恢复真实配置缓存。"""
-    real_path = md_module._CONFIG_PATH
+    real_path = md_cfg_module._CONFIG_PATH
 
     def _set(cfg: dict | None = None) -> None:
         path = tmp_path / "master_data.yaml"
@@ -77,12 +77,12 @@ def md_config(tmp_path, monkeypatch):
             yaml.safe_dump({"master_data": cfg or _md_cfg()}, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        monkeypatch.setattr(md_module, "_CONFIG_PATH", path)
-        md_module.reload_config()
+        monkeypatch.setattr(md_cfg_module, "_CONFIG_PATH", path)
+        md_cfg_module.reload_config()
 
     yield _set
-    md_module._CONFIG_PATH = real_path
-    md_module.reload_config()
+    md_cfg_module._CONFIG_PATH = real_path
+    md_cfg_module.reload_config()
 
 
 @pytest.fixture()

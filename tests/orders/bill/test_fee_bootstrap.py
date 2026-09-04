@@ -18,7 +18,7 @@ import yaml
 import app.orders.bill.fees.fee_bootstrap as fb_module
 import app.orders.bill.fees.fee_price_map as fp_module
 import app.orders.bill.master_data.client as md_client_module
-import app.orders.bill.master_data.orchestrator as md_module
+import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem
 from app.orders.bill.fees.fee_bootstrap import (
@@ -108,7 +108,7 @@ def price_cfg(tmp_path, monkeypatch):
 @pytest.fixture()
 def md_endpoint(tmp_path, monkeypatch):
     """注入 master_data endpoints（price_create 测试端点）；teardown 恢复真实配置缓存。"""
-    real_path = md_module._CONFIG_PATH
+    real_path = md_cfg_module._CONFIG_PATH
 
     def _set(endpoint: str = "http://jxt.test/Create/Price"):
         path = tmp_path / "master_data.yaml"
@@ -117,12 +117,12 @@ def md_endpoint(tmp_path, monkeypatch):
             yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        monkeypatch.setattr(md_module, "_CONFIG_PATH", path)
-        md_module.reload_config()
+        monkeypatch.setattr(md_cfg_module, "_CONFIG_PATH", path)
+        md_cfg_module.reload_config()
 
     yield _set
-    md_module._CONFIG_PATH = real_path
-    md_module.reload_config()
+    md_cfg_module._CONFIG_PATH = real_path
+    md_cfg_module.reload_config()
 
 
 @pytest.fixture()

@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.bill.master_data.orchestrator as md_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
@@ -52,7 +53,7 @@ TEST_ENDPOINTS = {
 @pytest.fixture()
 def md_config(tmp_path, monkeypatch):
     """注入 master_data 配置（临时文件 + 缓存重置）；teardown 恢复真实配置缓存。"""
-    real_path = md_module._CONFIG_PATH
+    real_path = md_cfg_module._CONFIG_PATH
 
     def _set(cfg: dict) -> None:
         path = tmp_path / "master_data.yaml"
@@ -60,14 +61,14 @@ def md_config(tmp_path, monkeypatch):
             yaml.safe_dump({"master_data": cfg}, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
-        monkeypatch.setattr(md_module, "_CONFIG_PATH", path)
-        md_module.reload_config()
+        monkeypatch.setattr(md_cfg_module, "_CONFIG_PATH", path)
+        md_cfg_module.reload_config()
 
     yield _set
     # 先还原路径再重载（pytest 撤销 monkeypatch 在 fixture teardown 之后，
     # 若不先还原，后续用例会读到残留的测试配置缓存）
-    md_module._CONFIG_PATH = real_path
-    md_module.reload_config()
+    md_cfg_module._CONFIG_PATH = real_path
+    md_cfg_module.reload_config()
 
 
 @pytest.fixture()
@@ -487,7 +488,7 @@ class TestDegradedEndpoints:
 
     async def test_todo_endpoints_count_only(self, md_config):
         md_config(_default_cfg())
-        md_module.reload_config()
+        md_cfg_module.reload_config()  # 恢复真实配置缓存（md_config teardown 已还原路径）
         # 把全部端点改回 TODO（模拟真实配置未补给）
         md_config(
             {
