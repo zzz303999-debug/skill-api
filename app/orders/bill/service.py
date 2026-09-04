@@ -64,30 +64,19 @@ def _order_dedup_parts(order) -> tuple[str | None, str | None]:
     return container_no, getattr(order, "row_seq", None)
 
 
-def _build_fee_reports(
-    output, orders: list, create_order: bool, sk: str = "", *, bootstrap_report: dict | None
-) -> dict:
-    """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
+def _reconcile_order_fees(
+    orders: list,
+) -> tuple[list[dict], list[dict], Counter[str], dict[str, dict]]:
+    """逐单费用对账（T14）：price_id 回填 + 降级口径调整 + 恒等复算 + 通道统计。
 
-    - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
-      excluded 并同步调整对账口径 recorded → excluded）；
-    - 恒等校验：bill_total − recorded_total = excluded_total，容差 0.01；
-      超差按单列条目（单号、通道、三口径值）；
-    - 报告内容：price_id null 降级清单、unmapped skip 逐行（计数）、to_other 原名
-      计数（≥阈值 warning）、金额解析失败清单。
-    返回结构与既有 reconciliation 同键（meta["reconciliation"]），canonical 路径使用。
-    bootstrap_report 由调用方先执行费目自举（run_fee_bootstrap_async）后传入
-    （含 None：自举未执行/无缺失时无报告段）。
-    """
-    from app.core.config import settings
-
+    返回 (price_id null 降级清单, 超差单条目, to_other 原名计数, 通道统计累计)。
+    费目自举（T25）已由调用方先执行（run_fee_bootstrap_async）：本批缺失费目码
+    自动建档 → registry 登记 → 下方 apply_price_map 经 registry 命中回填
+    （当批正常录入；preview 零副作用只出 planned 清单不发请求）。"""
     dropped: list[dict] = []
     mismatch: list[dict] = []
     to_other_counts: Counter[str] = Counter()
     channel_stats: dict[str, dict] = {}
-    # 费目自举（T25）：费用归一后、payload 构造前——本批缺失费目码自动建档 →
-    # registry 登记 → 下方 apply_price_map 经 registry 命中回填（当批正常录入）；
-    # **preview 零副作用**：create_order=false 只输出 planned 清单不发请求
     for order in orders:
         _, order_dropped = apply_price_map(order.fees)
         for entry in order_dropped:
@@ -138,13 +127,11 @@ def _build_fee_reports(
                 for name in fee.note.split(","):
                     if name:
                         to_other_counts[name] += 1
+    return dropped, mismatch, to_other_counts, channel_stats
 
-    threshold = settings.fee_to_other_warning_threshold
-    to_other_warning = [
-        {"name": name, "count": count}
-        for name, count in to_other_counts.items()
-        if count >= threshold
-    ]
+
+def _fee_parse_failures(output) -> tuple[Counter[str], Counter[str]]:
+    """行级费用解析失败/无码跳过计数（parser 行私有键 _fee_failures/_fee_skipped）。"""
     failures: Counter[str] = Counter()
     skipped: Counter[str] = Counter()
     for row in output.canonical_rows or []:
@@ -152,6 +139,34 @@ def _build_fee_reports(
             failures[f"{item.get('section', '')}.{item.get('name', '')}"] += 1
         for item in row.get("_fee_skipped") or []:
             skipped[f"{item.get('section', '')}.{item.get('name', '')}"] += 1
+    return failures, skipped
+
+
+def _build_fee_reports(
+    output, orders: list, create_order: bool, sk: str = "", *, bootstrap_report: dict | None
+) -> dict:
+    """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
+
+    - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
+      excluded 并同步调整对账口径 recorded → excluded）；
+    - 恒等校验：bill_total − recorded_total = excluded_total，容差 0.01；
+      超差按单列条目（单号、通道、三口径值）；
+    - 报告内容：price_id null 降级清单、unmapped skip 逐行（计数）、to_other 原名
+      计数（≥阈值 warning）、金额解析失败清单。
+    返回结构与既有 reconciliation 同键（meta["reconciliation"]），canonical 路径使用。
+    bootstrap_report 由调用方先执行费目自举（run_fee_bootstrap_async）后传入
+    （含 None：自举未执行/无缺失时无报告段）。
+    """
+    from app.core.config import settings
+
+    dropped, mismatch, to_other_counts, channel_stats = _reconcile_order_fees(orders)
+    threshold = settings.fee_to_other_warning_threshold
+    to_other_warning = [
+        {"name": name, "count": count}
+        for name, count in to_other_counts.items()
+        if count >= threshold
+    ]
+    failures, skipped = _fee_parse_failures(output)
 
     channels: dict = {}
     any_mismatch = False
@@ -362,6 +377,64 @@ def _aggregate_stage(output, create_order: bool, sk: str):
     return orders, canonical_orders, agg
 
 
+def _build_failed_details(created: list) -> list[dict]:
+    """失败单明细（summary.failed_details）：单号/错误码/消息 + upstream 透传（有才带）。"""
+    return [
+        {
+            **{
+                "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
+                "error_code": (o.create_result.get("error") or {}).get("code"),
+                "error_message": (o.create_result.get("error") or {}).get("message"),
+            },
+            **(
+                {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
+                if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
+                else {}
+            ),
+        }
+        for o in created
+        if not o.create_result.get("success")
+    ]
+
+
+def _build_summary(total: int, created: list) -> dict:
+    """create 结果统计（六字段 + failed_details）；created = 有 create_result 的单。"""
+    return {
+        "total": total,
+        "success": sum(1 for o in created if o.create_result.get("success")),
+        "failed": sum(1 for o in created if not o.create_result.get("success")),
+        "skipped": sum(1 for o in created if o.create_result.get("skipped")),
+        "created": sum(
+            1
+            for o in created
+            if o.create_result.get("success") and not o.create_result.get("skipped")
+        ),
+        "success_sns": [
+            o.create_result.get("sn") for o in created if o.create_result.get("success")
+        ],
+        "failed_details": _build_failed_details(created),
+    }
+
+
+def _build_upstream(created: list) -> dict | None:
+    """上游回显：存在非 skipped 已处理单时回显（200 有新建/204 全失败）；
+    无已处理单或全部 skipped → None（与既有语义一致）。"""
+    if not created or all(o.create_result.get("skipped") for o in created):
+        return None
+    upstream_data = [
+        o.create_result.get("upstream")
+        for o in created
+        if o.create_result.get("success") and o.create_result.get("upstream")
+    ]
+    created_ok = any(
+        o.create_result.get("success") and not o.create_result.get("skipped")
+        for o in created
+    )
+    if created_ok:
+        return {"code": "200", "msg": "添加成功", "data": upstream_data}
+    return {"code": "204", "msg": "添加失败", "data": []}
+
+
 async def build_result_async(
     *,
     filename: str,
@@ -460,54 +533,9 @@ async def build_result_async(
                 canonical_orders, sk, source_sha256=file_sha256
             )
         pipeline = orders if orders else canonical_orders
-        created = [
-            o for o in pipeline if getattr(o, "create_result", None)
-        ]
-        summary = {
-            "total": len(canonical_orders) or len(orders),
-            "success": sum(1 for o in created if o.create_result.get("success")),
-            "failed": sum(1 for o in created if not o.create_result.get("success")),
-            "skipped": sum(1 for o in created if o.create_result.get("skipped")),
-            "created": sum(
-                1
-                for o in created
-                if o.create_result.get("success") and not o.create_result.get("skipped")
-            ),
-            "success_sns": [
-                o.create_result.get("sn") for o in created if o.create_result.get("success")
-            ],
-            "failed_details": [
-                {
-                    **{
-                        "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-                        "error_code": (o.create_result.get("error") or {}).get("code"),
-                        "error_message": (o.create_result.get("error") or {}).get("message"),
-                    },
-                    **(
-                        {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
-                        if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
-                        else {}
-                    ),
-                }
-                for o in created
-                if not o.create_result.get("success")
-            ],
-        }
-        upstream_data = [
-            o.create_result.get("upstream")
-            for o in created
-            if o.create_result.get("success") and o.create_result.get("upstream")
-        ]
-        created_ok = any(
-            o.create_result.get("success") and not o.create_result.get("skipped")
-            for o in created
-        )
-        if created and not all(o.create_result.get("skipped") for o in created):
-            upstream = (
-                {"code": "200", "msg": "添加成功", "data": upstream_data}
-                if created_ok
-                else {"code": "204", "msg": "添加失败", "data": []}
-            )
+        created = [o for o in pipeline if getattr(o, "create_result", None)]
+        summary = _build_summary(len(canonical_orders) or len(orders), created)
+        upstream = _build_upstream(created)
 
     meta: dict = {
         "source_sha256": file_sha256,
