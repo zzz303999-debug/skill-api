@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-import app.orders.bill.box_whitelist as whitelist_module
+import app.core.box_whitelist as whitelist_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.service import _reject_unknown_box_types

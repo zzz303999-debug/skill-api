@@ -48,7 +48,7 @@ def _mark_box_type_rejection(order) -> bool:
     （message 对齐账单文案），preview 与 create 统一执行，不调下游。
     返回是否命中（调用方跳过后续提交）。
     """
-    from app.orders.bill.box_whitelist import check_unknown_box_types
+    from app.core.box_whitelist import check_unknown_box_types
 
     unknown = check_unknown_box_types([g.b_type for g in order.box_groups])
     if not unknown:

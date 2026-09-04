@@ -1,5 +1,8 @@
 """TMS 箱型白名单校验（上传前拦截，2026-08-18 用户拍板）。
 
+2026-09 收编 core/：bill 与 manifest 两域共用的跨域校验规则，
+经门面纪律由直连 bill 内部模块改为上提 core（依赖方向纪律合规）。
+
 规则（叠加在既有「箱型非空即合法、非标表述放行」之上，不改变既有语义）：
 - 账单箱型为标准代码形态（两位数字 + 2~3 位大写字母，如 40HQ/40GOH/45HC）
   时必须命中 `config/box_type_whitelist.yaml` 的 box_types，否则拦截该单并返回
@@ -27,7 +30,7 @@ log = get_logger(__name__)
 # 与 normalizers 的 _BOX_ITEM_RE 同源（解析层匹配成功即视为标准代码候选）
 _STANDARD_CODE_RE = re.compile(r"^\d{2}[A-Z]{2,3}$")
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config"
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "config"
 
 _CACHE: frozenset[str] | None = None
 

@@ -203,7 +203,7 @@ def _reject_unknown_box_types(orders: list) -> bool:
     （历史成功单必然合法）。单级 message 报该单自己的非法箱型，无非法箱型的
     单报文件级清单；details.unknown_box_types 同 message 口径。
     """
-    from .box_whitelist import check_unknown_box_types
+    from app.core.box_whitelist import check_unknown_box_types
 
     def _types(order) -> list[str]:
         if isinstance(getattr(order, "box_groups", None), list):
