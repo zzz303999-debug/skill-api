@@ -221,8 +221,7 @@ class TestTonghuanViaJinxin:
         assert out.template_match.level == "L1"
         # 既有 BillRow 语义（与金科信 golden 同构）
         assert len(out.rows) > 0
-        from app.orders.bill import group_orders
-        from app.orders.bill.schema import to_canonical
+        from app.orders.bill import group_orders, to_canonical
 
         orders = group_orders(out.rows, out.period).orders
         assert len(orders) == 1090  # 一行一票：单数=数据行数（golden 基线）

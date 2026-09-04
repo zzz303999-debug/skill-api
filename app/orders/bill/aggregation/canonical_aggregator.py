@@ -8,8 +8,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
+from ..fees.fee_name_map import canonicalize_fee_name
 from ..schema import (
+    BillOrder,
     BillPeriod,
     BoxGroup,
     CanonicalOrder,
@@ -216,3 +219,84 @@ def _canonical_from_row(
     if not order.customer_name:
         order.add_missing("customer_name")
     return order
+
+
+def _first_nonempty(d: dict[str, Any], *keys: str) -> Any | None:
+    """按序取首个非空值。"""
+    for key in keys:
+        value = d.get(key)
+        if value is not None and str(value).strip():
+            return value
+    return None
+
+
+def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> CanonicalOrder:
+    """BillOrder → CanonicalOrder 转换（既有流程零感知；内置模板家族的 TMS 通道入口）。
+
+    2026-09 由 schema 迁入归集簇（schema 回归纯契约）：旧链路订单 → 标准订单
+    的转换与 group_canonical 同属归集职责。映射口径见《TMS业务订单新增接口-
+    逆推规范》§4；旧流程 order_data 的扁平键逐项对齐到标准字段；缺失项（必填
+    bl_no/box_groups）登记 missing_fields。费用：order_data["shou"]（费目名 →
+    金额）经费目别名字典归一为 FeeItem（未命中字典 → other + 原名进 note），
+    金额为 0/空不生成记录。
+    """
+    data = order.order_data or {}
+    box_groups = [
+        BoxGroup(b_type=box["b_type"], box_num=int(box.get("box_num", 1)))
+        for box in data.get("box", []) or []
+        if isinstance(box, dict) and box.get("b_type")
+    ]
+    driver = (data.get("driver") or [{}])[0]
+    fees: list[FeeItem] = []
+    for entry in data.get("shou", []) or []:
+        if not isinstance(entry, dict):
+            continue
+        for name, spec in entry.items():
+            if not isinstance(spec, dict):
+                continue
+            money = spec.get("money")
+            if not isinstance(money, (int, float)) or money == 0:
+                continue  # 空值与 0 均不生成费用记录（账单侧合计仍参与对账）
+            code, note = canonicalize_fee_name(str(name))
+            fees.append(
+                FeeItem(
+                    channel="shou",
+                    code=code,
+                    money=Decimal(str(round(float(money), 2))),
+                    note=note,
+                )
+            )
+    canonical = CanonicalOrder(
+        bl_no=order.order_num1 or _first_nonempty(data, "order_num1"),
+        box_groups=box_groups,
+        # 一行一票：本行箱号结构化进 containers（去重组合键取值处）
+        containers=(
+            [ContainerInfo(container_no=order.container_no)] if order.container_no else []
+        ),
+        customer_name=order.c_title or _first_nonempty(data, "c_title"),
+        customer_no=_first_nonempty(data, "c_sn"),
+        customer_contact=_first_nonempty(data, "c_name"),
+        contact_phone=_first_nonempty(data, "c_phone"),
+        door_point=_first_nonempty(data, "factory_name"),
+        load_address=_first_nonempty(data, "factory_bei"),
+        port_area=_first_nonempty(data, "b_wharf"),
+        work_date=_first_nonempty(driver, "b_date"),
+        pickup_point=_first_nonempty(driver, "b_get_address"),
+        return_point=_first_nonempty(driver, "b_back_address"),
+        plate_no=_first_nonempty(driver, "d_num"),
+        driver_name=_first_nonempty(driver, "d_name"),
+        driver_phone=_first_nonempty(driver, "d_phone"),
+        month=_first_nonempty(data, "month"),
+        remark=_first_nonempty(data, "c_note"),
+        fees=fees,
+        source_template=source_template,
+        row_count=order.row_count,
+    )
+    # 必填缺失登记（旧流程 missing 口径 → 标准字段名）
+    if order.order_num1 is None or not canonical.bl_no:
+        canonical.add_missing("bl_no")
+    if not box_groups:
+        canonical.add_missing("box_groups")
+    if order.c_title is None and not canonical.customer_name:
+        canonical.add_missing("customer_name")
+    return canonical

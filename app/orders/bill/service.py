@@ -30,7 +30,7 @@ from app.core.errors import BadRequestError, LLMError, ParseError
 from app.llm import achat_json
 
 from .aggregation.aggregator import group_orders
-from .aggregation.canonical_aggregator import group_canonical
+from .aggregation.canonical_aggregator import group_canonical, to_canonical
 from .fees.fee_bootstrap import run_fee_bootstrap_async
 from .fees.fee_price_map import apply_price_map
 from .parsing.ai_header import build_llm_request, validate_ai_result
@@ -41,7 +41,7 @@ from .parsing.parser import (
     parse_ai_header,
     parse_exact_fallback,
 )
-from .schema import BillParseResult, to_canonical
+from .schema import BillParseResult
 from .submission.client import create_canonical_orders_async, create_orders_async
 
 
