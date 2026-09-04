@@ -116,14 +116,16 @@ def test_pending_expected_candidate_is_schema_valid(case):
 @pytest.mark.parametrize(
     "case", [case for case in CASES if case["parser_mode"] == "local"], ids=lambda case: case["name"]
 )
-def test_local_parser_golden_regression(case, monkeypatch):
+@pytest.mark.asyncio
+async def test_local_parser_golden_regression(case, monkeypatch):
     from app.core.config import settings
-    from app.skills.tuoshu.convert_service import convert_to_markdown
+    from app.skills.tuoshu.convert_service import convert_to_markdown_async
 
     monkeypatch.setattr(settings, "mineru_enabled", False)
     document = _case_path(case, "document")
     expected = _case_path(case, "parsed").read_text(encoding="utf-8")
-    actual = str(convert_to_markdown(document.read_bytes(), document.name))
+    converted = await convert_to_markdown_async(document.read_bytes(), document.name)
+    actual = str(converted)
 
     assert actual == expected, "parser-level golden diff:\n" + _text_diff(expected, actual)
 
@@ -134,11 +136,14 @@ def test_local_parser_golden_regression(case, monkeypatch):
     "case", [case for case in CASES if case["parser_mode"] == "mineru"], ids=lambda case: case["name"]
 )
 def test_mineru_parser_golden_regression(case):
-    from app.mineru.client import parse_pdf
+    from app.mineru.client import parse_document_async
 
     document = _case_path(case, "document")
     expected = _case_path(case, "parsed").read_text(encoding="utf-8")
-    actual = parse_pdf(document.read_bytes(), document.name)
+    parsed = asyncio.run(
+        parse_document_async(document.read_bytes(), document.name, mime_type="application/pdf")
+    )
+    actual = parsed.markdown
 
     assert actual == expected, "MinerU parser-level golden diff:\n" + _text_diff(expected, actual)
 
@@ -151,11 +156,14 @@ def test_mineru_parser_golden_regression(case):
     ids=lambda case: case["name"],
 )
 def test_image_mineru_parser_regression(case):
-    from app.mineru.client import parse_document
+    from app.mineru.client import parse_document_async
 
     document = _case_path(case, "document")
     expected = _case_path(case, "parsed").read_text(encoding="utf-8").strip()
-    actual = parse_document(document.read_bytes(), document.name, mime_type="image/jpeg").markdown
+    parsed = asyncio.run(
+        parse_document_async(document.read_bytes(), document.name, mime_type="image/jpeg")
+    )
+    actual = parsed.markdown
 
     assert actual == expected, "MinerU image parser-level diff:\n" + _text_diff(expected, actual)
 
@@ -182,7 +190,8 @@ def test_expected_template_route_is_pinned(case):
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
-def test_quality_router_matches_expected_parser(case, monkeypatch):
+@pytest.mark.asyncio
+async def test_quality_router_matches_expected_parser(case, monkeypatch):
     from app.core.config import settings
     from app.mineru.client import MinerUParseResult
     from app.skills.tuoshu import convert_service
@@ -191,18 +200,20 @@ def test_quality_router_matches_expected_parser(case, monkeypatch):
     monkeypatch.setattr(settings, "mineru_enabled", True)
     if case["parser_mode"] == "mineru_image":
         markdown = _case_path(case, "parsed").read_text(encoding="utf-8")
-        monkeypatch.setattr(
-            convert_service.mineru,
-            "parse_document",
-            lambda *_args, **_kwargs: MinerUParseResult(markdown=markdown, table_count=2),
+
+        async def fake_mineru(*_args, **_kwargs):
+            return MinerUParseResult(markdown=markdown, table_count=2)
+
+        monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+        result = await convert_service.convert_image_to_parse_result_async(
+            document.read_bytes(), document.name
         )
-        parser = convert_service.convert_image_to_parse_result(
-            document.read_bytes(), document.name
-        ).parser
+        parser = result.parser
     else:
-        parser = convert_service.convert_to_markdown(
+        converted = await convert_service.convert_to_markdown_async(
             document.read_bytes(), document.name
-        ).parser
+        )
+        parser = converted.parser
 
     assert parser == case["expected_route"]["parser"]
 

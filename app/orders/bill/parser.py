@@ -27,7 +27,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.core.errors import BadRequestError, ConvertError, LLMError, ParseError
+from app.core.errors import BadRequestError, ConvertError
 
 from . import template_store
 from .fee_name_map import canonicalize_fee, is_new_fee_schema
@@ -857,7 +857,7 @@ def _match_template_and_parse(
     """L1/L2 模板识别解析段（纯 CPU，无 LLM 调用）：命中 → 配置驱动解析。
 
     YAML 模板库（L1 指纹/L2 族级近似）与旧指纹库两级识别；未命中返回 None
-    （交 L3：同步路径 _parse_sheet 走 map_header，生产两段式编排走
+    （交 L3：生产两段式编排走
     open_and_identify 信号）。同步/两段两入口共用，命中路径零额外开销。
     """
     match = template_store.identify(view)
@@ -936,26 +936,16 @@ def _parse_with_ai_result(
 
 
 def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutput:
-    """统一解析核心（同步完整路径，parse_bill 入口）：L1/L2 模板识别 →
-    未命中 → AI 映射（map_header 内 chat_json 同步 LLM）→ 回退精确匹配。
+    """统一解析核心（纯 CPU，parse_bill 入口）：L1/L2 模板识别 → 未命中
+    精确匹配回退（找不到表头照旧 400）。
 
-    生产两段式编排在 service 层走 open_and_identify + achat_json（网络段
-    真异步，见 _parse_stage_async）；本函数保持同步 parse_bill 完整语义
-    （tests 直调依赖），两条路径的 L1/L2/L3 解析段共用同一实现。
-    """
+    L3 AI 表头映射只走生产两段式编排（open_and_identify + achat_json +
+    parse_ai_header，见 _parse_stage_async）；同步 parse_bill 为测试/纯 CPU
+    语义基准，不再内联 LLM（2026-09 第二波同步链清理）。"""
     out = _match_template_and_parse(view, engine, filename)
     if out is not None:
         return out
-    # 2) 未命中模板库 → L3 AI 表头映射（标准字段映射 + 模板结构判定；
-    #    四道校验闸门不过抛 400；LLM 不可用/响应非法 → 回退现有精确匹配）
-    try:
-        from .ai_header import map_header
-
-        ai = map_header(view)
-    except (LLMError, ParseError):
-        # LLM 不可用/响应非法 → 回退现有精确匹配（找不到表头照旧 400）
-        return _parse_exact(view, engine)
-    return _parse_with_ai_result(view, engine, filename, ai)
+    return _parse_exact(view, engine)
 
 
 def _parse_exact(view: _SheetView, engine: str) -> ParseOutput:
@@ -1078,7 +1068,7 @@ def parse_bill(path: str | Path) -> ParseOutput:
     """按内容格式分发解析（同步完整路径）：返回 ParseOutput（rows / period / engine / unmatched_headers）。
 
     生产两段式编排走 open_and_identify 阶段 API（LLM 网络段真异步）；
-    本函数保持同步完整语义（tests 直调依赖），L3 走 map_header 同步 LLM。
+    本函数为纯 CPU 语义基准（tests 直调依赖），不含 LLM。
     """
     return _parse_with_engine(path, _detect_format_checked(path))
 

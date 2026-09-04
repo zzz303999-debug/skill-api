@@ -1660,3 +1660,145 @@ async def test_scan_pdf_sentinel_empty_markdown_raises_convert_error(monkeypatch
         await document_module._convert_file_async(b"x", "order.pdf")
     assert exc_info.value.code == "vision_disabled_no_ocr"
     assert exc_info.value.details == {"file": "order.pdf"}
+
+
+# ---------- 图片/文档哨兵主路径（收官清理：同步 MinerU 内联 → async 编排） ----------
+
+
+class _FakeParseResult:
+    """ParseResult 最小替身（图片组装段仅消费以下字段）。"""
+
+    def __init__(self, markdown, parser="mineru", input_format="png"):
+        self.markdown = markdown
+        self.parser = parser
+        self.parser_fallback = False
+        self.input_format = input_format
+        self.vision_images: list = []
+        self.vision_inputs: list = []
+
+    def meta(self) -> dict:
+        return {"parser": self.parser, "input_format": self.input_format}
+
+
+def _image_sentinel(file_bytes=b"fake-image", filename="order.png"):
+    return document_module._NeedsImageParse(
+        file_bytes=file_bytes, filename=filename, doc_format="png"
+    )
+
+
+async def test_image_sentinel_awaits_async_ocr_and_assembles(monkeypatch):
+    """图片哨兵：await convert_image_to_parse_result_async → 组装段输出四元组
+    （markdown 作 source_text，parser 记入 conversion_meta）。"""
+    import app.skills.tuoshu.convert_service as convert_service_module
+
+    captured = {}
+    monkeypatch.setattr(
+        document_module, "_convert_file", lambda fb, fn: _image_sentinel(fb, fn)
+    )
+
+    async def fake_ocr(file_bytes, filename, **_kwargs):
+        captured["bytes"], captured["name"] = file_bytes, filename
+        return _FakeParseResult("提单号：IMG001\n做箱工厂：某门点")
+
+    monkeypatch.setattr(
+        convert_service_module, "convert_image_to_parse_result_async", fake_ocr
+    )
+
+    result = await document_module._convert_file_async(b"fake-image", "order.png")
+
+    assert captured == {"bytes": b"fake-image", "name": "order.png"}
+    source_text, doc_format, meta, user_content = result
+    assert source_text == "提单号：IMG001\n做箱工厂：某门点"
+    assert doc_format == "png"
+    assert meta["parser"] == "mineru"
+    assert isinstance(user_content, str)
+    assert "IMG001" in user_content
+
+
+async def test_image_sentinel_no_ocr_text_raises(monkeypatch):
+    """图片 OCR 无文本（markdown 空）→ ConvertError(vision_disabled_no_ocr)——
+    空文档绝不喂 LLM（捏造防护语义与改造前一致）。"""
+    import app.skills.tuoshu.convert_service as convert_service_module
+
+    monkeypatch.setattr(
+        document_module, "_convert_file", lambda fb, fn: _image_sentinel(fb, fn)
+    )
+
+    async def fake_ocr(*_args, **_kwargs):
+        return _FakeParseResult(None, parser="vision")
+
+    monkeypatch.setattr(
+        convert_service_module, "convert_image_to_parse_result_async", fake_ocr
+    )
+
+    from app.core.errors import ConvertError
+
+    with pytest.raises(ConvertError) as exc_info:
+        await document_module._convert_file_async(b"fake-image", "order.png")
+    assert exc_info.value.code == "vision_disabled_no_ocr"
+
+
+async def test_doc_sentinel_awaits_async_convert_and_assembles(monkeypatch):
+    """文档哨兵：await convert_to_markdown_async → 组装段输出四元组
+    （Word/Excel 本地转换 + PDF 页级路由均收敛于 async 入口）。"""
+    import app.skills.tuoshu.convert_service as convert_service_module
+
+    captured = {}
+    monkeypatch.setattr(
+        document_module,
+        "_convert_file",
+        lambda fb, fn: document_module._NeedsDocConvert(
+            file_bytes=fb, filename=fn, doc_format="docx"
+        ),
+    )
+
+    async def fake_convert(file_bytes, filename):
+        captured["bytes"], captured["name"] = file_bytes, filename
+        return "提单号：DOC001\n门点装箱通知"
+
+    monkeypatch.setattr(
+        convert_service_module, "convert_to_markdown_async", fake_convert
+    )
+
+    result = await document_module._convert_file_async(b"fake-docx", "order.docx")
+
+    assert captured == {"bytes": b"fake-docx", "name": "order.docx"}
+    source_text, doc_format, meta, user_content = result
+    assert source_text == "提单号：DOC001\n门点装箱通知"
+    assert doc_format == "docx"
+    assert isinstance(user_content, str)
+    assert "DOC001" in user_content
+
+
+async def test_doc_sentinel_hint_defense_routes_to_scan_ocr(monkeypatch):
+    """文档组装 HINT 防御链：async 转换返回 HINT（扫描 PDF 形态）→ 组装产出
+    _NeedsMineruOcr → _resolve_scan_sentinel 终解（await parse_document_async）。"""
+    import app.skills.tuoshu.convert_service as convert_service_module
+
+    monkeypatch.setattr(
+        document_module,
+        "_convert_file",
+        lambda fb, fn: document_module._NeedsDocConvert(
+            file_bytes=fb, filename=fn, doc_format="pdf"
+        ),
+    )
+
+    async def fake_convert(*_args, **_kwargs):
+        return "SCAN_OR_IMAGE_HINT: scan.pdf  # image → vision"
+
+    async def fake_parse(*_args, **_kwargs):
+        return _FakeMineruResult("提单号：KMTCSHAP950393\n扫描件 OCR 文本")
+
+    monkeypatch.setattr(
+        convert_service_module, "convert_to_markdown_async", fake_convert
+    )
+    monkeypatch.setattr(document_module.mineru, "parse_document_async", fake_parse)
+
+    result = await document_module._convert_file_async(b"fake-scan", "scan.pdf")
+
+    source_text, doc_format, meta, user_content = result
+    assert "KMTCSHAP950393" in source_text
+    assert doc_format == "pdf"
+    assert meta["parser"] == "mineru"
+    assert meta["ocr_unverified"] is True
+    assert isinstance(user_content, str)

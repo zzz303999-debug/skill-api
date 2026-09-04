@@ -16,8 +16,7 @@ from app.mineru.client import (
     _extract_markdown,
     _quality_result,
     _strip_markdown_images,
-    parse_document,
-    parse_pdf,
+    parse_document_async,
 )
 from app.skills.tuoshu import convert_service
 from app.skills.tuoshu.convert_service import ConversionText, detect_image_mime
@@ -57,7 +56,8 @@ def test_mineru_low_confidence_is_explicit_when_structure_and_labels_are_absent(
     assert result.low_confidence_reasons == ("no_table_or_key_labels",)
 
 
-def test_original_image_is_uploaded_to_mineru(monkeypatch):
+@pytest.mark.asyncio
+async def test_original_image_is_uploaded_to_mineru(monkeypatch):
     captured: dict = {}
 
     class FakeResponse:
@@ -70,32 +70,24 @@ def test_original_image_is_uploaded_to_mineru(monkeypatch):
         def json(self):
             return {"markdown": "| 提单号 | TEST000011 |"}
 
-    class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def post(self, _url, **kwargs):
+    class FakeAsyncClient:
+        async def post(self, _url, **kwargs):
             captured.update(kwargs)
             return FakeResponse()
 
     image_bytes = b"\x89PNG\r\n\x1a\noriginal"
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
-    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(mineru_module, "get_async_client", lambda: FakeAsyncClient())
 
-    result = parse_document(image_bytes, "order.png", mime_type="image/png")
+    result = await parse_document_async(image_bytes, "order.png", mime_type="image/png")
 
     assert result.markdown == "| 提单号 | TEST000011 |"
     assert captured["files"] == {"files": ("order.png", image_bytes, "image/png")}
 
 
-def test_image_requests_disable_formula_recognition(monkeypatch):
+@pytest.mark.asyncio
+async def test_image_requests_disable_formula_recognition(monkeypatch):
     """图片单据无公式：请求参数关闭 formula_enable 以降低 CPU 耗时；PDF 保留。"""
     captured: dict = {}
 
@@ -109,32 +101,25 @@ def test_image_requests_disable_formula_recognition(monkeypatch):
         def json(self):
             return {"markdown": "| 提单号 | TEST000011 |"}
 
-    class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def post(self, _url, **kwargs):
+    class FakeAsyncClient:
+        async def post(self, _url, **kwargs):
             captured[kwargs["files"]["files"][0]] = kwargs["data"]
             return FakeResponse()
 
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
-    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(mineru_module, "get_async_client", lambda: FakeAsyncClient())
 
-    parse_document(b"image-bytes", "order.jpg", mime_type="image/jpeg")
-    parse_document(b"%PDF-bytes", "order.pdf", mime_type="application/pdf")
+    await parse_document_async(b"image-bytes", "order.jpg", mime_type="image/jpeg")
+    await parse_document_async(b"%PDF-bytes", "order.pdf", mime_type="application/pdf")
 
     assert captured["order.jpg"]["formula_enable"] == "false"
     assert captured["order.pdf"]["formula_enable"] == "true"
 
 
-def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
+@pytest.mark.asyncio
+async def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
+    """同步版页级路由已退役（async 版唯一链路）；本用例迁移验证路由语义。"""
     import pdfplumber
 
     class FakePage:
@@ -158,21 +143,24 @@ def test_mixed_pdf_routes_only_bad_page_to_mineru(monkeypatch):
 
     mineru_calls: list[str] = []
 
-    def fake_mineru(_bytes, filename, **_kwargs):
+    async def fake_mineru(_bytes, filename, **_kwargs):
         mineru_calls.append(filename)
         return MinerUParseResult(markdown="| 提单号 | OCR000001 |", table_count=1)
 
     monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
     monkeypatch.setattr(convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png")
-    monkeypatch.setattr(convert_service.mineru, "parse_document", fake_mineru)
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
 
-    result = convert_service._convert_pdf_with_page_routing(b"pdf", "mixed.pdf")
+    result = await convert_service._convert_pdf_with_page_routing_async(
+        b"pdf", "mixed.pdf"
+    )
 
     assert [page.parser for page in result.pages] == ["pdfplumber", "mineru"]
     assert mineru_calls == ["mixed-page-2.png"]
 
 
-def test_pdf_page_routing_rejects_too_many_vision_pages(monkeypatch):
+@pytest.mark.asyncio
+async def test_pdf_page_routing_rejects_too_many_vision_pages(monkeypatch):
     import pdfplumber
 
     class FakePage:
@@ -194,35 +182,38 @@ def test_pdf_page_routing_rejects_too_many_vision_pages(monkeypatch):
     monkeypatch.setattr(settings, "vision_max_pdf_pages", 2)
     monkeypatch.setattr(pdfplumber, "open", lambda _stream: FakePdf())
     monkeypatch.setattr(convert_service, "_render_pdf_page", lambda *_args, **_kwargs: b"png")
-    monkeypatch.setattr(
-        convert_service.mineru,
-        "parse_document",
-        lambda *_args, **_kwargs: MinerUParseResult(
+
+    async def fake_mineru(*_args, **_kwargs):
+        return MinerUParseResult(
             markdown="无法辨认",
             low_confidence_reasons=("insufficient_text_blocks",),
-        ),
-    )
+        )
+
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
 
     with pytest.raises(ConvertError) as exc_info:
-        convert_service._convert_pdf_with_page_routing(b"pdf", "scan.pdf")
+        await convert_service._convert_pdf_with_page_routing_async(b"pdf", "scan.pdf")
 
     assert exc_info.value.code == "pdf_page_limit_exceeded"
     assert exc_info.value.details == {"vision_page_count": 3, "max_pages": 2}
 
 
-def test_low_confidence_image_routes_to_vision_with_blocking_issue(monkeypatch):
+@pytest.mark.asyncio
+async def test_low_confidence_image_routes_to_vision_with_blocking_issue(monkeypatch):
     image_bytes = b"\x89PNG\r\n\x1a\nlow-resolution"
     monkeypatch.setattr(settings, "mineru_enabled", True)
-    monkeypatch.setattr(
-        convert_service.mineru,
-        "parse_document",
-        lambda *_args, **_kwargs: MinerUParseResult(
+
+    async def fake_mineru(*_args, **_kwargs):
+        return MinerUParseResult(
             markdown="无法辨认",
             low_confidence_reasons=("insufficient_text_blocks", "no_table_or_key_labels"),
-        ),
-    )
+        )
 
-    result = convert_service.convert_image_to_parse_result(image_bytes, "low.png")
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+
+    result = await convert_service.convert_image_to_parse_result_async(
+        image_bytes, "low.png"
+    )
 
     assert result.pages[0].parser == "vision"
     assert result.pages[0].vision_image == image_bytes
@@ -237,19 +228,22 @@ def test_low_confidence_image_routes_to_vision_with_blocking_issue(monkeypatch):
     ]
 
 
-def test_high_confidence_image_keeps_original_as_visual_evidence(monkeypatch):
+@pytest.mark.asyncio
+async def test_high_confidence_image_keeps_original_as_visual_evidence(monkeypatch):
     image_bytes = b"\x89PNG\r\n\x1a\noriginal"
     monkeypatch.setattr(settings, "mineru_enabled", True)
-    monkeypatch.setattr(
-        convert_service.mineru,
-        "parse_document",
-        lambda *_args, **_kwargs: MinerUParseResult(
+
+    async def fake_mineru(*_args, **_kwargs):
+        return MinerUParseResult(
             markdown="备注：出口清关的装完箱后请及时进港 作业资水！",
             table_count=1,
-        ),
-    )
+        )
 
-    result = convert_service.convert_image_to_parse_result(image_bytes, "order.png")
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+
+    result = await convert_service.convert_image_to_parse_result_async(
+        image_bytes, "order.png"
+    )
 
     assert result.pages[0].parser == "mineru"
     assert result.pages[0].confidence == "high"
@@ -292,7 +286,8 @@ def test_markdown_fallback_removes_image_alt_text():
     assert _strip_markdown_images(markdown) == "正文\n\n结尾"
 
 
-def test_mineru_request_profile_and_version_are_pinned(monkeypatch):
+@pytest.mark.asyncio
+async def test_mineru_request_profile_and_version_are_pinned(monkeypatch):
     captured: dict = {}
 
     class FakeResponse:
@@ -306,17 +301,8 @@ def test_mineru_request_profile_and_version_are_pinned(monkeypatch):
         def json(self):
             return {"markdown": "# 固定解析结果"}
 
-    class FakeClient:
-        def __init__(self, *, timeout):
-            captured["timeout"] = timeout
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def post(self, url, **kwargs):
+    class FakeAsyncClient:
+        async def post(self, url, **kwargs):
             captured["url"] = url
             captured.update(kwargs)
             return FakeResponse()
@@ -324,16 +310,20 @@ def test_mineru_request_profile_and_version_are_pinned(monkeypatch):
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_endpoint", "/file_parse")
     monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
-    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(mineru_module, "get_async_client", lambda: FakeAsyncClient())
 
-    result = parse_pdf(b"pdf", "order.pdf")
+    result = await parse_document_async(
+        b"pdf", "order.pdf", mime_type="application/pdf"
+    )
 
-    assert result == "# 固定解析结果"
+    assert result.markdown == "# 固定解析结果"
+    # timeout 随单例构造固定（get_async_client 内 AsyncClient(timeout=...)）
     assert captured["data"] == MINERU_REQUEST_PROFILE
     assert captured["files"] == {"files": ("order.pdf", b"pdf", "application/pdf")}
 
 
-def test_mineru_missing_version_header_is_accepted(monkeypatch, caplog):
+@pytest.mark.asyncio
+async def test_mineru_missing_version_header_is_accepted(monkeypatch, caplog):
     class FakeResponse:
         headers = {"content-type": "application/json"}
         content = b"{}"
@@ -344,28 +334,21 @@ def test_mineru_missing_version_header_is_accepted(monkeypatch, caplog):
         def json(self):
             return {"markdown": "# MinerU without version header"}
 
-    class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def post(self, *_args, **_kwargs):
+    class FakeAsyncClient:
+        async def post(self, *_args, **_kwargs):
             return FakeResponse()
 
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
-    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(mineru_module, "get_async_client", lambda: FakeAsyncClient())
 
-    assert parse_pdf(b"pdf", "order.pdf") == "# MinerU without version header"
+    result = await parse_document_async(b"pdf", "order.pdf", mime_type="application/pdf")
+    assert result.markdown == "# MinerU without version header"
     assert "mineru_version_header_missing" in caplog.text
 
 
-def test_mineru_version_drift_is_a_contract_error(monkeypatch):
+@pytest.mark.asyncio
+async def test_mineru_version_drift_is_a_contract_error(monkeypatch):
     class FakeResponse:
         headers = {"content-type": "application/json", "x-mineru-version": "2.6.0"}
         content = b"{}"
@@ -373,88 +356,86 @@ def test_mineru_version_drift_is_a_contract_error(monkeypatch):
         def raise_for_status(self):
             return None
 
-    class FakeClient:
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def post(self, *_args, **_kwargs):
+    class FakeAsyncClient:
+        async def post(self, *_args, **_kwargs):
             return FakeResponse()
 
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_expected_version", "2.5.4")
-    monkeypatch.setattr(mineru_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(mineru_module, "get_async_client", lambda: FakeAsyncClient())
 
     with pytest.raises(MinerUContractError, match="expected 2.5.4, got 2.6.0"):
-        parse_pdf(b"pdf", "order.pdf")
+        await parse_document_async(b"pdf", "order.pdf", mime_type="application/pdf")
 
 
-def test_mineru_version_lock_cannot_be_empty(monkeypatch):
+@pytest.mark.asyncio
+async def test_mineru_version_lock_cannot_be_empty(monkeypatch):
     monkeypatch.setattr(settings, "mineru_base_url", "http://mineru.test")
     monkeypatch.setattr(settings, "mineru_expected_version", "")
 
     with pytest.raises(MinerUContractError, match="must be pinned"):
-        parse_pdf(b"pdf", "order.pdf")
+        await parse_document_async(b"pdf", "order.pdf", mime_type="application/pdf")
 
 
-def test_pdf_prefers_mineru(monkeypatch):
+@pytest.mark.asyncio
+async def test_pdf_prefers_mineru(monkeypatch):
     monkeypatch.setattr(settings, "mineru_enabled", True)
     monkeypatch.setattr(settings, "mineru_fallback_enabled", True)
-    monkeypatch.setattr(
-        convert_service.mineru,
-        "parse_pdf",
-        lambda _file_bytes, _filename: "# MinerU Markdown",
-    )
 
-    converted = convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
+    async def fake_mineru(*_args, **_kwargs):
+        return MinerUParseResult(markdown="# MinerU Markdown")
+
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fake_mineru)
+
+    converted = await convert_service.convert_to_markdown_async(b"%PDF-1.7\n", "order.pdf")
 
     assert converted == "# MinerU Markdown"
     assert converted.parser == "mineru"
     assert converted.parser_fallback is False
 
 
-def test_pdf_fallback_raises_actionable_error_when_mineru_fails(monkeypatch):
+@pytest.mark.asyncio
+async def test_pdf_fallback_raises_actionable_error_when_mineru_fails(monkeypatch):
     # pdfplumber 打不开（触发 ValueError）且 MinerU 也失败时，不再落回本地
     # 解析器（必然再次失败），而是给出可行动的错误提示
     monkeypatch.setattr(settings, "mineru_enabled", True)
     monkeypatch.setattr(settings, "mineru_fallback_enabled", True)
 
-    def fail_mineru(_file_bytes, _filename):
+    async def fail_mineru(*_args, **_kwargs):
         raise MinerUError("unavailable")
 
-    monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fail_mineru)
 
     with pytest.raises(ConvertError) as exc_info:
-        convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
+        await convert_service.convert_to_markdown_async(b"%PDF-1.7\n", "order.pdf")
 
     assert exc_info.value.code == "pdf_parse_failed"
     assert "convert the PDF to images" in exc_info.value.message
     assert exc_info.value.details["mineru_error"].startswith("MinerUError")
 
 
-def test_pdf_can_disable_fallback(monkeypatch):
+@pytest.mark.asyncio
+async def test_pdf_can_disable_fallback(monkeypatch):
     monkeypatch.setattr(settings, "mineru_enabled", True)
     monkeypatch.setattr(settings, "mineru_fallback_enabled", False)
 
-    def fail_mineru(_file_bytes, _filename):
+    async def fail_mineru(*_args, **_kwargs):
         raise MinerUError("unavailable")
 
-    monkeypatch.setattr(convert_service.mineru, "parse_pdf", fail_mineru)
+    monkeypatch.setattr(convert_service.mineru, "parse_document_async", fail_mineru)
 
     with pytest.raises(ConvertError, match="MinerU convert failed"):
-        convert_service.convert_to_markdown(b"%PDF-1.7\n", "order.pdf")
+        await convert_service.convert_to_markdown_async(b"%PDF-1.7\n", "order.pdf")
 
 
-def test_image_without_mineru_is_marked_for_review(monkeypatch):
+@pytest.mark.asyncio
+async def test_image_without_mineru_is_marked_for_review(monkeypatch):
     image_bytes = b"\x89PNG\r\n\x1a\nimage"
     monkeypatch.setattr(settings, "mineru_enabled", False)
 
-    result = convert_service.convert_image_to_parse_result(image_bytes, "order.png")
+    result = await convert_service.convert_image_to_parse_result_async(
+        image_bytes, "order.png"
+    )
 
     assert result.pages[0].confidence == "low"
     assert result.parser_fallback is True

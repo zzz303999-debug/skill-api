@@ -3,10 +3,9 @@
 兼容常见的 ``mineru-api`` ``POST /file_parse`` 接口。客户端保留 Markdown、
 结构块和低置信依据，支持 JSON、直接 Markdown 或 ZIP 响应。
 
-异步版本（parse_document_async，2026-09 异步化改造新增）：网络段走共享
-AsyncClient 懒加载单例（收尾计划 §8 拍板，连接池复用，页级 OCR 并行收益
-最大），前置校验/响应解码/质量评估复用同步纯函数，语义与同步版逐项一致；
-同步版本保留至异步链路全部切换后统一清理（双轨过渡）。
+2026-09 异步化后生产唯一入口 parse_document_async（同步版已随第二波
+同步链清理退役）：网络段走共享 AsyncClient 懒加载单例（连接池复用），
+前置校验/响应解码/质量评估为模块内共享纯函数。
 """
 
 from __future__ import annotations
@@ -269,65 +268,6 @@ def _quality_result(markdown: str, content_list: list[dict[str, Any]]) -> MinerU
         key_labels=labels,
         low_confidence_reasons=tuple(reasons),
     )
-
-
-def parse_document(
-    file_bytes: bytes,
-    filename: str,
-    *,
-    mime_type: str | None = None,
-) -> MinerUParseResult:
-    """Send a PDF or original raster image to MinerU and retain quality evidence."""
-    if not settings.mineru_base_url.strip():
-        raise MinerUError("MINERU_BASE_URL is empty")
-    expected_version = settings.mineru_expected_version.strip()
-    if not expected_version:
-        raise MinerUContractError("MINERU_EXPECTED_VERSION must be pinned")
-
-    endpoint = settings.mineru_endpoint.strip() or "/file_parse"
-    url = f"{settings.mineru_base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-    headers: dict[str, str] = {}
-    if settings.mineru_api_key:
-        headers["Authorization"] = f"Bearer {settings.mineru_api_key}"
-
-    safe_filename = Path(filename).name or "document.pdf"
-    upload_mime = mime_type or mimetypes.guess_type(safe_filename)[0] or "application/octet-stream"
-    form = _request_form(safe_filename)
-
-    start = time.monotonic()
-    try:
-        with httpx.Client(timeout=settings.mineru_timeout_seconds) as client:
-            response = client.post(
-                url,
-                headers=headers,
-                data=form,
-                files={"files": (safe_filename, file_bytes, upload_mime)},
-                follow_redirects=True,
-            )
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise MinerUError(f"MinerU request failed: {exc.__class__.__name__}") from exc
-
-    _check_version(response, expected_version)
-    markdown, content_list = _decode_response(response)
-    result = _quality_result(markdown, content_list)
-    log.info(
-        "mineru_parse_done",
-        extra={
-            "file": safe_filename,
-            "bytes": len(file_bytes),
-            "duration_ms": round((time.monotonic() - start) * 1000, 1),
-            "table_count": result.table_count,
-            "low_confidence": result.low_confidence,
-            "low_confidence_reasons": result.low_confidence_reasons,
-        },
-    )
-    return result
-
-
-def parse_pdf(file_bytes: bytes, filename: str) -> str:
-    """Backward-compatible PDF-to-Markdown API."""
-    return parse_document(file_bytes, filename, mime_type="application/pdf").markdown
 
 
 # ---- 共享 AsyncClient 单例（2026-09 收尾计划 §8 拍板，对齐 orders/http_client 模式）----

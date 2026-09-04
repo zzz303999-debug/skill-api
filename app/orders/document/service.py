@@ -21,8 +21,6 @@ from app.llm import achat_json, image_to_data_url
 from app.mineru import client as mineru
 from app.skills.tuoshu.convert_service import (
     SUPPORTED_EXTS,
-    convert_image_to_parse_result,
-    convert_to_markdown,
     is_image,
     render_pdf_pages,
 )
@@ -245,93 +243,104 @@ class _NeedsMineruOcr:
     file_bytes: bytes
     filename: str
     doc_format: str
+@dataclass(frozen=True)
+class _NeedsImageParse:
+    """图片整本 OCR 哨兵（收官清理：原同步 convert_image_to_parse_result
+    内联在网络线程池，现提升为哨兵 + 编排层 await async 版）。"""
+
+    file_bytes: bytes
+    filename: str
+    doc_format: str
 
 
-def _convert_file(
-    file_bytes: bytes, filename: str
-) -> tuple[str | None, str, dict[str, Any], list[dict] | str] | _NeedsMineruOcr:
-    """把附件转成 LLM 可用的输入（CPU 段；调用方为 _convert_file_async）。
+@dataclass(frozen=True)
+class _NeedsDocConvert:
+    """文档转换哨兵（Word/Excel 本地段 + PDF 页级路由/兜底统一交编排层：
+    convert_to_markdown_async 内部分流，await 不阻塞事件循环）。"""
 
-    返回 (source_text, doc_format, conversion_meta, user_content)；
-    user_content 为字符串（纯文本）或 list[dict]（vision 消息）。
-    扫描 PDF 无视觉分支返回 _NeedsMineruOcr 哨兵，由编排层接管网络段。
-    """
-    ext = Path(filename).suffix.lower()
-    if ext not in SUPPORTED_EXTS:
-        raise BadRequestError(
-            f"unsupported extension: {ext}",
-            details={"supported": SUPPORTED_EXTS},
+    file_bytes: bytes
+    filename: str
+    doc_format: str
+
+
+def _assemble_image_stage(
+    parse_result, filename: str, doc_format: str
+) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
+    """图片转换组装段（纯 CPU，to_thread 执行；_convert_file_async 在
+    await convert_image_to_parse_result_async 后调用）。vision 交叉核验决策、
+    超限拒绝与空 OCR 拒绝语义与原内联分支逐字一致。"""
+    doc_format = parse_result.input_format
+    conversion_meta = parse_result.meta()
+    source_text = parse_result.markdown or None
+    # 当前 LLM 无视觉能力（llm_vision_enabled=False）时一律跳过 vision
+    skip_vision = (
+        not settings.llm_vision_enabled
+        or (
+            settings.image_vision_skip_when_confident
+            and parse_result.parser == "mineru"
+            and not parse_result.parser_fallback
         )
-
-    doc_format = ext.lstrip(".")
-    source_text: str | None = None
-    conversion_meta: dict[str, Any] = {}
-
-    if is_image(ext):
-        parse_result = convert_image_to_parse_result(file_bytes, filename)
-        doc_format = parse_result.input_format
-        conversion_meta = parse_result.meta()
-        source_text = parse_result.markdown or None
-        # 当前 LLM 无视觉能力（llm_vision_enabled=False）时一律跳过 vision
-        skip_vision = (
-            not settings.llm_vision_enabled
-            or (
-                settings.image_vision_skip_when_confident
-                and parse_result.parser == "mineru"
-                and not parse_result.parser_fallback
-            )
-        )
-        if parse_result.vision_images and not skip_vision:
-            images = list(parse_result.vision_inputs)
-            total_image_bytes = sum(len(image) for image, _ in images)
-            if total_image_bytes > settings.vision_max_image_bytes:
-                if not source_text:
-                    # 无 OCR 文本可降级时，绝不能把空文档喂给 LLM——模型会输出
-                    # 整份捏造数据。直接拒绝并提示压缩/拆分图片。
-                    raise ConvertError(
-                        "image exceeds the vision upload limit and no OCR text is "
-                        "available; compress or split the image and retry",
-                        code="vision_image_too_large",
-                        details={
-                            "file": Path(filename).name,
-                            "bytes": total_image_bytes,
-                            "max_bytes": settings.vision_max_image_bytes,
-                        },
-                    )
-                conversion_meta["vision_skipped_reason"] = "image_too_large"
-                user_content = _build_user_message_text(
-                    source_text or "", filename, doc_format
-                )
-            else:
-                data_urls = [
-                    image_to_data_url(image, mime=mime)
-                    for image, mime in images
-                ]
-                user_content = _build_user_message_vision(
-                    data_urls,
-                    filename,
-                    doc_format,
-                    parsed_text=source_text,
-                )
-        else:
-            if skip_vision:
-                conversion_meta["vision_cross_check"] = "skipped_confident"
+    )
+    if parse_result.vision_images and not skip_vision:
+        images = list(parse_result.vision_inputs)
+        total_image_bytes = sum(len(image) for image, _ in images)
+        if total_image_bytes > settings.vision_max_image_bytes:
             if not source_text:
-                # 无 OCR 文本可降级且模型无视觉时，绝不能把空文档喂给 LLM——
-                # 模型会输出整份捏造数据。直接拒绝并提示检查 MinerU 服务。
+                # 无 OCR 文本可降级时，绝不能把空文档喂给 LLM——模型会输出
+                # 整份捏造数据。直接拒绝并提示压缩/拆分图片。
                 raise ConvertError(
-                    "image has no OCR text and the current LLM model has no "
-                    "vision capability; check the MinerU service or use a "
-                    "vision-capable model",
-                    code="vision_disabled_no_ocr",
-                    details={"file": Path(filename).name},
+                    "image exceeds the vision upload limit and no OCR text is "
+                    "available; compress or split the image and retry",
+                    code="vision_image_too_large",
+                    details={
+                        "file": Path(filename).name,
+                        "bytes": total_image_bytes,
+                        "max_bytes": settings.vision_max_image_bytes,
+                    },
                 )
+            conversion_meta["vision_skipped_reason"] = "image_too_large"
             user_content = _build_user_message_text(
-                source_text, filename, doc_format
+                source_text or "", filename, doc_format
             )
-        return source_text, doc_format, conversion_meta, user_content
+        else:
+            data_urls = [
+                image_to_data_url(image, mime=mime)
+                for image, mime in images
+            ]
+            user_content = _build_user_message_vision(
+                data_urls,
+                filename,
+                doc_format,
+                parsed_text=source_text,
+            )
+    else:
+        if skip_vision:
+            conversion_meta["vision_cross_check"] = "skipped_confident"
+        if not source_text:
+            # 无 OCR 文本可降级且模型无视觉时，绝不能把空文档喂给 LLM——
+            # 模型会输出整份捏造数据。直接拒绝并提示检查 MinerU 服务。
+            raise ConvertError(
+                "image has no OCR text and the current LLM model has no "
+                "vision capability; check the MinerU service or use a "
+                "vision-capable model",
+                code="vision_disabled_no_ocr",
+                details={"file": Path(filename).name},
+            )
+        user_content = _build_user_message_text(
+            source_text, filename, doc_format
+        )
+    return source_text, doc_format, conversion_meta, user_content
 
-    markdown = convert_to_markdown(file_bytes, filename)
+
+def _assemble_doc_stage(
+    markdown, file_bytes: bytes, filename: str, doc_format: str
+) -> (
+    tuple[str | None, str, dict[str, Any], list[dict] | str] | _NeedsMineruOcr
+):
+    """文档转换组装段（纯 CPU，to_thread 执行）。HINT 防御分支（扫描件 PDF
+    无视觉 → _NeedsMineruOcr 哨兵；vision 整本渲染）与普通组装语义与原
+    内联分支逐字一致。"""
+    conversion_meta: dict[str, Any] = {}  # 兜底：纯文本 markdown 无 parse_result/parser
     parse_result = getattr(markdown, "parse_result", None)
     if parse_result is not None:
         conversion_meta = parse_result.meta()
@@ -342,7 +351,7 @@ def _convert_file(
 
     if markdown.startswith("SCAN_OR_IMAGE_HINT:"):
         # 扫描件 PDF：无视觉模型时交 MinerU OCR，否则整本转图片走 vision
-        if ext != ".pdf":
+        if doc_format != "pdf":
             raise ConvertError(
                 "document has no extractable text; convert it to PDF/image",
                 details={
@@ -410,22 +419,47 @@ def _convert_file(
     return source_text, doc_format, conversion_meta, user_content
 
 
-async def _convert_file_async(
+def _convert_file(
     file_bytes: bytes, filename: str
+) -> (
+    tuple[str | None, str, dict[str, Any], list[dict] | str]
+    | _NeedsMineruOcr
+    | _NeedsImageParse
+    | _NeedsDocConvert
+):
+    """把附件转成 LLM 可用的输入（纯 CPU 判定段；调用方为 _convert_file_async）。
+
+    图片/文档一律返回哨兵——网络段（MinerU OCR / PDF 页级路由）已提升到
+    编排层 await async 客户端（收尾计划改造项 B 同款模式），本函数不再
+    内联任何下游网络调用；扫描 PDF 无视觉的 _NeedsMineruOcr 由组装段
+    （_assemble_doc_stage）在 HINT 防御分支产出。
+    """
+    ext = Path(filename).suffix.lower()
+    if ext not in SUPPORTED_EXTS:
+        raise BadRequestError(
+            f"unsupported extension: {ext}",
+            details={"supported": SUPPORTED_EXTS},
+        )
+
+    doc_format = ext.lstrip(".")
+    if is_image(ext):
+        return _NeedsImageParse(
+            file_bytes=file_bytes, filename=filename, doc_format=doc_format
+        )
+    return _NeedsDocConvert(
+        file_bytes=file_bytes, filename=filename, doc_format=doc_format
+    )
+
+
+async def _resolve_scan_sentinel(
+    sentinel: _NeedsMineruOcr,
 ) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
-    """两段式转换编排（收尾计划改造项 B）：CPU 段 to_thread，网络段 await。
-
-    扫描件哨兵（_NeedsMineruOcr）→ await mineru.parse_document_async（共享
-    AsyncClient 单例）；异常/空 markdown 抛 ConvertError(vision_disabled_no_ocr)，
-    错误类型/code/msg/details 与原同步内联分支逐字一致。"""
-    import asyncio
-
-    result = await asyncio.to_thread(_convert_file, file_bytes, filename)
-    if not isinstance(result, _NeedsMineruOcr):
-        return result
+    """扫描 PDF OCR 哨兵终解（改造项 B 逻辑）：await parse_document_async →
+    空 markdown/异常抛 ConvertError(vision_disabled_no_ocr)，语义与原内联
+    分支逐字一致。图片/文档哨兵的 HINT 防御产出共用本终解。"""
     try:
         scanned = await mineru.parse_document_async(
-            result.file_bytes, result.filename, mime_type="application/pdf"
+            sentinel.file_bytes, sentinel.filename, mime_type="application/pdf"
         )
     except Exception as exc:
         raise ConvertError(
@@ -433,7 +467,7 @@ async def _convert_file_async(
             "check the MinerU service or use a text-based PDF",
             code="vision_disabled_no_ocr",
             details={
-                "file": Path(result.filename).name,
+                "file": Path(sentinel.filename).name,
                 "mineru_error": f"{exc.__class__.__name__}: {exc}",
             },
         ) from exc
@@ -442,7 +476,7 @@ async def _convert_file_async(
             "scan PDF has no extractable text and MinerU OCR returned "
             "empty; check the MinerU service or use a text-based PDF",
             code="vision_disabled_no_ocr",
-            details={"file": Path(result.filename).name},
+            details={"file": Path(sentinel.filename).name},
         )
     # MinerU OCR 成功：走纯文本抽取；扫描件无独立文本层可交叉核验
     conversion_meta = {
@@ -453,13 +487,58 @@ async def _convert_file_async(
     }
     return (
         scanned.markdown,
-        result.doc_format,
+        sentinel.doc_format,
         conversion_meta,
         _build_user_message_text(
-            scanned.markdown, result.filename, result.doc_format
+            scanned.markdown, sentinel.filename, sentinel.doc_format
         ),
     )
 
+
+async def _convert_file_async(
+    file_bytes: bytes, filename: str
+) -> tuple[str | None, str, dict[str, Any], list[dict] | str]:
+    """三哨兵转换编排（收尾计划改造项 B 扩展）：CPU 判定/组装 to_thread，
+    网络段 await async 客户端。
+
+    - _NeedsImageParse → await convert_image_to_parse_result_async → 组装
+    - _NeedsDocConvert → await convert_to_markdown_async（页级路由/本地段内部分流）
+      → 组装；组装产出 _NeedsMineruOcr（HINT 防御）→ _resolve_scan_sentinel
+    - _NeedsMineruOcr（扫描 PDF，防御路径/测试短路）→ _resolve_scan_sentinel
+    """
+    import asyncio
+
+    from app.skills.tuoshu.convert_service import (
+        convert_image_to_parse_result_async,
+        convert_to_markdown_async,
+    )
+
+    result = await asyncio.to_thread(_convert_file, file_bytes, filename)
+    if isinstance(result, _NeedsImageParse):
+        parse_result = await convert_image_to_parse_result_async(
+            result.file_bytes, result.filename
+        )
+        return await asyncio.to_thread(
+            _assemble_image_stage,
+            parse_result,
+            result.filename,
+            result.doc_format,
+        )
+    if isinstance(result, _NeedsDocConvert):
+        markdown = await convert_to_markdown_async(result.file_bytes, result.filename)
+        staged = await asyncio.to_thread(
+            _assemble_doc_stage,
+            markdown,
+            result.file_bytes,
+            result.filename,
+            result.doc_format,
+        )
+        if isinstance(staged, _NeedsMineruOcr):
+            return await _resolve_scan_sentinel(staged)
+        return staged
+    if isinstance(result, _NeedsMineruOcr):
+        return await _resolve_scan_sentinel(result)
+    return result
 
 def build_document_order_data(
     extracted: OrderDocumentExtraction,

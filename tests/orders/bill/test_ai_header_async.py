@@ -3,7 +3,7 @@
 2026-09 收尾改造（docs/异步化改造收尾计划.md 改造项一）：生产解析编排
 _parse_stage_async —— L1/L2 命中路径零 LLM 调用；L3 未命中 →
 AiHeaderNeeded 信号 → service.achat_json（真异步）→ 闸门/解析二次进段。
-与同步链路（test_template.py patch ai_header.chat_json 直调 parse_bill）
+与 test_template.py 的 L3 语义用例同口径（均已走 _parse_stage_async 两段式）
 语义对齐；本文件 patch 点为 service 命名空间 achat_json（编排层 import）。
 """
 

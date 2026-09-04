@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 import zipfile
@@ -137,7 +138,11 @@ def test_docx_embedded_image_is_routed_as_visual_evidence(tmp_path, monkeypatch)
     source = _make_complex_docx(tmp_path)
     monkeypatch.setattr(settings, "mineru_enabled", False)
 
-    converted = convert_service.convert_to_markdown(source.read_bytes(), source.name)
+    converted = asyncio.run(
+        convert_service.convert_to_markdown_async(
+            source.read_bytes(), source.name
+        )
+    )
     parse_result = converted.parse_result
 
     assert parse_result.parser == "mixed"
@@ -164,7 +169,11 @@ def test_xlsx_merged_cells_are_not_duplicated_and_dates_use_display_precision(tm
     sheet.merge_cells("B2:C2")
     workbook.save(source)
 
-    converted = convert_service.convert_to_markdown(source.read_bytes(), source.name)
+    converted = asyncio.run(
+        convert_service.convert_to_markdown_async(
+            source.read_bytes(), source.name
+        )
+    )
 
     assert str(converted).count("做箱通知书") == 1
     assert "| 1 | 做箱通知书 |  |" in converted
@@ -194,7 +203,11 @@ def test_xlsx_formula_and_missing_cached_value_are_explicit(tmp_path):
     sheet["A3"] = "=SUM(A1:A2)"
     workbook.save(source)
 
-    converted = convert_service.convert_to_markdown(source.read_bytes(), source.name)
+    converted = asyncio.run(
+        convert_service.convert_to_markdown_async(
+            source.read_bytes(), source.name
+        )
+    )
 
     assert "| A3 | =SUM(A1:A2) | _unavailable_ |" in converted
     assert converted.parse_result.coverage["formula_cells"] == 1
@@ -452,8 +465,8 @@ def test_concurrent_local_conversions_do_not_mix_outputs(monkeypatch):
     monkeypatch.setattr(convert_service, "validate_document_content", lambda *_args: "docx")
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first = pool.submit(convert_service.convert_to_markdown, b"a", "first.docx")
-        second = pool.submit(convert_service.convert_to_markdown, b"b", "second.docx")
+        first = pool.submit(lambda: asyncio.run(convert_service.convert_to_markdown_async(b"a", "first.docx")))
+        second = pool.submit(lambda: asyncio.run(convert_service.convert_to_markdown_async(b"b", "second.docx")))
         outputs = {str(first.result()), str(second.result())}
 
     assert outputs == {
@@ -475,7 +488,7 @@ def test_empty_converter_output_is_rejected(monkeypatch):
     monkeypatch.setitem(convert_service._DISPATCH, ".docx", lambda _path: ("", {}))
 
     with pytest.raises(ConvertError) as exc_info:
-        convert_service.convert_to_markdown(b"document", "empty.docx")
+        asyncio.run(convert_service.convert_to_markdown_async(b"document", "empty.docx"))
 
     assert exc_info.value.code == "empty_converted_content"
 

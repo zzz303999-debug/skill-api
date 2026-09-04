@@ -24,7 +24,6 @@ from typing import Any
 
 from app.core.errors import BadRequestError
 from app.core.logging_conf import get_logger
-from app.llm import chat_json
 
 from .parser import MAX_HEADER_SCAN_ROWS
 from .schema import HEADER_ALIASES, IGNORED_HEADERS, RECEIVABLE_FEE_COLUMNS
@@ -97,7 +96,7 @@ _AI_TARGETS: list[str] = [
     "ignore",
 ]
 
-# json_schema：AI 输出结构强约束（chat_json 优先走 structured output）。
+# json_schema：AI 输出结构强约束（achat_json 优先走 structured output）。
 # 输出即模板配置片段的输入：mapping（columns 段）+ two_row/fee_boundary 判定。
 _AI_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -316,8 +315,7 @@ def build_llm_request(
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """构造 LLM 表头映射请求（纯函数）：返回 (messages, json_schema)。
 
-    两段式编排在 async 层持本请求调用 achat_json（网络段真异步）；同步路径
-    map_header 内部走 chat_json——两个入口的 messages/schema 完全一致。
+    两段式编排在 async 层持本请求调用 achat_json（网络段真异步）。
     """
     return _build_messages(zone_lines), _AI_SCHEMA
 
@@ -455,20 +453,6 @@ def validate_ai_result(
         ignored_cols=ignored_cols,
         raw=raw,
     )
-
-
-def map_header(view) -> AiHeaderResult:
-    """AI 表头映射主入口（同步，含校验闸门）——parse_bill 同步解析路径使用。
-
-    生产两段式编排在 service 层走 build_llm_request + achat_json +
-    validate_ai_result（网络段真异步），本函数仅供同步 parse_bill 与测试
-    使用；LLM 不可用/响应非法 → LLMError / ParseError 上抛（调用方回退
-    精确匹配）；校验闸门不过 → BadRequestError。
-    """
-    zone_lines = format_header_zone(view)
-    messages, schema = build_llm_request(zone_lines)
-    raw, meta = chat_json(messages, json_schema=schema)
-    return validate_ai_result(view, raw, meta, zone_lines)
 
 
 def _strip_whitespace(text: str) -> str:

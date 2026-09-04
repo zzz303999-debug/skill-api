@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-import app.orders.bill.ai_header as ai_header_module
+import app.orders.bill.service as service_module
 from app.core.errors import BadRequestError
-from app.orders.bill import build_result_async, parse_bill
+from app.orders.bill import build_result_async
 from app.orders.bill.template import (
     BUILTIN_TEMPLATE,
     compute_legacy_fingerprint,
@@ -60,14 +60,14 @@ AI_MAPPING_OK = {
 
 
 def _patch_ai(monkeypatch, payload: dict) -> dict:
-    """mock ai_header.chat_json 返回固定映射，并计数调用次数。"""
+    """mock service.achat_json（生产两段式编排唯一 LLM 入口）返回固定映射，并计数。"""
     calls = {"n": 0}
 
-    def fake_chat_json(messages, **_kwargs):
+    async def fake_achat_json(_messages, **_kwargs):
         calls["n"] += 1
         return dict(payload), {"model": "fake", "usage": None}
 
-    monkeypatch.setattr(ai_header_module, "chat_json", fake_chat_json)
+    monkeypatch.setattr(service_module, "achat_json", fake_achat_json)
     return calls
 
 
@@ -101,7 +101,9 @@ class TestBuiltinTemplate:
     async def test_real_bill_no_ai_called(self, monkeypatch):
         """金科信真实账单指纹命中 → 直接模板映射，AI 调用次数 0。"""
         calls = _patch_ai(monkeypatch, AI_MAPPING_OK)
-        output = parse_bill(REAL_XLS)
+        output = await service_module._parse_stage_async(
+            REAL_XLS.name, REAL_XLS.read_bytes()
+        )
         assert calls["n"] == 0
         assert output.template["source"] == "builtin"
         assert len(output.rows) == 1094  # parse_bill 返回原始行（尾部行过滤在归集步骤）
@@ -114,7 +116,7 @@ class TestAiMapping:
         """列名全换 → AI 映射 → 标准字段解析/归集结果正确，产出候选模板配置。"""
         path = _write_hetero(tmp_path)
         calls = _patch_ai(monkeypatch, AI_MAPPING_OK)
-        output = parse_bill(path)
+        output = await service_module._parse_stage_async(path.name, path.read_bytes())
         assert calls["n"] == 1
         assert output.template["source"] == "template"
         assert output.canonical_rows is not None
@@ -144,7 +146,7 @@ class TestAiMapping:
         payload["mapping"] = [m for m in payload["mapping"] if m["target"] != "bl_no"]
         _patch_ai(monkeypatch, payload)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.http_status == 400
         assert caught.value.code == "header_mapping_rejected"
         assert any(
@@ -164,7 +166,7 @@ class TestAiMapping:
         )
         _patch_ai(monkeypatch, AI_MAPPING_OK)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.code == "header_mapping_rejected"
         assert any("费用列" in r and "抽样" in r for r in caught.value.details["failure_reasons"])
 
@@ -183,7 +185,7 @@ class TestAiMapping:
         }
         _patch_ai(monkeypatch, payload)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.code == "header_mapping_rejected"
         assert any("重复映射" in r for r in caught.value.details["failure_reasons"])
 
@@ -195,7 +197,7 @@ class TestAiMapping:
         payload["header_row"] = 3  # 真实表头在第 2 行，错报为 3 → 唯一数据行被吞
         _patch_ai(monkeypatch, payload)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.code == "header_mapping_rejected"
         assert any("未找到含提单号的数据行" in r for r in caught.value.details["failure_reasons"])
 
@@ -216,7 +218,7 @@ class TestAiMapping:
         payload["header_row"] = 15  # 幻觉：超过文件实际行数（3 行）
         _patch_ai(monkeypatch, payload)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.http_status == 400
         assert caught.value.code == "header_mapping_rejected"
         assert any(
@@ -236,7 +238,7 @@ class TestAiMapping:
         payload["header_row"] = 15
         _patch_ai(monkeypatch, payload)
         with pytest.raises(BadRequestError) as caught:
-            parse_bill(path)
+            await service_module._parse_stage_async(path.name, path.read_bytes())
         assert caught.value.http_status == 400
         assert caught.value.code == "header_mapping_rejected"
         assert any("header_row 非法" in r for r in caught.value.details["failure_reasons"])
@@ -262,7 +264,7 @@ class TestAiMapping:
             "confidence": 0.9,
         }
         _patch_ai(monkeypatch, payload)
-        output = parse_bill(path)
+        output = await service_module._parse_stage_async(path.name, path.read_bytes())
         assert output.new_fees == ["运杂费"]
         # 已通过 new_fee: 前缀上报；表头原文不重复上报
         assert "new_fee:运杂费" in output.unmatched_headers
@@ -299,7 +301,7 @@ class TestAiMapping:
             "confidence": 0.9,
         }
         _patch_ai(monkeypatch, payload)
-        output = parse_bill(path)
+        output = await service_module._parse_stage_async(path.name, path.read_bytes())
         assert output.unmatched_headers == []
         assert output.canonical_rows[0]["customer_name"] == "客户甲"
 
@@ -320,15 +322,7 @@ class TestTemplatePersist:
         path.write_bytes(build_bill_bytes(HETERO_HEADERS, HETERO_ROWS))
         # 第一次导入走生产两段式编排（build_result_async → _parse_stage_async
         # → service.achat_json），同步/异步两入口均 mock 且共享计数
-        import app.orders.bill.service as service_module
-
         calls1 = _patch_ai(monkeypatch, AI_MAPPING_OK)
-
-        async def fake_achat_json(_messages, **_kwargs):
-            calls1["n"] += 1
-            return dict(AI_MAPPING_OK), {"model": "fake", "usage": None}
-
-        monkeypatch.setattr(service_module, "achat_json", fake_achat_json)
         result = await build_result_async(filename=path.name, file_bytes=path.read_bytes())
         # 预览：候选模板配置在 meta.l3_template，不自动落盘（人工确认前置）
         assert result.meta["template"]["source"] == "template"
@@ -347,7 +341,7 @@ class TestTemplatePersist:
 
         # 同指纹再次导入 → L1 命中，不再调 AI
         calls2 = _patch_ai(monkeypatch, AI_MAPPING_OK)
-        output2 = parse_bill(path)
+        output2 = await service_module._parse_stage_async(path.name, path.read_bytes())
         assert calls2["n"] == 0
         assert output2.template_match is not None
         assert output2.template_match.level == "L1"

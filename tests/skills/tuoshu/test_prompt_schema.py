@@ -6,7 +6,7 @@ import pytest
 
 from app.core.errors import LLMError, ParseError
 from app.llm import client as llm_client
-from app.llm.client import chat_json
+from app.llm.client import achat_json
 from app.skills.tuoshu.prompt import (
     build_few_shot_messages,
     build_system_prompt,
@@ -83,11 +83,12 @@ def test_system_prompt_does_not_duplicate_schema_or_display_reference():
     assert "# 字段来源表（唯一目标）" in system
 
 
-def test_json_schema_falls_back_to_json_object(monkeypatch):
+@pytest.mark.asyncio
+async def test_json_schema_falls_back_to_json_object(monkeypatch):
     monkeypatch.setattr("app.llm.client._json_schema_supported", None)
     calls: list[tuple[list[dict], dict]] = []
 
-    def fake_chat(messages, **kwargs):
+    async def fake_achat(messages, **kwargs):
         calls.append((messages, kwargs["response_format"]))
         if kwargs["response_format"]["type"] == "json_schema":
             raise LLMError(
@@ -96,8 +97,8 @@ def test_json_schema_falls_back_to_json_object(monkeypatch):
             )
         return '{"ok": true}', {"model": "fake", "usage": None}
 
-    monkeypatch.setattr("app.llm.client.chat", fake_chat)
-    data, _meta = chat_json([], json_schema={"type": "object"})
+    monkeypatch.setattr("app.llm.client.achat", fake_achat)
+    data, _meta = await achat_json([], json_schema={"type": "object"})
 
     assert data == {"ok": True}
     assert [response_format["type"] for _, response_format in calls] == [
@@ -108,12 +109,13 @@ def test_json_schema_falls_back_to_json_object(monkeypatch):
     assert '"type":"object"' in calls[1][0][0]["content"]
 
 
-def test_json_schema_fallback_is_cached_after_first_failure(monkeypatch):
+@pytest.mark.asyncio
+async def test_json_schema_fallback_is_cached_after_first_failure(monkeypatch):
     """首次失败后缓存网关能力，后续调用直接走 json_object，不再重复失败。"""
     monkeypatch.setattr("app.llm.client._json_schema_supported", None)
     calls: list[tuple[list[dict], dict]] = []
 
-    def fake_chat(messages, **kwargs):
+    async def fake_achat(messages, **kwargs):
         calls.append((messages, kwargs["response_format"]))
         if kwargs["response_format"]["type"] == "json_schema":
             raise LLMError(
@@ -122,11 +124,11 @@ def test_json_schema_fallback_is_cached_after_first_failure(monkeypatch):
             )
         return '{"ok": true}', {"model": "fake", "usage": None}
 
-    monkeypatch.setattr("app.llm.client.chat", fake_chat)
+    monkeypatch.setattr("app.llm.client.achat", fake_achat)
 
-    chat_json([], json_schema={"type": "object"})
+    await achat_json([], json_schema={"type": "object"})
     assert llm_client._json_schema_supported is False
-    data, _meta = chat_json([], json_schema={"type": "object"})
+    data, _meta = await achat_json([], json_schema={"type": "object"})
 
     assert data == {"ok": True}
     assert [response_format["type"] for _, response_format in calls] == [
@@ -136,11 +138,12 @@ def test_json_schema_fallback_is_cached_after_first_failure(monkeypatch):
     ]
 
 
-def test_chat_json_rejects_non_object(monkeypatch):
-    monkeypatch.setattr(
-        "app.llm.client.chat",
-        lambda _messages, **_kwargs: ("[]", {"model": "fake", "usage": None}),
-    )
+@pytest.mark.asyncio
+async def test_chat_json_rejects_non_object(monkeypatch):
+    async def fake_achat(*_args, **_kwargs):
+        return "[]", {"model": "fake", "usage": None}
+
+    monkeypatch.setattr("app.llm.client.achat", fake_achat)
 
     with pytest.raises(ParseError, match="JSON object"):
-        chat_json([])
+        await achat_json([])

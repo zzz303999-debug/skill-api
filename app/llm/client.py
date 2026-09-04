@@ -1,12 +1,9 @@
 """LLM 外部适配器：OpenAI 兼容（OpenAI-compatible）网关客户端。
 
-所有 skill 通过 `chat()` 统一调用，禁止绕过。
-
-异步版本（achat / achat_json，2026-09 异步化改造新增）：与同步版逻辑逐项
-对齐（同 thinking 注入/降级重试、同 json_schema 降级、同错误分类），
-探测缓存（_json_schema_supported/_thinking_disabled_supported）与同步版
-共享，参数（timeout/max_retries）一致；同步版本保留至异步链路全部切换后
-统一清理（双轨过渡）。
+2026-09 异步化后生产唯一入口为 achat / achat_json（同步版已随第二波同步链
+清理退役）：thinking 注入/降级重试、json_schema 降级、错误分类语义统一；
+探测缓存（_json_schema_supported/_thinking_disabled_supported）为模块级
+共享状态。所有业务调用经本模块，禁止绕过。
 """
 
 from __future__ import annotations
@@ -22,7 +19,6 @@ from openai import (
     APIError,
     APITimeoutError,
     AsyncOpenAI,
-    OpenAI,
 )
 
 from app.core.config import settings
@@ -31,12 +27,11 @@ from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-_client: OpenAI | None = None
 # 网关是否支持 json_schema structured output；None=未知，True/False=已探测
 _json_schema_supported: bool | None = None
 # 网关/模型是否接受 thinking 参数；None=未知，False=已确认不支持（降级重试后缓存）
 _thinking_disabled_supported: bool | None = None
-# 上述全局状态的互斥锁（skill 在多个线程池线程中并发调用）
+# 上述全局状态的互斥锁（探测与降级重试的并发保护）
 _state_lock = threading.Lock()
 
 # 上游错误文本截断长度，避免超大响应体刷日志/响应
@@ -50,20 +45,6 @@ def _upstream_details(e: Exception, *, status: int | None = None) -> dict[str, A
         "upstream_status": status,
         "upstream_message": str(e)[:_UPSTREAM_ERROR_MAX_CHARS],
     }
-
-
-def get_client() -> OpenAI:
-    global _client
-    if _client is None:
-        with _state_lock:
-            if _client is None:
-                _client = OpenAI(
-                    base_url=settings.llm_base_url,
-                    api_key=settings.llm_api_key,
-                    timeout=settings.llm_timeout_seconds,
-                    max_retries=settings.llm_max_retries,
-                )
-    return _client
 
 
 def image_to_data_url(image_bytes: bytes, mime: str = "image/jpeg") -> str:
@@ -90,104 +71,6 @@ def _classify_api_error(e: APIError) -> None:
     raise LLMError("LLM gateway rejected the request", code=code, details=details) from e
 
 
-def chat(
-    messages: list[dict[str, Any]],
-    *,
-    model: str | None = None,
-    temperature: float = 0.0,
-    response_format: dict | None = None,
-    extra_body: dict | None = None,
-) -> tuple[str, dict]:
-    """调用一次 chat/completions。
-
-    返回 (content_text, meta)。meta 包含 model / usage。
-    当配置 llm_thinking_mode="disabled" 时默认注入 thinking: disabled 以降低
-    reasoning token 与响应耗时；调用方显式传入 thinking/reasoning_effort 时
-    以调用方为准。网关/模型不支持该参数时会自动去掉重试一次，并缓存结果。
-    """
-    model = model or settings.llm_model_default
-    global _thinking_disabled_supported
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "stream": False,
-    }
-    if response_format is not None:
-        kwargs["response_format"] = response_format
-    if extra_body:
-        # 拷贝后使用，避免后续注入 thinking 等参数时污染调用方传入的 dict
-        kwargs["extra_body"] = dict(extra_body)
-
-    thinking_injected = False
-    if (
-        settings.llm_thinking_mode == "disabled"
-        and _thinking_disabled_supported is not False
-        and "thinking" not in (extra_body or {})
-        and "reasoning_effort" not in (extra_body or {})
-    ):
-        kwargs.setdefault("extra_body", {})["thinking"] = {"type": "disabled"}
-        thinking_injected = True
-
-    try:
-        resp = get_client().chat.completions.create(**kwargs)
-    except (APITimeoutError, APIConnectionError) as e:
-        log.warning("llm_network_error", exc_info=True)
-        raise LLMError(
-            "LLM gateway network error",
-            code="llm_network",
-            details=_upstream_details(e),
-        ) from e
-    except APIError as e:
-        if thinking_injected and _thinking_parameter_rejected(str(e).lower()):
-            # 网关/模型不接受 thinking 参数：去掉后重试一次，后续请求不再注入
-            _thinking_disabled_supported = False
-            log.warning("llm_thinking_disabled_fallback", extra={"model": model})
-            kwargs["extra_body"] = {
-                key: value
-                for key, value in kwargs.get("extra_body", {}).items()
-                if key != "thinking"
-            }
-            try:
-                resp = get_client().chat.completions.create(**kwargs)
-            except (APITimeoutError, APIConnectionError) as retry_err:
-                log.warning("llm_network_error", exc_info=True)
-                raise LLMError(
-                    "LLM gateway network error",
-                    code="llm_network",
-                    details=_upstream_details(retry_err),
-                ) from retry_err
-            except APIError as retry_err:
-                _classify_api_error(retry_err)
-        else:
-            _classify_api_error(e)
-    except Exception as e:
-        log.exception("llm_unexpected_error")
-        raise LLMError(
-            "LLM request failed",
-            code="llm_error",
-            details=_upstream_details(e),
-        ) from e
-
-    try:
-        content = resp.choices[0].message.content or ""
-    except (IndexError, AttributeError) as e:
-        raise LLMError(
-            f"LLM response has no content: {e}",
-            code="llm_error",
-            details=_upstream_details(e),
-        ) from e
-
-    meta = {
-        "model": getattr(resp, "model", model),
-        "usage": getattr(resp, "usage", None).model_dump()
-        if getattr(resp, "usage", None)
-        else None,
-    }
-    log.info("llm_call_ok", extra={"model": meta["model"], "usage": meta["usage"]})
-    return content, meta
-
-
 def _json_object_fallback_messages(
     messages: list[dict[str, Any]], json_schema: dict
 ) -> list[dict[str, Any]]:
@@ -207,103 +90,7 @@ def _json_object_fallback_messages(
     ]
 
 
-def chat_json(
-    messages: list[dict[str, Any]],
-    *,
-    model: str | None = None,
-    temperature: float = 0.0,
-    json_schema: dict | None = None,
-) -> tuple[dict, dict]:
-    """要求模型输出 JSON 对象。返回 (parsed_dict, meta)。
-
-    当提供 json_schema 时，优先使用 structured output 模式
-    （json_schema）强制模型按指定字段名和类型输出；
-    网关不支持时降级为 json_object + schema 指令。
-    降级能力会被缓存，避免每次调用都先失败一次。
-    """
-    global _json_schema_supported
-    if json_schema and _json_schema_supported is False:
-        # 已确认网关不支持 json_schema，直接走降级路径
-        fallback_messages = _json_object_fallback_messages(messages, json_schema)
-        content, meta = chat(
-            fallback_messages,
-            model=model,
-            temperature=temperature,
-            response_format={"type": "json_object"},
-        )
-    else:
-        response_format: dict = {"type": "json_object"}
-        if json_schema:
-            response_format = {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "response",
-                    "strict": False,
-                    "schema": json_schema,
-                },
-            }
-        try:
-            content, meta = chat(
-                messages,
-                model=model,
-                temperature=temperature,
-                response_format=response_format,
-            )
-            if json_schema:
-                _json_schema_supported = True
-        except LLMError as e:
-            if not json_schema or e.code != "llm_response_format_unsupported":
-                raise
-            _json_schema_supported = False
-            log.warning("llm_json_schema_fallback", extra={"model": model})
-            fallback_messages = _json_object_fallback_messages(messages, json_schema)
-            content, meta = chat(
-                fallback_messages,
-                model=model,
-                temperature=temperature,
-                response_format={"type": "json_object"},
-            )
-    try:
-        data = json.loads(content)
-    except json.JSONDecodeError:
-        # 兜底：从 ```json ... ``` 中抽
-        stripped = content.strip()
-        if "```" in stripped:
-            parts = stripped.split("```")
-            for p in parts:
-                p = p.strip()
-                if p.startswith("json"):
-                    p = p[4:].strip()
-                if p.startswith("{"):
-                    try:
-                        data = json.loads(p)
-                        break
-                    except json.JSONDecodeError:
-                        continue
-            else:
-                log.warning("llm_invalid_json", extra={"content_length": len(content)})
-                raise ParseError(
-                    "LLM did not return valid JSON",
-                    details={
-                        "content_length": len(content),
-                        "content_preview": stripped[:200],
-                    },
-                )
-        else:
-            log.warning("llm_invalid_json", extra={"content_length": len(content)})
-            raise ParseError(
-                "LLM did not return valid JSON",
-                details={
-                    "content_length": len(content),
-                    "content_preview": stripped[:200],
-                },
-            ) from None
-    if not isinstance(data, dict):
-        raise ParseError("LLM output must be a JSON object")
-    return data, meta
-
-
-# ---- 异步版本（与同步版逻辑逐项对齐；Phase 2 异步化改造新增）----
+# ---- async 客户端与主入口（2026-09 起生产唯一链路）----
 
 _async_client: AsyncOpenAI | None = None
 # 创建时绑定的事件循环：AsyncOpenAI 连接池绑定 loop，跨 loop 复用会报

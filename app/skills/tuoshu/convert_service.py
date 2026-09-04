@@ -313,66 +313,6 @@ def _render_pdf_page(file_bytes: bytes, page_index: int, *, scale: float) -> byt
         ) from exc
 
 
-def _parse_ocr_page(file_bytes: bytes, filename: str, page_index: int, quality: PageQuality) -> ParsedPage:
-    image = _render_pdf_page(
-        file_bytes,
-        page_index,
-        scale=settings.vision_pdf_render_scale,
-    )
-    page_number = page_index + 1
-    page_filename = f"{Path(filename).stem}-page-{page_number}.png"
-    try:
-        parsed = mineru.parse_document(image, page_filename, mime_type="image/png")
-    except mineru.MinerUContractError as exc:
-        raise ConvertError(f"MinerU contract check failed: {exc}") from exc
-    except Exception as exc:
-        if not settings.mineru_fallback_enabled:
-            raise ConvertError(
-                f"MinerU convert failed on page {page_number}: {exc.__class__.__name__}"
-            ) from exc
-        return ParsedPage(
-            page_number=page_number,
-            parser="vision",
-            quality=quality,
-            confidence="low",
-            vision_image=image,
-            vision_mime="image/png",
-            issues=[
-                ParseIssue(
-                    code="mineru_failed",
-                    message="MinerU 页面解析失败，已转 vision，必须人工复核",
-                    page=page_number,
-                    source_values=(exc.__class__.__name__,),
-                )
-            ],
-        )
-
-    if parsed.low_confidence:
-        return ParsedPage(
-            page_number=page_number,
-            parser="vision",
-            markdown=parsed.markdown,
-            quality=quality,
-            confidence="low",
-            vision_image=image,
-            vision_mime="image/png",
-            issues=[
-                ParseIssue(
-                    code="mineru_low_confidence",
-                    message="MinerU 页面结果低置信，已转 vision，必须人工复核",
-                    page=page_number,
-                    source_values=parsed.low_confidence_reasons,
-                )
-            ],
-        )
-    return ParsedPage(
-        page_number=page_number,
-        parser="mineru",
-        markdown=parsed.markdown,
-        quality=quality,
-    )
-
-
 async def _parse_ocr_page_async(
     file_bytes: bytes, filename: str, page_index: int, quality: PageQuality
 ) -> ParsedPage:
@@ -509,69 +449,6 @@ def _merge_pdf_pages(
     return ParseResult(input_format="pdf", pages=pages)
 
 
-def _convert_pdf_with_page_routing(file_bytes: bytes, filename: str) -> ParseResult:
-    """同步版页级路由（CLI 与既有测试用；生产 async 链路走
-    _convert_pdf_with_page_routing_async）。Phase 1/3 为共享纯函数。"""
-    ocr_jobs, formatted_pages, total_pages = _probe_pdf_pages(file_bytes)
-
-    # Phase 2: run MinerU OCR on unqualified pages in parallel.  Each call
-    # opens its own httpx client and pypdfium2 document, so they are safe to
-    # run concurrently.  Bounded by mineru_ocr_concurrency to avoid
-    # overwhelming the local MinerU service.
-    ocr_results: dict[int, ParsedPage] = {}
-    if ocr_jobs:
-        if len(ocr_jobs) == 1:
-            page_index, quality = ocr_jobs[0]
-            ocr_results[page_index] = _parse_ocr_page(
-                file_bytes, filename, page_index, quality
-            )
-        else:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            max_workers = min(len(ocr_jobs), settings.mineru_ocr_concurrency)
-            with ThreadPoolExecutor(
-                max_workers=max_workers,
-                thread_name_prefix="mineru-ocr",
-            ) as pool:
-                future_to_index = {
-                    pool.submit(
-                        _parse_ocr_page,
-                        file_bytes,
-                        filename,
-                        page_index,
-                        quality,
-                    ): page_index
-                    for page_index, quality in ocr_jobs
-                }
-                for future in as_completed(future_to_index):
-                    page_index = future_to_index[future]
-                    ocr_results[page_index] = future.result()
-
-    # Merge pages back in document order.
-    pages = [
-        ocr_results.get(i) or formatted_pages.get(i)
-        for i in range(total_pages)
-    ]
-    if any(p is None for p in pages):
-        raise ConvertError("PDF page routing left a gap")
-
-    # Enforce vision page limit after the fact.  Pre-checking would be
-    # stricter, but counting actual vision_image pages keeps the original
-    # semantics: a page that MinerU handles with high confidence does not
-    # carry a vision_image and should not count against the budget.
-    vision_page_count = sum(page.vision_image is not None for page in pages)
-    if vision_page_count > settings.vision_max_pdf_pages:
-        raise ConvertError(
-            "PDF has too many pages for complete vision conversion",
-            code="pdf_page_limit_exceeded",
-            details={
-                "vision_page_count": vision_page_count,
-                "max_pages": settings.vision_max_pdf_pages,
-            },
-        )
-    return ParseResult(input_format="pdf", pages=pages)
-
-
 async def _convert_pdf_with_page_routing_async(file_bytes: bytes, filename: str) -> ParseResult:
     """异步版页级路由（收尾计划改造项 D/4.1）：Phase 1/3 共享纯函数经
     to_thread；Phase 2 改 asyncio.gather + Semaphore——单页路径与多页统一
@@ -598,163 +475,6 @@ async def _convert_pdf_with_page_routing_async(file_bytes: bytes, filename: str)
         )
     }
     return _merge_pdf_pages(ocr_results, formatted_pages, total_pages)
-
-
-def convert_image_to_parse_result(file_bytes: bytes, filename: str) -> ParseResult:
-    mime_type, image_format = detect_image_mime(file_bytes, filename)
-    if not settings.mineru_enabled:
-        return ParseResult(
-            input_format=image_format,
-            pages=[
-                ParsedPage(
-                    page_number=1,
-                    parser="vision",
-                    confidence="low",
-                    vision_image=file_bytes,
-                    vision_mime=mime_type,
-                    issues=[
-                        ParseIssue(
-                            code="vision_only_unverified",
-                            message="图片仅由 vision 识别，没有独立 OCR 文本可交叉核验，必须人工复核",
-                            page=1,
-                        )
-                    ],
-                )
-            ],
-        )
-    try:
-        parsed = mineru.parse_document(file_bytes, filename, mime_type=mime_type)
-    except mineru.MinerUContractError as exc:
-        raise ConvertError(f"MinerU contract check failed: {exc}") from exc
-    except Exception as exc:
-        if not settings.mineru_fallback_enabled:
-            raise ConvertError(f"MinerU convert failed: {exc.__class__.__name__}") from exc
-        return ParseResult(
-            input_format=image_format,
-            pages=[
-                ParsedPage(
-                    page_number=1,
-                    parser="vision",
-                    confidence="low",
-                    vision_image=file_bytes,
-                    vision_mime=mime_type,
-                    issues=[
-                        ParseIssue(
-                            code="mineru_failed",
-                            message="MinerU 图片解析失败，已转 vision，必须人工复核",
-                            page=1,
-                            source_values=(exc.__class__.__name__,),
-                        )
-                    ],
-                )
-            ],
-        )
-
-    if parsed.low_confidence:
-        return ParseResult(
-            input_format=image_format,
-            pages=[
-                ParsedPage(
-                    page_number=1,
-                    parser="vision",
-                    markdown=parsed.markdown,
-                    confidence="low",
-                    vision_image=file_bytes,
-                    vision_mime=mime_type,
-                    issues=[
-                        ParseIssue(
-                            code="mineru_low_confidence",
-                            message="MinerU 图片结果低置信，已转 vision，必须人工复核",
-                            page=1,
-                            source_values=parsed.low_confidence_reasons,
-                        )
-                    ],
-                )
-            ],
-        )
-    return ParseResult(
-        input_format=image_format,
-        pages=[
-            ParsedPage(
-                page_number=1,
-                parser="mineru",
-                markdown=parsed.markdown,
-                # MinerU text alone cannot prove that free-form OCR text is
-                # visible in the uploaded image.  Keep the original image as
-                # independent evidence even when MinerU reports high confidence.
-                vision_image=file_bytes,
-                vision_mime=mime_type,
-            )
-        ],
-    )
-
-
-def convert_to_markdown(file_bytes: bytes, filename: str) -> str:
-    """把上传文件字节转成 markdown。
-
-    - Word/Excel：使用本地确定性转换器
-    - PDF：启用 MinerU 时按页探测质量并路由，否则保持本地兼容路径
-    - 图片：由 ``convert_image_to_parse_result`` 原图直传 MinerU
-    """
-    ext = Path(filename).suffix.lower()
-    if ext not in SUPPORTED_EXTS:
-        raise BadRequestError(
-            f"unsupported extension: {ext}",
-            details={"supported": SUPPORTED_EXTS},
-        )
-
-    validate_document_content(file_bytes, filename)
-
-    # 图片：跳过转换，交由 vision 通道
-    if is_image(ext):
-        return f"SCAN_OR_IMAGE_HINT: {filename}  # image → vision"
-
-    # PDF 启用 MinerU 后先做页级质量探测，只把不合格页送去 OCR。
-    if ext == ".pdf" and settings.mineru_enabled:
-        try:
-            result = _convert_pdf_with_page_routing(file_bytes, filename)
-            log.info(
-                "pdf_page_routing_succeeded",
-                extra={"file": filename, "page_routes": result.meta()["page_routes"]},
-            )
-            return ConversionText(
-                result.markdown,
-                parser=result.parser,
-                parser_fallback=result.parser_fallback,
-                parse_result=result,
-            )
-        except ValueError:
-            # Compatibility for nonstandard PDFs that pdfplumber cannot open.
-            # MinerU still receives the original bytes and remains version-pinned.
-            try:
-                markdown = mineru.parse_pdf(file_bytes, filename)
-                result = ParseResult(
-                    input_format="pdf",
-                    pages=[ParsedPage(page_number=1, parser="mineru", markdown=markdown)],
-                )
-                return ConversionText(markdown, parser="mineru", parse_result=result)
-            except mineru.MinerUContractError as exc:
-                raise ConvertError(f"MinerU contract check failed: {exc}") from exc
-            except Exception as exc:
-                if not settings.mineru_fallback_enabled:
-                    raise ConvertError(
-                        f"MinerU convert failed: {exc.__class__.__name__}"
-                    ) from exc
-                # 本地 pdfplumber 正是因打不开该文件才进入此分支，再走本地
-                # 解析必然失败；改为给出可行动的错误提示（转图片走 vision）。
-                raise ConvertError(
-                    "PDF cannot be opened by the local parser and MinerU parse failed; "
-                    "convert the PDF to images and retry so it can go through vision",
-                    code="pdf_parse_failed",
-                    details={
-                        "file": Path(filename).name,
-                        "mineru_error": f"{exc.__class__.__name__}: {exc}",
-                    },
-                ) from exc
-        except mineru.MinerUContractError as exc:
-            raise ConvertError(f"MinerU contract check failed: {exc}") from exc
-
-    return _convert_local(file_bytes, filename, ext)
 
 
 def _convert_local(file_bytes: bytes, filename: str, ext: str) -> str:
@@ -822,7 +542,14 @@ def _convert_local(file_bytes: bytes, filename: str, ext: str) -> str:
                 if not isinstance(image_bytes, bytes):
                     continue
                 try:
-                    image_result = convert_image_to_parse_result(image_bytes, image_filename)
+                    # Word 内嵌图片 OCR（低频点，语义保留）：同步版已随第二波
+                    # 同步链清理退役；本函数常驻 to_thread 线程，asyncio.run 在
+                    # 线程级新 loop 桥接 async 版（每次新 AsyncClient，低频可接受）
+                    import asyncio
+
+                    image_result = asyncio.run(
+                        convert_image_to_parse_result_async(image_bytes, image_filename)
+                    )
                 except (BadRequestError, ConvertError) as exc:
                     pages[0].issues.append(
                         ParseIssue(
