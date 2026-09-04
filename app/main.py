@@ -1068,19 +1068,23 @@ async def import_bill(
         # 具体原因而非笼统「请求成功」，避免调用方误判为可下单；code 保持
         # "200"（preview 未产生下游动作，语义不冲突）。
         if not create_order:
-            box_msg = next(
+            # preview 模式整批被本地文件级校验拒绝（2026-08-27 审查修正 + 2026-09-04
+            # 提单号缺失连坐对齐）：若全部未决单被 _reject_unknown_box_types /
+            # _reject_missing_bl_no 标记，msg 应给出具体原因而非笼统「请求成功」，
+            # 避免调用方误判为可下单；code 保持 "200"（preview 未产生下游动作）。
+            block_msg = next(
                 (
                     (o.create_result or {}).get("error", {}).get("message")
                     for o in (*result.orders, *result.canonical_orders)
                     if (o.create_result or {})
                     .get("error", {})
                     .get("code")
-                    == "unknown_box_type"
+                    in ("unknown_box_type", "missing_bl_no")
                 ),
                 None,
             )
-            if box_msg:
-                msg = box_msg
+            if block_msg:
+                msg = block_msg
     return BillImportResponse(code=code, msg=msg, data=result)
 
 

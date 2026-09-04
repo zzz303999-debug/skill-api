@@ -615,27 +615,28 @@ class TestServicePipeline:
 
 
 class TestGoldenBootstrap:
-    """golden 集成：秋怡家族全量——preview 零副作用（planned 清单）/ create 真实
-    建档后 dropped 归零（1901 → 0，mock 建档固定 id）。
+    """golden 集成：志驿 2020 全量——preview 零副作用（planned 清单）/ create 真实
+    建档后 dropped 归零（mock 建档固定 id）。
 
+    用志驿 2020 样本（无缺提单号行、无非法箱型——2026-09-04 提单号缺失文件级
+    连坐拍板后，自举/建档集成改用干净样本；缺行家族样本（秋怡 2017 等）已整批
+    拒绝语义，不承载自举场景）。
     使用仓库真实配置（test 环境 enabled=true + 全量码映射）；建档调用由 conftest
-    全局 mock（零网络，成功返回递增 id）；create 用例另 mock 下单链路（零网络）。
+    全局 mock（零网络，成功返回递增 id）；create 用例另 mock 下单链路（零网络） 。
     """
 
     @pytest.mark.skipif(
-        not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
+        not (FAMILIES_DIR / "zhiyi").exists(), reason="样本未入库（表格文件不入 库）"
     )
-    def test_qiuyi_preview_planned_only(self, monkeypatch):
+    def test_zhiyi_preview_planned_only(self, monkeypatch):
         """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。
 
-        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
-        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
         注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
-        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
+        path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2017 样本缺失")
+            pytest.skip("志驿 2020 样本缺失")
         from app.orders.bill import build_result
 
         result = build_result(filename=path.name, file_bytes=path.read_bytes())
@@ -648,19 +649,18 @@ class TestGoldenBootstrap:
         assert get_registry().snapshot() == {}  # 零 registry 写入
 
     @pytest.mark.skipif(
-        not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
+        not (FAMILIES_DIR / "zhiyi").exists(), reason="样本未入库（表格文件不入 库）"
     )
-    def test_qiuyi_create_dropped_to_zero(self, monkeypatch):
+    def test_zhiyi_create_dropped_to_zero(self, monkeypatch):
         """create（真实导入）：建档成功 → dropped 归零 + 费用全部回填。
 
-        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
-        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
-        注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
+        志驿 2020 无缺提单号行（2026-09-04 连坐口径下全批可录）；注入旧版 null
+        费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
-        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
+        path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2017 样本缺失")
+            pytest.skip("志驿 2020 样本缺失")
         import app.orders.bill.client as client_module
         from helpers import FakeResponse
 
@@ -679,10 +679,9 @@ class TestGoldenBootstrap:
         bootstrap = reports.get("fee_bootstrap")
         assert bootstrap is not None and bootstrap["mode"] == "create"
         assert bootstrap["failed"] == []
-        assert bootstrap["created"]  # 实测 14 码：other/yangshan/pre_inport/drop_box 等
-        assert reports.get("price_null_dropped") == []  # 1901 条降级 → 0
-        # 全量费用回填：非 excluded 项 price_id 均非空（当批正常录入的单）；
-        # 空提单号行标记 missing_bl_no 不录入，不参与自举/回填（一行一票口径）
+        assert bootstrap["created"]  # 志驿 mapping 缺码（other/waiting/yangshan 等）自举建档
+        assert reports.get("price_null_dropped") == []  # 注入 null 费目降级 → 0
+        # 全量费用回填：非 excluded 项 price_id 均非空；样本无缺提单号行（全批可录）
         null_prices = [
             (o.bl_no, f.code)
             for o in result.canonical_orders
@@ -691,11 +690,7 @@ class TestGoldenBootstrap:
             if not f.excluded and f.price_id is None
         ]
         assert null_prices == []
-        assert all(
-            (o.create_result or {}).get("error", {}).get("code") == "missing_bl_no"
-            for o in result.canonical_orders
-            if not o.bl_no
-        )
+        assert not [o for o in result.canonical_orders if not o.bl_no]  # 干净样本断言
         # registry 与建档清单一致（登记即命中）
         registered = {
             c["code"]: c["price_id"]

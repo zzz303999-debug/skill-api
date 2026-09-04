@@ -246,6 +246,54 @@ def _reject_unknown_box_types(orders: list) -> bool:
     return True
 
 
+# 提单号缺失文件级连坐的统一拦截文案（msg/单级 message 同口径，2026-09-04 用户指定）
+_MISSING_BL_NO_MSG = "提单号为必填项；文件存在提单号缺失行时整批不录入，请补全提单号后重新导入"
+
+
+def _reject_missing_bl_no(orders: list) -> bool:
+    """文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    提单号缺失 → 全部未决单拒绝（missing_bl_no，一单不录，不调下游），返回 True。
+
+    preview 与 create 统一执行（preview 也拒，msg 提示）；已标记（skipped）的单
+    不动。拦截文案统一（不分缺号行/连坐行）；details 仅报缺失行数（2026-09-04
+    精简：不收集行号——双表示（orders/canonical）下行号源不一致，且前端按 msg
+    排查即可）。
+    """
+    from .imported_registry import normalize
+
+    missing_idx: list[int] = []
+    for idx, order in enumerate(orders):
+        if order.create_result is not None:
+            continue  # 已标记（skipped）的单不动
+        bl = normalize(
+            getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
+        )
+        if not bl:
+            missing_idx.append(idx)
+    if not missing_idx:
+        return False
+    for order in orders:
+        if order.create_result is not None:
+            continue
+        order.create_result = {
+            "success": False,
+            "skipped": False,
+            "sn": None,
+            "error": {
+                "code": "missing_bl_no",
+                "message": _MISSING_BL_NO_MSG,
+                "description": _MISSING_BL_NO_MSG,
+                "details": {
+                    "missing_bl_no_count": len(missing_idx),
+                    # 全场景业务码统一可达（§3.7/既有规范）：本地拦截等价于该单
+                    # 添加失败，对齐 TMS「新建全部失败 → 204」口径
+                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
+                },
+            },
+        }
+    return True
+
+
 def build_result(
     *,
     filename: str,
@@ -345,9 +393,9 @@ def build_result(
     # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号+箱号, sk) 维度）：
     # create 模式先查同一 sk 已成功组合键，命中即标记 skipped（只查不登；登记在
     # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。
-    # 一行一票（2026-08-31 业务拍板）：提单号必填，缺失行直接标记失败不录入
-    # （不调下游、不进建档/自举 pending），计入 failed_details 由人工核对。
-    # 计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写、零副作用）。
+    # 一行一票（2026-08-31 业务拍板）：提单号必填；缺失行无去重键，不查重保持
+    # 未决，交下方文件级校验统一连坐拒绝（2026-09-04 用户拍板：与箱型同语义，
+    # 一单不录）。计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写）。
     if create_order:
         from .imported_registry import get_imported_registry, normalize, owner_key
 
@@ -358,18 +406,7 @@ def build_result(
                 getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
             )
             if not bl:
-                order.create_result = {
-                    "success": False,
-                    "skipped": False,
-                    "sn": None,
-                    "error": {
-                        "code": "missing_bl_no",
-                        "message": "提单号缺失，未录入",
-                        "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
-                        "details": {},
-                    },
-                }
-                continue
+                continue  # 无键不查重；文件级 missing_bl_no 校验统一拒绝
             box, seq = _order_dedup_parts(order)
             if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
                 order.create_result = {
@@ -385,6 +422,17 @@ def build_result(
     # 既有规则不变：非标表述（大冷/拼箱/17M飞翼车等）不校验照常提交。
     all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
     _reject_unknown_box_types(all_pending)
+
+    # 文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    # 提单号缺失 → 全部未决单拒绝（一单不录，不调下游）。置于箱型校验之后：
+    # 两者同时存在时箱型先标记（路由 msg 优先级 unknown_box_type > missing_bl_no）。
+    # 双表示分组执行：既有语义路径 orders（BillRow 源）与 canonical_orders 同源
+    # 双份，各自组内自洽（缺失行数/行号不跨组重复计数）；标准字段路径 orders 空。
+    # preview 与 create 统一执行（纯内存标记，preview 响应消费 msg 提示）。
+    _reject_missing_bl_no([o for o in orders if o.create_result is None])
+    _reject_missing_bl_no(
+        [o for o in canonical_orders if o.create_result is None]
+    )
 
     # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
     # 2026-08-26 修正——必须在校验后重算，校验被拒单 create_result 已标记
