@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
+from app.api.response_shell import create_mode_shell, preview_mode_shell
 from app.api.uploads import _read_upload
 from app.core.errors import BadRequestError
 from app.orders.manifest import ManifestImportResponse, build_manifest_result_async
@@ -64,39 +65,10 @@ async def import_manifest(
         create_order=create_order,
         sk=sk,
     )
-    # 统一响应外壳（code/msg/data，2026-09-01 适配账单口径）：
-    # - create 创建成功 → "200" msg="添加成功"
-    # - create 全部失败 → "204" msg=具体失败原因（箱型/多提单号/必填缺失等拦截
-    #   文案优先）或"添加失败"
-    # - preview → "200" msg="请求成功"；整批被拒（箱型/箱型缺失/多提单号）→
-    #   msg 给出具体原因（对齐账单 2026-08-27 修正口径），code 保持 "200"
-    #   （preview 未产生下游动作，语义不冲突）
+    # 统一响应外壳（code/msg/data）：映射逻辑收口 response_shell（bill/manifest
+    # 共享）；舱单口径：204/preview 文案取首个非空错误文案，无 error_code 优先级
     if create_order and result.summary:
-        if result.summary["created"] > 0:
-            code, msg = "200", "添加成功"
-        else:
-            # 全部失败：优先取具体失败原因（箱型白名单/多提单号/必填缺失等拦截文案）
-            failed_msg = next(
-                (
-                    d.get("error_message")
-                    for d in result.summary["failed_details"]
-                    if d.get("error_message")
-                ),
-                None,
-            )
-            code, msg = "204", failed_msg or "添加失败"
+        code, msg = create_mode_shell(result.summary)
     else:
-        code, msg = "200", "请求成功"
-        # preview 整批被拒（一文件一票）：msg 给出具体原因而非笼统「请求成功」，
-        # 避免调用方误判为可录入；code 保持 "200"（preview 未产生下游动作）
-        rejected_msg = next(
-            (
-                (o.create_result or {}).get("error", {}).get("message")
-                for o in result.orders
-                if (o.create_result or {}).get("error")
-            ),
-            None,
-        )
-        if rejected_msg:
-            msg = rejected_msg
+        code, msg = preview_mode_shell(result.orders)
     return ManifestImportResponse(code=code, msg=msg, data=result)

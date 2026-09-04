@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 
+from app.api.response_shell import create_mode_shell, preview_mode_shell
 from app.api.uploads import _read_upload
 from app.core.errors import BadRequestError
 from app.orders.bill import BillImportResponse
@@ -72,10 +73,13 @@ async def import_bill(
         create_order=create_order,
         sk=sk,
     )
-    # 统一响应外壳（code/msg/data，对齐 TMS 通道口径）：
-    # - create 全部命中注册表（skipped>0 且 created=0）→ 409（业务码 "409"）
-    # - create 有新建（含部分失败）→ "200"；全部失败（无新建）→ "204"
-    # - preview → "200"
+    # 统一响应外壳（code/msg/data，对齐 TMS 通道口径）：映射逻辑收口
+    # response_shell（bill/manifest 共享）；409 分支含路由副作用（审计 +
+    # 精简响应）保留在此：
+    # - create 全部命中注册表（skipped 占满且无失败/新建）→ 409（业务码 "409"）
+    # - create 有新建（含部分失败）→ "200"；全部失败 → "204"（204 文案按
+    #   error_code 优先级：箱型白名单 → 提单号缺失）
+    # - preview → "200"（整批箱型被拒时 msg 给具体原因）
     if create_order and result.summary:
         # 409 语义（v2.2 修正）：仅当全部单均为重复上传（skipped 占满且无失败/新建）
         # 才判 409——skipped 与 failed（箱型拒绝/下游失败）混合时本次存在被拒单，
@@ -101,41 +105,12 @@ async def import_bill(
             # 重复上传是提示场景，前端只消费 data.summary.success_sns，明细丢弃。
             slim = result.model_copy(update={"orders": [], "canonical_orders": []})
             return BillImportResponse(code="409", msg="账单已全部创建过", data=slim)
-        if result.summary["created"] > 0:
-            code, msg = "200", "添加成功"
-        else:
-            # 全部失败：按优先级扫描 failed_details 取本地拦截原因作 msg——
-            # 箱型白名单（文件级「系统没有此箱型：<箱型>，请联系客服」）→ 提单号
-            # 缺失（行级「提单号缺失，未录入」，2026-09-03 扩展）→ 兜底「添加失败」
-            # （下游拒绝/网络错误类保持笼统，明细在 failed_details）
-            block_msg = next(
-                (
-                    d.get("error_message")
-                    for code in ("unknown_box_type", "missing_bl_no")
-                    for d in result.summary["failed_details"]
-                    if d.get("error_code") == code
-                ),
-                None,
-            )
-            code, msg = "204", block_msg or "添加失败"
+        code, msg = create_mode_shell(
+            result.summary, codes=("unknown_box_type", "missing_bl_no")
+        )
     else:
-        code, msg = "200", "请求成功"
-        # preview 模式整批箱型被拒（审查修正 2026-08-27）：summary 为 None 走
-        # 本分支，若全部未决单被 _reject_unknown_box_types 标记，msg 应给出
-        # 具体原因而非笼统「请求成功」，避免调用方误判为可下单；code 保持
-        # "200"（preview 未产生下游动作，语义不冲突）。
-        if not create_order:
-            box_msg = next(
-                (
-                    (o.create_result or {}).get("error", {}).get("message")
-                    for o in (*result.orders, *result.canonical_orders)
-                    if (o.create_result or {})
-                    .get("error", {})
-                    .get("code")
-                    == "unknown_box_type"
-                ),
-                None,
-            )
-            if box_msg:
-                msg = box_msg
+        # preview：整批箱型被拒时 msg 给具体原因（仅认 unknown_box_type）
+        code, msg = preview_mode_shell(
+            (*result.orders, *result.canonical_orders), code="unknown_box_type"
+        )
     return BillImportResponse(code=code, msg=msg, data=result)

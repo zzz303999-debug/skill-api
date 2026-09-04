@@ -30,3 +30,51 @@ def _use_unified_response(path: str) -> bool:
 def _unified_error_body(code: str, msg: str, details: dict | None = None) -> dict:
     """构造统一外壳错误体：code 机器可读、msg 可直接展示、details 并入 data。"""
     return {"code": code, "msg": msg, "data": details or None}
+
+
+# ---- 导入类路由成功路径的外壳映射（bill/manifest 共享，2026-09 收口）----
+# 两路由同构（create 有新建 200 / 全失败 204、preview 200），差异仅在失败
+# 文案扫描口径，经参数化下沉至此；409（重复上传）含路由副作用留在各自路由。
+
+
+def create_mode_shell(summary: dict, *, codes: tuple[str, ...] = ()) -> tuple[str, str]:
+    """create 模式映射：有新建 → ("200","添加成功")；全部失败 → ("204", 拦截文案)。
+
+    codes 非空时按优先级只扫这些 error_code（账单口径：箱型白名单→提单号
+    缺失）；空时取首个非空 error_message（舱单口径）。文案均兜底「添加失败」。"""
+    if summary.get("created", 0) > 0:
+        return "200", "添加成功"
+    failed_details = summary.get("failed_details") or []
+    if codes:
+        failed_msg = next(
+            (
+                d.get("error_message")
+                for code in codes
+                for d in failed_details
+                if d.get("error_code") == code
+            ),
+            None,
+        )
+    else:
+        failed_msg = next(
+            (d.get("error_message") for d in failed_details if d.get("error_message")),
+            None,
+        )
+    return "204", failed_msg or "添加失败"
+
+
+def preview_mode_shell(orders: list, *, code: str | None = None) -> tuple[str, str]:
+    """preview 模式映射：("200", "请求成功")；整批被拒时 msg 为首个错误文案。
+
+    code 非空时只认该错误码（账单仅认 unknown_box_type）；None 时任意错误
+    （舱单口径）。code 保持 "200"（preview 未产生下游动作，语义不冲突）。"""
+    msg = next(
+        (
+            (o.create_result or {}).get("error", {}).get("message")
+            for o in orders
+            if (o.create_result or {}).get("error")
+            and (code is None or (o.create_result or {}).get("error", {}).get("code") == code)
+        ),
+        None,
+    )
+    return "200", msg or "请求成功"
