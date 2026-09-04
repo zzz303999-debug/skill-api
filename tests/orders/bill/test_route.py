@@ -634,7 +634,7 @@ class TestFileErrors:
         """create_order=true 超限 → 400 且零副作用（不触达下游/去重注册表）。"""
         from types import SimpleNamespace
 
-        from app.orders.bill import imported_registry
+        import app.orders.bill.submission.imported_registry as imported_registry
 
         monkeypatch.setattr(settings, "bill_import_max_rows", 2)
 

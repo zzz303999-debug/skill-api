@@ -388,7 +388,7 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
     费用：order_data["shou"]（费目名 → 金额）经费目别名字典归一为 FeeItem
     （未命中字典 → other + 原名进 note），金额为 0/空不生成记录。
     """
-    from .fee_name_map import canonicalize_fee_name
+    from .fees.fee_name_map import canonicalize_fee_name
 
     data = order.order_data or {}
     box_groups = [

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from app.core.config import settings
 
-from .schema import HEADER_ALIASES, HEADER_COLUMN_MAP, RECEIVABLE_FEE_COLUMNS
+from ..schema import HEADER_ALIASES, HEADER_COLUMN_MAP, RECEIVABLE_FEE_COLUMNS
 
 # 表头文本中的空白（含全角空格），与 parser 的表头识别口径一致
 _HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")

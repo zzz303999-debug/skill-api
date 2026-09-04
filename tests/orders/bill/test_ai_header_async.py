@@ -14,7 +14,7 @@ from openpyxl.utils import get_column_letter
 
 import app.orders.bill.service as service_module
 from app.core.errors import BadRequestError, LLMError
-from app.orders.bill.parser import AiHeaderNeeded, ParseOutput, open_and_identify
+from app.orders.bill.parsing.parser import AiHeaderNeeded, ParseOutput, open_and_identify
 from helpers import build_bill_bytes
 
 pytestmark = pytest.mark.asyncio
@@ -101,7 +101,7 @@ class TestOpenAndIdentify:
 
     def test_builtin_hit_returns_output_without_llm(self, tmp_path, monkeypatch):
         """内置模板指纹命中 → 单段完成返回 ParseOutput（零 LLM，常见路径）。"""
-        from app.orders.bill.template import BUILTIN_HEADERS
+        from app.orders.bill.parsing.legacy_template import BUILTIN_HEADERS
 
         calls = _patch_async_ai(monkeypatch)  # 未抛异常即未调用；计数校验见下
         # 32 列全量构造（超出 A-Z 用 AA.. 列字母，指纹按全列拼接计算）
@@ -167,7 +167,7 @@ class TestTwoStageOrchestration:
         self, tmp_path, monkeypatch
     ):
         """常见路径（L1 命中）经完整编排零 LLM 调用、结果即第一段输出。"""
-        from app.orders.bill.template import BUILTIN_HEADERS
+        from app.orders.bill.parsing.legacy_template import BUILTIN_HEADERS
 
         calls = _patch_async_ai(monkeypatch)
         headers = {

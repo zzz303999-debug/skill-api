@@ -14,12 +14,11 @@ from __future__ import annotations
 import pytest
 import yaml
 
-import app.orders.bill.master_data as md_module
-import app.orders.bill.master_data_client as md_client_module
+import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.orchestrator as md_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
-from app.orders.bill.imported_registry import owner_key
-from app.orders.bill.master_data import (
+from app.orders.bill.master_data.orchestrator import (
     KIND_CLIENT,
     KIND_DRIVER,
     KIND_FACTORY,
@@ -29,7 +28,8 @@ from app.orders.bill.master_data import (
     factory_key,
     run_master_data_async,
 )
-from app.orders.bill.master_data_store import get_master_data_store
+from app.orders.bill.master_data.store import get_master_data_store
+from app.orders.bill.submission.imported_registry import owner_key
 from helpers import FakeResponse
 
 pytestmark = pytest.mark.asyncio

@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.orders.bill import parse_bill
-from app.orders.bill.canonical_aggregator import group_canonical
+from app.orders.bill.aggregation.canonical_aggregator import group_canonical
 from helpers import build_bill_bytes
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"
@@ -126,7 +126,7 @@ class TestFingerprintMatchesRealHeader:
     def test_real_header_fingerprint(self, family, fname, template_id):
         import xlrd
 
-        from app.orders.bill.parser import _SheetView, _xls_cell_value, _xls_merged_map
+        from app.orders.bill.parsing.parser import _SheetView, _xls_cell_value, _xls_merged_map
 
         path = _family_path(family, fname)
         if not path.exists():
@@ -140,7 +140,7 @@ class TestFingerprintMatchesRealHeader:
             lambda r, c: _xls_cell_value(sheet, r - 1, c - 1),
         )
         wb.release_resources()
-        from app.orders.bill import template_store
+        import app.orders.bill.parsing.template_store as template_store
 
         match = template_store.identify(view)
         assert match is not None and match.level == "L1"

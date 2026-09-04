@@ -14,13 +14,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import app.orders.bill.master_data.client as md_client
+import app.orders.bill.submission.client as bill_client
 import app.orders.http_client as http_client_mod
 from app.core.config import settings
 from app.llm import client as llm_client
 from app.mineru import client as mineru_mod
 from app.mineru.client import MinerUError, parse_document_async
-from app.orders.bill import client as bill_client
-from app.orders.bill import master_data_client as md_client
 from app.orders.text.client import OrderUpstreamError, publish_create_order_async
 
 pytestmark = pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_submit_canonical_async_success(monkeypatch):
     # payload 构造属 CPU 段（真实表单字段归 app.orders.bill.payload 单元测试），
     # 此处只验网络段与响应判定：替换为最小 form + 无 warnings
     monkeypatch.setattr(
-        "app.orders.bill.payload.build_order_payload",
+        "app.orders.bill.submission.payload.build_order_payload",
         lambda order: ({"a": "{}"}, []),
     )
     result = await bill_client.submit_canonical_async("sk-token", _Order())

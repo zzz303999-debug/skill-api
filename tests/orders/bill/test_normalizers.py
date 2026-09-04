@@ -11,7 +11,7 @@ from datetime import datetime
 
 import pytest
 
-from app.orders.bill.normalizers import (
+from app.orders.bill.parsing.normalizers import (
     box_parse,
     date_flex,
     parse_year_hint,

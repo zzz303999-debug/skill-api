@@ -38,7 +38,7 @@ def _isolate_master_data_store(tmp_path, monkeypatch):
     防止 create 模式用例（service 编排）写入真实 storage/master_data.json
     并在用例间泄漏计数。
     """
-    from app.orders.bill import master_data_store
+    import app.orders.bill.master_data.store as master_data_store
 
     master_data_store.reload_store(tmp_path / "master_data.json")
     yield
@@ -52,7 +52,7 @@ def _isolate_fee_registry(tmp_path):
     防止自举用例（apply_price_map 会读 registry）写入真实 storage/fee_registry.json
     并在用例间泄漏登记结果（幂等命中会掩盖重试/懒创建断言）。
     """
-    from app.orders.bill import fee_registry
+    import app.orders.bill.fees.fee_registry as fee_registry
 
     fee_registry.reload_registry(tmp_path / "fee_registry.json")
     yield
@@ -66,7 +66,7 @@ def _isolate_imported_registry(tmp_path):
     防止 create 模式用例（client/service 编排）写入真实 storage/imported_orders.json
     并在用例间泄漏成功记录（去重命中会掩盖重导/并发断言）。
     """
-    from app.orders.bill import imported_registry
+    import app.orders.bill.submission.imported_registry as imported_registry
 
     imported_registry.reload_registry(tmp_path / "imported_orders.json")
     yield
@@ -87,7 +87,7 @@ def _no_real_archive_calls(monkeypatch):
     """
     import itertools
 
-    import app.orders.bill.master_data_client as md_client_module
+    import app.orders.bill.master_data.client as md_client_module
 
     real_create = md_client_module.create_archives_async  # 真实函数（此刻未被 mock）
     counter = itertools.count(9000)
@@ -119,8 +119,8 @@ def _isolate_concurrency_primitives():
     """
     import asyncio
 
-    import app.orders.bill.client as bill_client_mod
-    import app.orders.bill.imported_registry as imported_registry_mod
+    import app.orders.bill.submission.client as bill_client_mod
+    import app.orders.bill.submission.imported_registry as imported_registry_mod
     from app.core.config import settings
 
     def _reset():
@@ -146,7 +146,7 @@ def _isolate_template_cache():
     顺序不可靠，实测 monkeypatch 还原晚于本 fixture）。test_template 固化
     用例会把 _TEMPLATE_CACHE 留在 tmp_path 内容上，污染后续文件上传识别。
     """
-    from app.orders.bill import template_store
+    import app.orders.bill.parsing.template_store as template_store
 
     real_dir = template_store._TEMPLATES_DIR  # setup 时捕获（尚未被用例 patch）
     yield
@@ -161,13 +161,9 @@ def _isolate_fee_mapping_caches():
     幂等无副作用（各模块配置重载即读回真实配置文件）。
     """
     yield
-    from app.orders.bill import (
-        fee_bootstrap,
-        fee_name_map,
-        fee_price_map,
-        master_data,
-        template_store,
-    )
+    from app.orders.bill.fees import fee_bootstrap, fee_name_map, fee_price_map
+    from app.orders.bill.master_data import orchestrator as master_data
+    from app.orders.bill.parsing import template_store
 
     try:
         fee_name_map.reload_fee_alias_dictionary()

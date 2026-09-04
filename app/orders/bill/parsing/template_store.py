@@ -31,13 +31,13 @@ import yaml
 
 from app.core.logging_conf import get_logger
 
-from .schema import MAX_HEADER_SCAN_ROWS
-from .template import load_template
+from ..schema import MAX_HEADER_SCAN_ROWS
+from .legacy_template import load_template
 
 log = get_logger(__name__)
 
 # 模板配置目录（项目根 templates/，与 storage 运行时数据分离）
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "templates"
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "templates"
 
 # 表头文本中的空白（含全角空格），与 parser 表头归一化口径一致
 _HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")

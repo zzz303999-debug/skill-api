@@ -19,15 +19,15 @@ from decimal import Decimal
 import pytest
 import yaml
 
-import app.orders.bill.fee_bootstrap as fb_module
-import app.orders.bill.fee_price_map as fp_module
-import app.orders.bill.master_data as md_module
-import app.orders.bill.master_data_client as md_client_module
+import app.orders.bill.fees.fee_bootstrap as fb_module
+import app.orders.bill.fees.fee_price_map as fp_module
+import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.orchestrator as md_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem, build_result_async
-from app.orders.bill.fee_bootstrap import build_price_form, run_fee_bootstrap_async
-from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_fee_registry
+from app.orders.bill.fees.fee_bootstrap import build_price_form, run_fee_bootstrap_async
+from app.orders.bill.fees.fee_price_map import apply_price_map
+from app.orders.bill.fees.fee_registry import get_fee_registry
 from helpers import FakeResponse, build_bill_bytes
 
 pytestmark = pytest.mark.asyncio

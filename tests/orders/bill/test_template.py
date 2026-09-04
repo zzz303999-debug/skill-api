@@ -21,7 +21,7 @@ import pytest
 import app.orders.bill.service as service_module
 from app.core.errors import BadRequestError
 from app.orders.bill import build_result_async
-from app.orders.bill.template import (
+from app.orders.bill.parsing.legacy_template import (
     BUILTIN_TEMPLATE,
     compute_legacy_fingerprint,
 )
@@ -92,8 +92,8 @@ class TestBuiltinTemplate:
             "name": "应收对账单（内置模板迁移）",
         }
         # 与逐列归一化拼接（非空单元格以 ¶ 连接）口径一致
-        from app.orders.bill.template import BUILTIN_HEADERS
-        from app.orders.bill.template_store import compute_fingerprint as fp_md5
+        from app.orders.bill.parsing.legacy_template import BUILTIN_HEADERS
+        from app.orders.bill.parsing.template_store import compute_fingerprint as fp_md5
 
         assert fp_md5(list(BUILTIN_HEADERS)) == "e31deea1"
         assert compute_legacy_fingerprint(list(BUILTIN_HEADERS)) == BUILTIN_TEMPLATE.fingerprint
@@ -130,7 +130,7 @@ class TestAiMapping:
         assert output.new_template["columns"]["bl_no"] == ["海运提单号"]
         assert output.new_template["normalizers"]["box_type_qty"] == "box_parse"
         # 归集：box 同型累加
-        from app.orders.bill.canonical_aggregator import group_canonical
+        from app.orders.bill.aggregation.canonical_aggregator import group_canonical
 
         orders = group_canonical(
             output.canonical_rows, output.new_template, output.period
@@ -311,8 +311,8 @@ class TestTemplatePersist:
 
     async def test_saved_after_confirm_and_reused_without_ai(self, tmp_path, monkeypatch):
         """候选配置经 save_yaml_template 固化到 templates/，同指纹再次导入不再调 AI。"""
-        import app.orders.bill.template_store as store
-        from app.orders.bill.template_store import save_yaml_template
+        import app.orders.bill.parsing.template_store as store
+        from app.orders.bill.parsing.template_store import save_yaml_template
 
         # 隔离模板目录：固化写入 tmp_path，识别读取同一目录
         monkeypatch.setattr(store, "_TEMPLATES_DIR", tmp_path)

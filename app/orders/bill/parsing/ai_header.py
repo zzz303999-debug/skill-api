@@ -25,7 +25,7 @@ from typing import Any
 from app.core.errors import BadRequestError
 from app.core.logging_conf import get_logger
 
-from .schema import (
+from ..schema import (
     HEADER_ALIASES,
     IGNORED_HEADERS,
     MAX_HEADER_SCAN_ROWS,

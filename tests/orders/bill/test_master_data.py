@@ -12,11 +12,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-import app.orders.bill.master_data as md_module
-import app.orders.bill.master_data_client as md_client_module
+import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.orchestrator as md_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
-from app.orders.bill.master_data import (
+from app.orders.bill.master_data.orchestrator import (
     KIND_CLIENT,
     KIND_DRIVER,
     KIND_FACTORY,
@@ -31,8 +31,8 @@ from app.orders.bill.master_data import (
     run_master_data_async,
     sn_for,
 )
-from app.orders.bill.master_data_store import MasterDataStore, get_master_data_store
-from app.orders.bill.payload import build_order_payload
+from app.orders.bill.master_data.store import MasterDataStore, get_master_data_store
+from app.orders.bill.submission.payload import build_order_payload
 
 pytestmark = pytest.mark.asyncio
 
@@ -579,7 +579,7 @@ class TestDuplicateExternal:
 
     async def test_duplicate_marks_external_and_skips_retry(self, md_config, monkeypatch, tmp_path):
         """204+已存在 → exists_external 单列 + store 标记；第二批不再建档。"""
-        from app.orders.bill.master_data_store import reload_store
+        from app.orders.bill.master_data.store import reload_store
 
         store = reload_store(tmp_path / "md.json")
         calls: list[dict] = []
@@ -606,7 +606,7 @@ class TestDuplicateExternal:
 
     async def test_duplicate_requires_marker_match(self, md_config, monkeypatch, tmp_path):
         """非「已存在」语义的 204（其他 msg）→ 维持 failed + 下批重试。"""
-        from app.orders.bill.master_data_store import reload_store
+        from app.orders.bill.master_data.store import reload_store
 
         reload_store(tmp_path / "md2.json")
         calls: list[dict] = []
@@ -637,7 +637,7 @@ class TestDuplicateExternal:
     async def test_no_primary_key_marks_external(self, md_config, monkeypatch, tmp_path):
         """TMS 成功但无主键（AddCarFactory data:[] 实证，重复提交仍成功）→ 视为已建档
         无 id，登记 exists_external 不再重试（否则每次重试都会再建一条档案）。"""
-        from app.orders.bill.master_data_store import reload_store
+        from app.orders.bill.master_data.store import reload_store
 
         reload_store(tmp_path / "md3.json")
         calls: list[dict] = []

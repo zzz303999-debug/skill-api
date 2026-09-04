@@ -25,9 +25,9 @@ import yaml
 from app.core.config import settings
 from app.core.logging_conf import get_logger
 
-from .imported_registry import owner_key
-from .master_data_store import DEFAULT_OWNER, get_master_data_store
-from .schema import CanonicalOrder
+from ..schema import CanonicalOrder
+from ..submission.imported_registry import owner_key
+from .store import DEFAULT_OWNER, get_master_data_store
 
 log = get_logger(__name__)
 
@@ -54,7 +54,7 @@ COUNT_KINDS: tuple[str, ...] = (KIND_CLIENT, KIND_FACTORY, KIND_DRIVER)
 # 报告未达阈值 TOP 清单条数上限
 PENDING_TOP_N = 10
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config"
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
 # 按环境解析：config/master_data.{env}.yaml（APP_ENV 选择，与 fee_price_map 同模式）。
 # 双份随镜像分发，环境切换零 Git 改动——本地联调永远 test，生产永远 prod。
 _CONFIG_PATH = _CONFIG_DIR / f"master_data.{settings.env}.yaml"
@@ -402,11 +402,11 @@ async def _create_one_async(
     forms: dict[str, dict[str, str]] = {}
     no_client_id = False  # 工厂建档无客户 id（客户已存在但无查询接口），失败需登记终态
     if kind == KIND_CLIENT:
-        from .master_data_client import build_client_form
+        from .client import build_client_form
 
         forms[kind] = {candidate.key: build_client_form(candidate, rec)}
     elif kind == KIND_FACTORY:
-        from .master_data_client import build_factory_form
+        from .client import build_factory_form
 
         client_rec = _client_record(candidate, store, owner)
         # 前置满足 = 所属客户已达终态（本侧建档 archive_id / TMS 已存在
@@ -432,7 +432,7 @@ async def _create_one_async(
         forms[kind] = {candidate.key: build_factory_form(candidate, rec, client_archive_id)}
         no_client_id = not client_archive_id
     elif kind == KIND_DRIVER:
-        from .master_data_client import build_driver_form, build_truck_form
+        from .client import build_driver_form, build_truck_form
 
         if not candidate.plate:
             # TMS AddCarDriver 必填 num（车牌），无车牌司机永久无法建档（2026-08-14
@@ -552,7 +552,7 @@ async def run_master_data_async(
     config = load_config()
     if not config.get("enabled"):
         return None
-    from .master_data_client import create_archives_async
+    from .client import create_archives_async
 
     store = get_master_data_store()
     owner = _owner_for(sk, create_order)

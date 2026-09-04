@@ -15,10 +15,10 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
-import app.orders.bill.client as client_module
+import app.orders.bill.submission.client as client_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
-from app.orders.bill.client import (
+from app.orders.bill.submission.client import (
     add_work_async,
     build_add_work_form,
     create_canonical_orders_async,

@@ -19,7 +19,7 @@ from app.core.logging_conf import get_logger
 log = get_logger(__name__)
 
 # 全局费目别名字典目录（config/，与 templates/ 字段别名字典分离）
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config"
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
 
 # unmapped_fee 策略取值
 UNMAPPED_TO_OTHER = "to_other"

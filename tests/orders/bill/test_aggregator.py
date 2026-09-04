@@ -8,7 +8,7 @@ from __future__ import annotations
 import xlrd
 
 from app.orders.bill import BillPeriod, BillRow, group_orders
-from app.orders.bill.aggregator import clean_order_num
+from app.orders.bill.aggregation.aggregator import clean_order_num
 from helpers import PERIOD_2015, REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS
 
 

@@ -29,14 +29,14 @@ from app.core.config import settings
 from app.core.errors import ServiceBusyError
 from app.core.logging_conf import get_logger
 
-from ..http_client import post_form_async, unpack_json
+from ...http_client import post_form_async, unpack_json
+from ..schema import BillOrder
 from .imported_registry import (
     alock_for,
     get_imported_registry,
     normalize,
     owner_key,
 )
-from .schema import BillOrder
 
 log = get_logger(__name__)
 

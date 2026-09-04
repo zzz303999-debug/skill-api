@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .aggregator import clean_group_key, clean_plate_no
-from .schema import (
+from ..schema import (
     BillPeriod,
     BoxGroup,
     CanonicalOrder,
@@ -18,6 +17,7 @@ from .schema import (
     FeeItem,
     FeeReconcile,
 )
+from .aggregator import clean_group_key, clean_plate_no
 
 # 单行取值字段（CanonicalOrder 标量字段，剔除聚合/元信息；
 # bl_no 保留在单值集内——构造时单独清洗浮点尾巴后作为提单号）

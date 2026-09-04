@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from app.orders.bill.imported_registry import (
+from app.orders.bill.submission.imported_registry import (
     ImportedOrderRegistry,
     alock_for,
     dedup_key,

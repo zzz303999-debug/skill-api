@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.orders.bill import group_orders, parse_bill
-from app.orders.bill.cn_amount import parse_cn_upper_amount
+from app.orders.bill.aggregation.cn_amount import parse_cn_upper_amount
 from helpers import build_bill_bytes
 
 # 合计行缓存值自解释文案（fees 明细留痕，不参与判定）

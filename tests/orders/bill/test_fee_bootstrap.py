@@ -15,20 +15,20 @@ from pathlib import Path
 import pytest
 import yaml
 
-import app.orders.bill.fee_bootstrap as fb_module
-import app.orders.bill.fee_price_map as fp_module
-import app.orders.bill.master_data as md_module
-import app.orders.bill.master_data_client as md_client_module
+import app.orders.bill.fees.fee_bootstrap as fb_module
+import app.orders.bill.fees.fee_price_map as fp_module
+import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.orchestrator as md_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem
-from app.orders.bill.fee_bootstrap import (
+from app.orders.bill.fees.fee_bootstrap import (
     bootstrap_endpoint,
     build_price_form,
     run_fee_bootstrap_async,
 )
-from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_fee_registry
-from app.orders.bill.master_data import KIND_PRICE
+from app.orders.bill.fees.fee_price_map import apply_price_map
+from app.orders.bill.fees.fee_registry import get_fee_registry
+from app.orders.bill.master_data.orchestrator import KIND_PRICE
 from helpers import inject_price_map
 
 pytestmark = pytest.mark.asyncio
@@ -289,7 +289,7 @@ class TestIdempotent:
         md_endpoint()
         fake_create()
         await run_fee_bootstrap_async([_make_order([_fee(code="waiting")])], create_order=True)
-        from app.orders.bill.fee_registry import FeeRegistry
+        from app.orders.bill.fees.fee_registry import FeeRegistry
 
         restarted = FeeRegistry(tmp_path / "fee_registry.json")
         rec = restarted.lookup("waiting")
@@ -550,7 +550,7 @@ class TestRegistryStore:
     """T24 registry 存储：损坏文件容错 / 缺 price_id 不算登记。"""
 
     async def test_corrupted_file_ignored(self, tmp_path):
-        from app.orders.bill.fee_registry import FeeRegistry
+        from app.orders.bill.fees.fee_registry import FeeRegistry
 
         path = tmp_path / "fee_registry.json"
         path.write_text("{broken json", encoding="utf-8")
@@ -559,7 +559,7 @@ class TestRegistryStore:
         assert store.snapshot() == {}
 
     async def test_lookup_requires_price_id(self, tmp_path):
-        from app.orders.bill.fee_registry import FeeRegistry
+        from app.orders.bill.fees.fee_registry import FeeRegistry
 
         path = tmp_path / "fee_registry.json"
         path.write_text(
@@ -577,8 +577,8 @@ class TestServicePipeline:
         price_cfg(_fee_map_yaml(BS_CFG))
         md_endpoint()
         fake_create()
-        from app.orders.bill.canonical_aggregator import group_canonical
-        from app.orders.bill.payload import build_order_payload
+        from app.orders.bill.aggregation.canonical_aggregator import group_canonical
+        from app.orders.bill.submission.payload import build_order_payload
 
         rows = [
             {

@@ -21,16 +21,16 @@ import pytest
 import yaml
 from openpyxl import Workbook
 
-import app.orders.bill.master_data as md_module
-import app.orders.bill.master_data_client as md_client_module
-import app.orders.bill.template_store as ts_module
+import app.orders.bill.master_data.client as md_client_module
+import app.orders.bill.master_data.orchestrator as md_module
+import app.orders.bill.parsing.template_store as ts_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import build_result_async, group_canonical, parse_bill
-from app.orders.bill.fee_bootstrap import run_fee_bootstrap_async
-from app.orders.bill.fee_price_map import apply_price_map
-from app.orders.bill.fee_registry import get_fee_registry
-from app.orders.bill.master_data import collect_candidates
-from app.orders.bill.payload import build_order_payload
+from app.orders.bill.fees.fee_bootstrap import run_fee_bootstrap_async
+from app.orders.bill.fees.fee_price_map import apply_price_map
+from app.orders.bill.fees.fee_registry import get_fee_registry
+from app.orders.bill.master_data.orchestrator import collect_candidates
+from app.orders.bill.submission.payload import build_order_payload
 from helpers import FakeResponse, inject_price_map
 
 pytestmark = pytest.mark.asyncio
@@ -566,7 +566,7 @@ class TestE2EMock:
         assert driver_form["truck_id"] == "t1"
 
         # 同一文件二次上传：全 skipped（下游 0 次新增调用、无重复建档）
-        from app.orders.bill.master_data_store import get_master_data_store
+        from app.orders.bill.master_data.store import get_master_data_store
 
         counts_after_first = dict(get_master_data_store().snapshot())
         second = await build_result_async(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")

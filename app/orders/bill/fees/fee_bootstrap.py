@@ -77,7 +77,7 @@ def reload_bootstrap_config() -> dict[str, Any]:
 def bootstrap_endpoint() -> str | None:
     """自举建档端点：复用 master_data endpoints（endpoint_key 引用键名，不重复配 URL）；
     TODO/空/未配置 → None（不建档，全部走现状降级语义，不 fail fast）。"""
-    from .master_data import load_config as load_master_config
+    from ..master_data.orchestrator import load_config as load_master_config
 
     key = str(load_bootstrap_config().get("endpoint_key") or "price_create")
     url = str((load_master_config().get("endpoints") or {}).get(key) or "").strip()
@@ -139,7 +139,7 @@ def _collect_missing(orders) -> list[tuple[str, str]]:
 
 def _failure_reason(outcome: dict[str, Any]) -> str:
     """建档失败原因摘要（error 三元组 → 可读串；复用 master_data 口径）。"""
-    from .master_data import _failure_reason as master_failure_reason
+    from ..master_data.orchestrator import _failure_reason as master_failure_reason
 
     return master_failure_reason(outcome)
 
@@ -178,8 +178,8 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
         )
         return None
 
-    from .master_data import KIND_PRICE
-    from .master_data_client import create_archives_async
+    from ..master_data.client import create_archives_async
+    from ..master_data.orchestrator import KIND_PRICE
 
     forms = {
         KIND_PRICE: {

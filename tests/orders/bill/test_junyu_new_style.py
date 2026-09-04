@@ -15,7 +15,7 @@ golden/families 用例覆盖（全量回归验证无回归）。
 
 from __future__ import annotations
 
-import app.orders.bill.template_store as store
+import app.orders.bill.parsing.template_store as store
 from app.orders.bill import group_canonical, parse_bill
 from helpers import build_bill_bytes
 
@@ -80,7 +80,7 @@ def test_ignore_headers_in_fee_discovery(tmp_path):
     """模板级 ignore_headers 排除生效：去掉声明后箱量列会被费用发现（机制对照）。"""
     store.reload_templates()
     # 读模板内嵌字典直接调用费用发现（私有函数同包测试惯例），验证 ignore 集生效
-    from app.orders.bill.columns import discover_fee_columns
+    from app.orders.bill.parsing.columns import discover_fee_columns
 
     names = ["序号", "箱量", "运费", "其它费", "应收备注"]
     fees_cfg = {"channels": {"应收": "shou"}, "ignore_headers": ["箱量"]}

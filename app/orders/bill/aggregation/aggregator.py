@@ -17,8 +17,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
-from .cn_amount import parse_cn_upper_amount
-from .schema import (
+from ..schema import (
     MISSING_BOX,
     MISSING_C_TITLE,
     MISSING_ORDER_NUM1,
@@ -29,6 +28,7 @@ from .schema import (
     BillPeriod,
     BillRow,
 )
+from .cn_amount import parse_cn_upper_amount
 
 # 数据行序号：纯数字（真实账单为 "1.0" 形式）
 _SEQ_RE = re.compile(r"^\d+(\.\d+)?$")

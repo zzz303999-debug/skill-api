@@ -29,13 +29,12 @@ from pathlib import Path
 from app.core.errors import BadRequestError, LLMError, ParseError
 from app.llm import achat_json
 
-from .aggregator import group_orders
-from .ai_header import build_llm_request, validate_ai_result
-from .canonical_aggregator import group_canonical
-from .client import create_canonical_orders_async, create_orders_async
-from .fee_bootstrap import run_fee_bootstrap_async
-from .fee_price_map import apply_price_map
-from .parser import (
+from .aggregation.aggregator import group_orders
+from .aggregation.canonical_aggregator import group_canonical
+from .fees.fee_bootstrap import run_fee_bootstrap_async
+from .fees.fee_price_map import apply_price_map
+from .parsing.ai_header import build_llm_request, validate_ai_result
+from .parsing.parser import (
     AiHeaderNeeded,
     ParseOutput,
     open_and_identify,
@@ -43,6 +42,7 @@ from .parser import (
     parse_exact_fallback,
 )
 from .schema import BillParseResult, to_canonical
+from .submission.client import create_canonical_orders_async, create_orders_async
 
 
 def _sha256(data: bytes) -> str:
@@ -336,13 +336,13 @@ def _aggregate_stage(output, create_order: bool, sk: str):
         canonical_orders = [to_canonical(o) for o in orders]
 
     if canonical_orders:
-        from .payload import collect_unmapped_note
+        from .submission.payload import collect_unmapped_note
 
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
     if create_order:
-        from .imported_registry import get_imported_registry, normalize, owner_key
+        from .submission.imported_registry import get_imported_registry, normalize, owner_key
 
         _imported = get_imported_registry()
         _owner = owner_key(sk)
@@ -515,7 +515,7 @@ async def build_result_async(
     # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
     master_data_report = None
     if pending:
-        from .master_data import run_master_data_async
+        from .master_data.orchestrator import run_master_data_async
 
         master_data_report = await run_master_data_async(
             pending, create_order=create_order, sk=sk

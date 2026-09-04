@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-from .schema import IGNORED_HEADERS
+from ..schema import IGNORED_HEADERS
 
 # 表头文本归一化：去除全部空白后参与列名匹配（仅表头识别用，数据行不处理）
 _HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")

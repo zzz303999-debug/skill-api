@@ -451,7 +451,7 @@ class TestCreateMode:
 
     async def test_preview_never_touches_imported_registry(self, monkeypatch):
         """preview 模式零注册表读写（去重零副作用，锁死回归）。"""
-        from app.orders.bill import imported_registry
+        import app.orders.bill.submission.imported_registry as imported_registry
 
         registry = imported_registry.get_imported_registry()
         calls = {"lookup": 0, "register": 0}
@@ -471,7 +471,7 @@ class TestCreateMode:
 
     async def test_dedup_skipped_not_counted_in_master_data(self, monkeypatch):
         """重导跳过单不再计数（建档阈值统计不被重复上传推高）。"""
-        from app.orders.bill import master_data_store
+        import app.orders.bill.master_data.store as master_data_store
 
         calls = {"addwork": 0}
         self._fake_ok_chain(monkeypatch, calls)

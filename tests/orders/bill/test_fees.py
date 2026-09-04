@@ -18,17 +18,17 @@ from pathlib import Path
 
 import pytest
 
+import app.orders.bill.parsing.template_store as template_store
 from app.orders.bill import (
     BoxGroup,
     CanonicalOrder,
     FeeItem,
     group_canonical,
     parse_bill,
-    template_store,
 )
-from app.orders.bill.fee_name_map import canonicalize_fee, reload_fee_alias_dictionary
-from app.orders.bill.fee_price_map import apply_price_map, reload_price_map
-from app.orders.bill.payload import build_order_payload
+from app.orders.bill.fees.fee_name_map import canonicalize_fee, reload_fee_alias_dictionary
+from app.orders.bill.fees.fee_price_map import apply_price_map, reload_price_map
+from app.orders.bill.submission.payload import build_order_payload
 from helpers import inject_price_map
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"
@@ -158,7 +158,7 @@ class TestPriceMap:
     def test_missing_price_map_fails_fast(self, monkeypatch):
         """缺映射表文件 → RuntimeError（fail fast，不允许裸跑）。"""
         monkeypatch.setattr(
-            "app.orders.bill.fee_price_map.price_map_path",
+            "app.orders.bill.fees.fee_price_map.price_map_path",
             lambda: Path("/nonexistent/fee_price_map.test.yaml"),
         )
         with pytest.raises(RuntimeError, match="fee price map missing"):
@@ -318,7 +318,7 @@ class TestNegativeFee:
 
     def test_parser_negative_money(self):
         """行级抽取：negative 项金额取负（-486）；负值列（-25）取负为 +25（加回）。"""
-        from app.orders.bill.parser import _to_money
+        from app.orders.bill.parsing.parser import _to_money
 
         # 账单语义：应付合计 = Σ正项 − 扣除费列值；列值 +486 → 录入 -486，列值 -25 → 录入 +25
         assert _to_money("486.00") == 486.0
@@ -392,7 +392,7 @@ class TestMoneyParsing:
 
     def test_money_parsing_variants(self):
         """构造账单费用格解析（复用 parser._to_money 口径）。"""
-        from app.orders.bill.parser import _to_money
+        from app.orders.bill.parsing.parser import _to_money
 
         assert _to_money("1,234.50") == 1234.5  # 千分位
         assert _to_money("¥100.00") == 100.0  # 货币符号

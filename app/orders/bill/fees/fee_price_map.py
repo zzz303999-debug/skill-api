@@ -23,7 +23,7 @@ from .fee_registry import get_fee_registry
 
 log = get_logger(__name__)
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent / "config"
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
 
 _CACHE: dict[str, dict] | None = None
 

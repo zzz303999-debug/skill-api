@@ -17,9 +17,9 @@ from decimal import Decimal
 import pytest
 
 import app.orders.http_client as http_client_module
-from app.orders.bill.client import create_canonical_orders_async
-from app.orders.bill.payload import build_order_payload
 from app.orders.bill.schema import BoxGroup, CanonicalOrder, FeeItem
+from app.orders.bill.submission.client import create_canonical_orders_async
+from app.orders.bill.submission.payload import build_order_payload
 from helpers import FakeResponse
 
 pytestmark = pytest.mark.asyncio
@@ -216,7 +216,7 @@ class TestDedupWithFeeOrders:
 
     async def test_preview_touches_no_registry(self, monkeypatch):
         """preview（不调 create_canonical_orders_async）零注册表读写——锁死去重零副作用。"""
-        from app.orders.bill import imported_registry
+        import app.orders.bill.submission.imported_registry as imported_registry
 
         registry = imported_registry.get_imported_registry()
         calls = {"lookup": 0, "register": 0}

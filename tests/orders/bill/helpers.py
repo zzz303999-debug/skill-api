@@ -107,7 +107,7 @@ def inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
     """
     import copy
 
-    from app.orders.bill import fee_price_map
+    from app.orders.bill.fees import fee_price_map
 
     real = copy.deepcopy(fee_price_map.load_price_map())
     for code, pid in overrides.items():

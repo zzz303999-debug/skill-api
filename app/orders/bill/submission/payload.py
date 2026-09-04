@@ -18,7 +18,7 @@ build_order_form 为纯函数，返回 (form 字段字典, 警告清单)；客�
 
 from __future__ import annotations
 
-from .schema import CanonicalOrder, FeeItem
+from ..schema import CanonicalOrder, FeeItem
 
 # type 枚举：1=出口（2026-08-13 抓包确认）；其余值待实测补全（TODO），暂默认 1
 _TYPE_EXPORT = "1"

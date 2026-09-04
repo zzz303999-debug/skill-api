@@ -29,17 +29,8 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.core.errors import BadRequestError, ConvertError
 
-from . import template_store
-from .ai_header import format_header_zone
-from .columns import (
-    business_end_col,
-    discover_fee_columns,
-    match_source_cols,
-    normalize_header,
-)
-from .fee_name_map import canonicalize_fee, is_new_fee_schema
-from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
-from .schema import (
+from ..fees.fee_name_map import canonicalize_fee, is_new_fee_schema
+from ..schema import (
     HEADER_ALIASES,
     HEADER_COLUMN_MAP,
     IGNORED_HEADERS,
@@ -49,7 +40,16 @@ from .schema import (
     BillPeriod,
     BillRow,
 )
-from .template import compute_legacy_fingerprint, load_template
+from . import template_store
+from .ai_header import format_header_zone
+from .columns import (
+    business_end_col,
+    discover_fee_columns,
+    match_source_cols,
+    normalize_header,
+)
+from .legacy_template import compute_legacy_fingerprint, load_template
+from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
 
 # 支持的扩展名 → 期望的内容格式（与 _detect_format 的返回值对应）
 SUPPORTED_EXTS: dict[str, str] = {".xls": "xls", ".xlsx": "xlsx", ".xlsm": "xlsx"}

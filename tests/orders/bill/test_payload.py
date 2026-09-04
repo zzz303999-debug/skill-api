@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import pytest
 
-import app.orders.bill.client as client_module
+import app.orders.bill.submission.client as client_module
 import app.orders.http_client as http_client_module
-from app.orders.bill.client import create_canonical_orders_async
-from app.orders.bill.payload import build_order_form, build_order_payload
 from app.orders.bill.schema import BoxGroup, CanonicalOrder, ContainerInfo
+from app.orders.bill.submission.client import create_canonical_orders_async
+from app.orders.bill.submission.payload import build_order_form, build_order_payload
 from helpers import FakeResponse
 
 pytestmark = pytest.mark.asyncio

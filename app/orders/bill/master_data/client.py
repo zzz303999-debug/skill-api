@@ -22,8 +22,8 @@ import httpx
 from app.core.config import settings
 from app.core.logging_conf import get_logger
 
-from ..http_client import post_form_async, unpack_json
-from .master_data import (
+from ...http_client import post_form_async, unpack_json
+from .orchestrator import (
     KIND_BAILOR,
     KIND_CLIENT,
     KIND_DRIVER,
@@ -53,7 +53,7 @@ _PRIMARY_KEY_MAP: dict[str, str] = {
 def _duplicate_markers() -> list[str]:
     """T27b 重复语义匹配串（配置化：master_data.duplicate_markers；缺省兜底
     ["已存在"]，不写死单串——TMS 各端点拒单文案可能不同）。"""
-    from .master_data import load_config
+    from .orchestrator import load_config
 
     markers = (load_config().get("duplicate_markers") or []) or ["已存在"]
     return [str(m).strip() for m in markers if str(m).strip()]
