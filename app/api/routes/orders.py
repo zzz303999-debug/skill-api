@@ -81,10 +81,6 @@ async def parse_order_document(
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
-    # 解析经 app.main 命名空间解析：测试以 setattr(main_module,
-    # "_parse_document_to_order", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）
-    # LLM 长任务闸（2026-09 用户拍板）：文档解析含 LLM 调用（180s 级），与 skill
-    # 共享进程级在途上限（skill_max_concurrency），防并发打满 LLM 网关
     from app.main import _parse_document_to_order
 
     async with _inflight_guard():
