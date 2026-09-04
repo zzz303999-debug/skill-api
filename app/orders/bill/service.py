@@ -447,6 +447,21 @@ def build_result(
             output, pending, create_order=create_order, sk=sk
         )
 
+    # BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板）：订单
+    # 费用以中文名直传可录，但 TMS「费用管理」只有 AddCarPrice 建档过的费目——
+    # 模板外新费目订单有、费用管理无档案 → create 自动建档同名档案（复用费目
+    # 自举配置/端点/registry）；preview 只出 planned 计划清单零副作用；建档失败
+    # 不阻塞下单（直传不依赖 price_id，仅报告下批重试）；已建档名跳过（幂等）。
+    billrow_fee_bootstrap_report = None
+    if orders and not output.canonical_rows:
+        pending_legacy = [o for o in orders if o.create_result is None]
+        if pending_legacy:
+            from .fee_bootstrap import run_billrow_fee_bootstrap
+
+            billrow_fee_bootstrap_report = run_billrow_fee_bootstrap(
+                pending_legacy, create_order=create_order, sk=sk
+            )
+
     # 阶段三：基础资料阈值编排（聚合后、payload 构造前；T19）——计数 → 建档 →
     # 当批回填 order._archive_refs（payload 构造在 create 分支内，先于下单执行）；
     # preview 只读探测不计数；disabled → None（不产生报告段）
@@ -548,6 +563,10 @@ def build_result(
     # 阶段三：基础资料阈值报告（T21；只报告不拦截，建档异常不使订单丢失）
     if master_data_report is not None:
         meta["master_data"] = master_data_report
+    # BillRow 链模板外费用建档报告（与 master_data 同风格：顶层独立键；
+    # canonical 链的费目自举报告在 meta.reconciliation.reports.fee_bootstrap）
+    if billrow_fee_bootstrap_report is not None:
+        meta["fee_bootstrap"] = billrow_fee_bootstrap_report
     # L3 候选模板配置（人工确认固化的载体）
     if output.new_template is not None:
         meta["l3_template"] = output.new_template

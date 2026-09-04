@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 import yaml
@@ -142,6 +143,169 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
     from .master_data import _failure_reason as master_failure_reason
 
     return master_failure_reason(outcome)
+
+
+def _dynamic_fee_code(name: str) -> str:
+    """模板外费目动态码：ASCII 稳定唯一（registry 键 + 建档 sn 用）。
+
+    中文费目名不能直接进 sn（{prefix}_{code} 拼写），拼音不可靠（多音字）；
+    取 sha1 前 8 位 hex 作后缀，同名恒同码（幂等），跨批复用 registry。
+    """
+    return "x" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
+
+
+def _collect_billrow_missing(orders) -> list[tuple[str, str]]:
+    """BillRow 链（订单费用为直传中文名）建档候选：(code, tms_name)。
+
+    判定：别名字典（中文→码）命中且已有 price_id（YAML/registry 两级解析）
+    → 档案已建档，跳过（幂等）；字典未命中（模板外新名，如 加班费）或命中
+    但无 price_id → 建档候选（code=字典码或动态码，tms_name=原名）。
+    同批同名只收集一次，保持出现顺序。
+    """
+    from .fee_map import fee_alias_dictionary
+
+    alias = fee_alias_dictionary()
+    registry = get_registry()
+    seen: set[str] = set()
+    missing: list[tuple[str, str]] = []
+    for order in orders:
+        for entry in order.order_data.get("shou") or []:
+            for name in entry:
+                name = str(name).strip()
+                if not name or name in seen:
+                    continue
+                # 字典码与动态码统一幂等判定：YAML/registry 已有 id → 跳过；
+                # TMS 已存在（204）→ 跳过不重试（动态码同规则，否则每次重试再撞 204）
+                code = alias.get(name)
+                eff_code = code or _dynamic_fee_code(name)
+                if resolve_price_id(eff_code) is not None:
+                    continue  # 档案已建档（幂等：不重发）
+                if registry.exists_external(eff_code):
+                    continue  # T27b：TMS 已存在（204 已存在）→ 不再重试自举
+                seen.add(name)
+                missing.append((eff_code, name))
+    return missing
+
+
+def run_billrow_fee_bootstrap(
+    orders, *, create_order: bool, sk: str = ""
+) -> dict[str, Any] | None:
+    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板）。
+
+    背景：jinxin 链费用以中文名直传 AddWork，订单侧可录（TMS 不校验档案），
+    但 TMS「费用管理」只有 AddCarPrice 建档过的费目——模板外新费目（加班费/报关费/
+    查验费等）订单有、费用管理无档案 → 本函数在 create 时自动建档同名档案。
+
+    - 候选 = 本批订单 shou 键名中「无已建档档案」者（模板 6 名已建档 → 跳过）；
+    - **preview 零副作用**：create_order=false 只输出 planned 计划清单，不发请求；
+    - 建档失败/端点未配：**不阻塞下单**（直传不依赖 price_id），仅进报告，下批重试
+      ——与 canonical 链（建档失败降级 skip_report）不同：此处档案是费用管理侧
+      补齐，订单费用照常按名直传；
+    - 幂等：registry 登记后复用；同批同名只调一次；TMS 已存在（204）→ exists_external。
+    """
+    config = load_bootstrap_config()
+    if not config.get("enabled"):
+        return None
+    orders = [o for o in orders if getattr(o, "create_result", None) is None]
+    missing = _collect_billrow_missing(orders)
+    if not missing:
+        return None
+    if not create_order:
+        return {
+            "enabled": True,
+            "mode": "preview",
+            "kind": "billrow_named",
+            "planned": [
+                {"code": code, "tms_name": tms_name} for code, tms_name in missing
+            ],
+            "created": [],
+            "failed": [],
+            "exists_external": [],
+        }
+    url = bootstrap_endpoint()
+    if url is None:
+        log.warning(
+            "fee_bootstrap_endpoint_missing",
+            extra={"endpoint_key": config.get("endpoint_key"), "kind": "billrow_named"},
+        )
+        return None
+
+    from .master_data import KIND_PRICE
+    from .master_data_client import create_archives
+
+    forms = {
+        KIND_PRICE: {
+            code: build_price_form(code, tms_name) for code, tms_name in missing
+        }
+    }
+    try:
+        results = create_archives(forms, sk)
+    except Exception as exc:  # 防御：建档层意外异常也不使订单丢失（降级语义）
+        log.warning(
+            "fee_bootstrap_create_unexpected",
+            extra={"error_type": exc.__class__.__name__, "kind": "billrow_named"},
+        )
+        return {
+            "enabled": True,
+            "mode": "create",
+            "kind": "billrow_named",
+            "planned": [],
+            "created": [],
+            "failed": [
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "reason": f"unexpected error: {exc.__class__.__name__}",
+                }
+                for code, tms_name in missing
+            ],
+            "exists_external": [],
+        }
+    created: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    exists_external: list[dict[str, Any]] = []
+    for code, tms_name in missing:
+        outcome = (results.get(KIND_PRICE) or {}).get(code) or {}
+        if outcome.get("success"):
+            price_id = int(outcome["archive_id"])
+            get_registry().register(code, price_id, tms_name)
+            log.info(
+                "fee_bootstrap_created",
+                extra={"code": code, "price_id": price_id, "kind": "billrow_named"},
+            )
+            created.append(
+                {"code": code, "tms_name": tms_name, "price_id": price_id}
+            )
+        elif outcome.get("duplicate"):
+            get_registry().mark_exists_external(code, tms_name)
+            log.info(
+                "fee_bootstrap_exists_external",
+                extra={"code": code, "message": (outcome.get("error") or {}).get("message")},
+            )
+            exists_external.append(
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "message": (outcome.get("error") or {}).get("message") or "已存在",
+                }
+            )
+        else:
+            failed.append(
+                {
+                    "code": code,
+                    "tms_name": tms_name,
+                    "reason": _failure_reason(outcome) or "未知错误",
+                }
+            )
+    return {
+        "enabled": True,
+        "mode": "create",
+        "kind": "billrow_named",
+        "planned": [],
+        "created": created,
+        "failed": failed,
+        "exists_external": exists_external,
+    }
 
 
 def run_fee_bootstrap(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:

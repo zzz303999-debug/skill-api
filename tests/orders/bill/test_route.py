@@ -549,6 +549,13 @@ def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
     assert summary["created"] == 0 and summary["failed"] == 2
     msgs = {d["error_message"] for d in summary["failed_details"]}
     assert msgs == {_MISSING_BL_MSG}
+    # details 契约（2026-09-04 用户拍板）：仅 missing_bl_no_count，无 missing_rows
+    d0 = body["data"]["orders"][0]["create_result"]["error"]["details"]
+    assert d0 == {
+        "missing_bl_no_count": 1,
+        "upstream": {"code": "204", "msg": "添加失败", "data": []},
+    }
+    assert "missing_rows" not in d0
     # 零下游调用：AddWork 0、建档族 0
     assert calls["addwork"] == 0
     assert calls["archive"] == 0
@@ -575,6 +582,62 @@ def test_missing_bl_no_preview_rejected_msg(monkeypatch):
         for o in body["data"]["orders"]
     ]
     assert codes == ["missing_bl_no", "missing_bl_no"]
+
+
+def test_invalid_format_bl_no_jinxin_chain_rejected(monkeypatch):
+    """jinxin（BillRow）链：提单号列填非法值（纯字母，非空）→ 归集层
+    clean_order_num 判「格式不合法」清空 → 连坐视同缺失整批拒（2026-09-04
+    口径锁定：两链差异设计——canonical 链仅存在性判定放行，见
+    test_dedup_integration.test_invalid_format_bl_no_canonical_chain_allowed）。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(_JINXIN_HEADERS)
+    row = [""] * len(_JINXIN_HEADERS)
+    row[0] = 1
+    row[3] = "测试客户"
+    row[5] = "TST001"
+    row[7] = "ABC"  # 提单号列：纯字母非法值
+    row[8] = "门点"
+    row[9] = "40HQ"
+    row[12] = "地址"
+    row[14] = "C1"
+    row[16] = "港区"
+    row[23] = 2100
+    ws.append(row)
+    buf = BytesIO()
+    wb.save(buf)
+
+    calls = {"addwork": 0, "archive": 0}
+
+    def fake_post(url, **_kwargs):
+        if "/Car/Car" in url:
+            calls["archive"] += 1
+            return _archive_post(url)
+        calls["addwork"] += 1
+        return _ok_chain_post(url)
+
+    monkeypatch.setattr(client_module.httpx, "post", fake_post)
+    with TestClient(app) as client:
+        r = upload(
+            client,
+            "bad-bl.xlsx",
+            buf.getvalue(),
+            data={"create_order": "true"},
+            headers={**AUTH_HEADERS, "sk": "sk-1"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "204"
+    assert body["msg"] == _MISSING_BL_MSG
+    summary = body["data"]["summary"]
+    assert summary["created"] == 0 and summary["failed"] == 1
+    # 格式非法被归集层清空 → 单级 missing 原因留痕（格式不合法）供人工定位
+    assert calls["addwork"] == 0
+    assert calls["archive"] == 0
 
 
 def test_error_envelope_payload_too_large_413(monkeypatch):

@@ -28,6 +28,7 @@ from app.orders.bill.fee_bootstrap import (
 from app.orders.bill.fee_price_map import apply_price_map
 from app.orders.bill.fee_registry import get_registry
 from app.orders.bill.master_data import KIND_PRICE
+from app.orders.bill.schema import BillOrder
 from helpers import inject_price_map
 
 # 旧版（2026-09-01 补值前）真实表中无 id 的费目码全集：注入 None 锁定自举场景
@@ -698,3 +699,130 @@ class TestGoldenBootstrap:
             if get_registry().lookup(c["code"]) is not None
         }
         assert registered == {c["code"]: c["price_id"] for c in bootstrap["created"]}
+
+
+def _make_billrow_order(order_num1: str, fee_names: list[str]) -> BillOrder:
+    """构造 BillRow 链订单（order_data.shou 中文名直传形态）。"""
+    return BillOrder(
+        order_num1=order_num1,
+        c_title="测试客户",
+        order_data={
+            "shou": [{name: {"money": 100.0}} for name in fee_names],
+            "box": [{"b_type": "40HQ", "box_num": 1}],
+        },
+    )
+
+
+class TestBillrowNamedBootstrap:
+    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板）：
+
+    - 候选 = shou 名中无已建档档案者（运费等别名命中且 registry/YAML 有 id → 跳过）；
+    - 模板外新名（加班费等）→ 动态码（x+sha1 前 8）+ tms_name=原名建档；
+    - preview 零副作用（planned 清单，不发请求）；建档失败不阻塞（仅报告）；
+    - 幂等：registry 登记后同批/跨批不再建档。
+    """
+
+    def test_preview_planned_only_no_requests(self, price_cfg, fake_create):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        fake_create()
+        orders = [
+            _make_billrow_order("BL001", ["运费", "加班费", "报关费", "运费"]),
+            _make_billrow_order("BL002", ["报关费", "查验费"]),
+        ]
+        report = fb_module.run_billrow_fee_bootstrap(
+            orders, create_order=False, sk="sk"
+        )
+        assert report is not None and report["mode"] == "preview"
+        # 运费别名命中且已有 price_id(820) → 跳过；3 新名 → planned（动态码 + 原名）
+        planned = {p["tms_name"]: p["code"] for p in report["planned"]}
+        assert set(planned) == {"加班费", "报关费", "查验费"}
+        for code in planned.values():
+            assert code.startswith("x") and len(code) == 9
+        assert fake_create.calls == []  # 零请求
+        assert report["created"] == [] and report["failed"] == []
+
+    def test_create_archives_dynamic_names_and_registers(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        orders = [_make_billrow_order("BL001", ["加班费", "报关费"])]
+        report = fb_module.run_billrow_fee_bootstrap(
+            orders, create_order=True, sk="sk"
+        )
+        assert report is not None and report["mode"] == "create"
+        created = {c["tms_name"]: c for c in report["created"]}
+        assert set(created) == {"加班费", "报关费"}
+        # 表单：name=原名 + sn 含动态码大写；registry 已登记（幂等命中）
+        form_sent = fake_create.calls[0]["price"][created["加班费"]["code"]]
+        assert form_sent["name"] == "加班费"
+        assert created["加班费"]["code"].upper() in form_sent["sn"]
+        assert get_registry().lookup(created["加班费"]["code"])["tms_name"] == "加班费"
+        assert get_registry().lookup(created["报关费"]["code"])["tms_name"] == "报关费"
+
+    def test_second_batch_no_create_calls(self, price_cfg, md_endpoint, fake_create):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL001", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert len(fake_create.calls) == 1
+        # 同批重复名一次；跨批已登记（registry 幂等）→ 无缺失（None 不产生报告段）
+        again = fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL002", ["加班费"])],
+            create_order=True,
+            sk="sk",
+        )
+        assert again is None  # 全部已建档 → 无候选
+        assert len(fake_create.calls) == 1  # 未再发建档
+
+    def test_duplicate_marks_external(self, price_cfg, md_endpoint, monkeypatch):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+
+        def _dup(forms_by_kind, sk=""):
+            return {
+                kind: {
+                    key: {
+                        "success": False,
+                        "archive_id": None,
+                        "error": {"code": "master_data_duplicate", "message": "已存在"},
+                        "duplicate": True,
+                    }
+                    for key in forms
+                }
+                for kind, forms in forms_by_kind.items()
+            }
+
+        monkeypatch.setattr(md_client_module, "create_archives", _dup)
+        report = fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL001", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert report["exists_external"] and report["exists_external"][0]["tms_name"] == "加班费"
+        assert report["created"] == [] and report["failed"] == []
+        # 登记 exists_external → 下批不再重试
+        assert fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL002", ["加班费"])], create_order=True, sk="sk"
+        ) is None
+
+    def test_failed_does_not_block_and_retries_next_batch(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create(fail_codes={fb_module._dynamic_fee_code("加班费")})
+        report = fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL001", ["加班费", "报关费"])],
+            create_order=True,
+            sk="sk",
+        )
+        assert {f["tms_name"] for f in report["failed"]} == {"加班费"}
+        assert {c["tms_name"] for c in report["created"]} == {"报关费"}
+        # 失败不登记 → 下批重试仍建档（mock 修复后成功）
+        fake_create(fail_codes=None)
+        again = fb_module.run_billrow_fee_bootstrap(
+            [_make_billrow_order("BL002", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert again["created"] and again["created"][0]["tms_name"] == "加班费"

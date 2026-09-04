@@ -24,8 +24,6 @@ import yaml
 
 from app.logging_conf import get_logger
 
-from .template import load_template
-
 log = get_logger(__name__)
 
 # 表头行最大扫描行数：与 parser.MAX_HEADER_SCAN_ROWS 同值同口径（抬头区通常 1~5 行）；
@@ -231,7 +229,11 @@ def load_storage_template(fingerprint: str):
 
     与 YAML 库互补：L3 固化模板不依赖 YAML 即可被 L1 命中（兼容既有
     template.py 的固化机制）；返回 None 表示未命中。
+    函数内 lazy import：template_store ↔ template（_build_builtin 反向依赖本模块）
+    互引，模块级双向 import 会环。
     """
+    from .template import load_template
+
     return load_template(fingerprint)
 
 
@@ -256,6 +258,67 @@ def alias_dictionary() -> dict[str, list[str]]:
         data = {}
     _ALIAS_CACHE = {k: [str(v) for v in vals] for k, vals in data.items() if isinstance(vals, list)}
     return _ALIAS_CACHE
+
+
+# ---- 费目名动态收集（2026-09-04：费用项不写死，以模板库为唯一声明源） ----
+# 模板 fees 段两种 schema：旧式（费目名 → 源列名，全应收）与 T10 channels
+# （mapping 键「区块.费目名」→ 码）。两函数皆按模板文件序去重保序。
+
+# legacy 池空兜底（2026-09-04 审查修复）：模板库空/全为 channels schema 时，
+# 内置/精确兜底链的费用识别不能静默归零（会丢 shou/金额且无告警）——回退
+# 金科信基线六费目并显式告警，保证兜底链恒可识别
+_LEGACY_FALLBACK_FEES: tuple[str, ...] = (
+    "运费", "待时费", "预提费", "洋山费", "落还箱费", "其它费"
+)
+
+
+def collect_fee_names() -> list[str]:
+    """应收费目名宽池：模板库全部应收费用名（旧式键 + channels 中映射到 shou
+    的费目名）。L3 AI 映射的可选费用目标（模板加费目 → AI 池自动扩）。"""
+    names: list[str] = []
+    seen: set[str] = set()
+    for template in all_templates().values():
+        fees = template.get("fees") or {}
+        if not isinstance(fees, dict):
+            continue
+        if "channels" in fees:
+            channels = fees["channels"] or {}
+            shou_sections = {s for s, ch in channels.items() if ch == "shou"}
+            for key in (fees.get("mapping") or {}):
+                section, _, name = str(key).partition(".")
+                if section in shou_sections and name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        else:
+            for name in fees:
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+    return names
+
+
+def collect_legacy_fee_names() -> list[str]:
+    """旧式（BillRow 语义）费目名：仅无 channels 的模板 fees 键。
+
+    exact/内置模板兜底链与 jinxin 同语义（费用键 = AddWork 表单应收字段），
+    只收旧式声明——jinxin_v1 模板加费目即自动扩展，不混入 T10 家族费目。
+    池空（库空/模板损坏/全 channels）时回退 _LEGACY_FALLBACK_FEES 并告警，
+    避免兜底链费用静默归零（见 _LEGACY_FALLBACK_FEES 注释）。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for template in all_templates().values():
+        fees = template.get("fees") or {}
+        if not isinstance(fees, dict) or "channels" in fees:
+            continue
+        for name in fees:
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    if not names:
+        log.warning("legacy_fee_pool_empty_fallback_used")
+        return list(_LEGACY_FALLBACK_FEES)
+    return names
 
 
 def reload_alias_dictionary() -> None:

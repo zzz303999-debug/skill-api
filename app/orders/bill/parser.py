@@ -36,7 +36,6 @@ from .schema import (
     HEADER_ALIASES,
     HEADER_COLUMN_MAP,
     IGNORED_HEADERS,
-    RECEIVABLE_FEE_COLUMNS,
     REQUIRED_HEADERS,
     BillPeriod,
     BillRow,
@@ -124,9 +123,13 @@ def _normalize_header(text: str) -> str:
 
 
 def _column_lookup() -> tuple[dict[str, str], dict[str, str]]:
-    """归一化表头 → (BillRow 字段名, 费用标准名) 两个查找表（含列名变体）。"""
+    """归一化表头 → (BillRow 字段名, 费用标准名) 两个查找表（含列名变体）。
+
+    费用名集 = 模板库旧式 fees 声明（2026-09-04 动态化：不再依赖代码常量，
+    jinxin_v1 模板加费目即自动扩展——兜底链与 jinxin 同语义）。
+    """
     data = dict(HEADER_COLUMN_MAP)
-    fees = {name: name for name in RECEIVABLE_FEE_COLUMNS}
+    fees = {name: name for name in template_store.collect_legacy_fee_names()}
     fees.update(HEADER_ALIASES)
     return data, fees
 
@@ -249,6 +252,37 @@ def _header_columns(
     return data_cols, fee_cols, unmatched
 
 
+def _dynamic_fee_cols(
+    view: _SheetView,
+    header_row: int,
+    unmatched_cols: dict[int, str],
+) -> tuple[dict[int, str], dict[int, str]]:
+    """未知列动态费用收录判定（2026-09-04 用户拍板：费用项不写死、不要求先
+    声明模板——账单新增费用列自动收录）。
+
+    判据：未知列数据区出现任一可转金额（_to_money）的单元格 → 整列按费用
+    收录，列名（去空白归一）作费用名，不进 unmatched；纯文本未知列（如月份、
+    备注类）保持未识别上报，避免文本列误收。返回 (动态费用列, 保留上报列)。
+    """
+    dynamic: dict[int, str] = {}
+    kept: dict[int, str] = {}
+    for col, raw_text in unmatched_cols.items():
+        name = _normalize_header(raw_text)
+        if not name:
+            kept[col] = raw_text
+            continue
+        for row in range(header_row + 1, view.nrows + 1):
+            raw = view.cell(row, col)
+            if raw is None:
+                continue
+            if _to_money(raw) is not None:
+                dynamic[col] = name
+                break
+        else:
+            kept[col] = raw_text
+    return dynamic, kept
+
+
 def read_data_rows(
     view: _SheetView,
     header_row: int,
@@ -262,12 +296,17 @@ def read_data_rows(
     表头行按归一化列名匹配（默认 HEADER_COLUMN_MAP + 费用列 + 别名；可注入
     模板/AI 列名映射）；数据区直接读单元格原生值，合并单元格只有左上角有值
     （真实账单尾部「合计:」行为整行合并，其余字段应保持空，不做左上角值填充）。
-    未识别列仅在其数据区至少有一个非空单元格时上报（全空装饰列/间距列不报；
-    AI 明确 ignore 的列不报）。
+    未知列动态收录（2026-09-04）：数据区含金额的未知列自动转费用列，金额进
+    费用、非数字原文保留（与声明费用列同口径）；未收录列仅在其数据区至少有
+    一个非空单元格时上报（全空装饰列/间距列不报；AI 明确 ignore 的列不报）。
     """
     data_cols, fee_cols, unmatched_cols = _header_columns(
         view, header_row, data_lookup, fee_lookup, ignored_cols
     )
+    dynamic_fee_cols, unmatched_cols = _dynamic_fee_cols(
+        view, header_row, unmatched_cols
+    )
+    fee_cols = {**fee_cols, **dynamic_fee_cols}
     unmatched_counts = {col: 0 for col in unmatched_cols}
 
     rows: list[BillRow] = []
@@ -688,8 +727,6 @@ def _parse_with_template(
             and name not in IGNORED_HEADERS
         )
     }
-    unmatched_hits: dict[int, int] = {col: 0 for col in unmatched_raw}
-
     # 序号列（row_filter: seq_numeric 口径）：row_anchor 列，columns 有 seq 时优先
     anchor = _normalize_header(str(header_cfg.get("row_anchor") or "序号"))
     seq_cols = [col for col, name in enumerate(names, start=1) if name == anchor]
@@ -705,6 +742,25 @@ def _parse_with_template(
     is_billrow = set(columns) <= _BILLROW_FIELDS
     raw_rows: list[BillRow] = [] if is_billrow else []
     canonical_rows: list[dict] = [] if not is_billrow else []
+
+    # 未知列动态费用收录（2026-09-04 用户拍板：费用项不写死、账单新增费用列
+    # 无需先声明模板）：仅 BillRow 语义模板（jinxin/builtin 迁移，费用名直配）
+    # ——数据区含金额的未知列自动转费用列（列名去空白归一作费用名），金额进
+    # fees、非数字原文保留，与声明费用列同口径；纯文本未知列保持上报。
+    # canonical 家族（T10 channels）费目需字典码映射，未知列不走此路（沿用
+    # L3 new_fee 降级上报，人工固化模板补 fees 映射）。
+    if is_billrow and unmatched_raw:
+        for col, raw_text in list(unmatched_raw.items()):
+            name = _normalize_header(raw_text)
+            if not name:
+                continue
+            for row in range(header_row + 1, view.nrows + 1):
+                raw = view.cell(row, col)
+                if raw is not None and _to_money(raw) is not None:
+                    fee_cols[col] = name
+                    del unmatched_raw[col]
+                    break
+    unmatched_hits = {col: 0 for col in unmatched_raw}
 
     for row in range(header_row + 1, view.nrows + 1):
         # stop_on：任一列值含终止词 → 停止（合计/制单人页脚等）
@@ -926,12 +982,21 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
         template_id=candidate["template_id"],
     )
     out = _parse_with_template(view, match, engine, filename)
-    # 白名单外费用降级上报（new_fee: 前缀，与既有语义一致）
+    # 费用列上报（new_fee: 前缀，2026-09-04 审查修复）：L3 候选模板不携带费用
+    # 段（build_template_config 仅 columns），白名单内命中的费用列同样不落地——
+    # 若只报白名单外，落入 33 费目池的新家族费目会静默丢失；统一以 new_fee:
+    # 上报，提示人工确认后在固化模板 fees 段补映射
+    pending_fee_names = [
+        *ai.new_fees,  # 白名单外（原有语义）
+        *(
+            name for name in ai.fee_map.values() if name not in ai.new_fees
+        ),  # 白名单内命中（本轮补报）
+    ]
     out.unmatched_headers = [
         *out.unmatched_headers,
-        *(f"new_fee:{name}" for name in ai.new_fees),
+        *(f"new_fee:{name}" for name in pending_fee_names),
     ]
-    out.new_fees = ai.new_fees
+    out.new_fees = pending_fee_names
     # 候选模板配置：预览界面展示映射结果，人工确认后固化为 templates/{family}_v1.yaml
     out.new_template = candidate
     return out

@@ -21,7 +21,8 @@ class TestConstructed:
     HEADERS = {"A": "序号", "B": "客户编号", "C": "提单号", "D": "箱型"}
 
     def test_unknown_column_with_data(self, tmp_path):
-        """未知列「其他费」有数据 → 上报。"""
+        """数字未知列（含金额）→ 动态收录为费用，不再上报（2026-09-04：
+        费用项不写死、账单新增费用列自动收录，无需先声明模板）。"""
         path = tmp_path / "unknown.xlsx"
         path.write_bytes(
             build_bill_bytes(
@@ -29,7 +30,23 @@ class TestConstructed:
                 [{"A": 1, "B": "C001", "C": "OOLU12345678", "D": "40HQ", "E": 500}],
             )
         )
-        assert parse_bill(path).unmatched_headers == ["其他费"]
+        out = parse_bill(path)
+        assert out.unmatched_headers == []  # 已收录不再上报
+        assert out.rows[0].fees["其他费"] == 500.0
+
+    def test_unknown_text_column_still_reported(self, tmp_path):
+        """纯文本未知列（无可转金额单元格）保持未识别上报（动态收录判据=
+        数据区含金额，避免备注类文本列误收）。"""
+        path = tmp_path / "unknown-text.xlsx"
+        path.write_bytes(
+            build_bill_bytes(
+                {**self.HEADERS, "E": "客户账期"},
+                [{"A": 1, "B": "C001", "C": "OOLU12345678", "D": "40HQ", "E": "月结30天"}],
+            )
+        )
+        out = parse_bill(path)
+        assert out.unmatched_headers == ["客户账期"]
+        assert "客户账期" not in out.rows[0].fees
 
     def test_decor_column_empty(self, tmp_path):
         """装饰列表头但数据全空 → 不上报。"""

@@ -2,8 +2,8 @@
 
 模板 = 表头行各列归一化文本（去空白）按列序拼接的 sha1 前 16 位指纹，
 外加列名 → 字段/费用的映射。来源分两类：
-- builtin：内置模板（列名映射 = HEADER_COLUMN_MAP +
-  RECEIVABLE_FEE_COLUMNS + HEADER_ALIASES，指纹按真实表头计算），
+- builtin：内置模板（列名映射 = HEADER_COLUMN_MAP + 模板库旧式费目名 +
+  HEADER_ALIASES，指纹按真实表头计算），
   代码即模板，不落盘；
 - ai：异构模板经 AI 表头映射并通过校验闸门后固化（verified=False），
   落盘到 storage/bill_templates/<fingerprint>.json，同指纹再次导入直接命中，
@@ -26,7 +26,7 @@ from pathlib import Path
 
 from app.config import settings
 
-from .schema import HEADER_ALIASES, HEADER_COLUMN_MAP, RECEIVABLE_FEE_COLUMNS
+from .schema import HEADER_ALIASES, HEADER_COLUMN_MAP
 
 # 表头文本中的空白（含全角空格），与 parser 的表头识别口径一致
 _HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")
@@ -34,6 +34,8 @@ _HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")
 # 真实应收对账单表头行（golden 2015-01到2015-12上海通寰应收对账单.xls
 # 第 6 行，32 列；「 箱号」带前导空格、「落/还箱费」为别名，均原样保留，
 # 指纹计算时统一去空白）——内置模板指纹必须按此真实表头计算，才能命中。
+# 本元组仅为表头列布局（指纹载体），费用名集以模板库旧式 fees 声明为源
+# （collect_legacy_fee_names，fee_map 组装处）；两处费用列不一致时以模板为准。
 BUILTIN_HEADERS: tuple[str, ...] = (
     "序号",
     "日期",
@@ -82,9 +84,15 @@ def compute_fingerprint(headers: list[str]) -> str:
 
 
 def _build_builtin() -> BillTemplate:
-    """内置模板：列名映射 = 现有 HEADER_COLUMN_MAP + 费用名 + 别名。"""
+    """内置模板：列名映射 = 现有 HEADER_COLUMN_MAP + 费用名 + 别名。
+
+    费目名动态化（2026-09-04）：内置模板费用与 jinxin_v1 模板同源（旧式 fees
+    声明）；函数内 lazy import 破 template ↔ template_store 互引环。
+    """
+    from . import template_store
+
     column_map = dict(HEADER_COLUMN_MAP)
-    fee_map = {name: name for name in RECEIVABLE_FEE_COLUMNS}
+    fee_map = {name: name for name in template_store.collect_legacy_fee_names()}
     fee_map.update(HEADER_ALIASES)
     return BillTemplate(
         fingerprint=compute_fingerprint(list(BUILTIN_HEADERS)),
