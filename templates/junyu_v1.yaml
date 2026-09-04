@@ -6,6 +6,11 @@ match:
   fingerprints:
   - 2652ad46
   family_min_overlap: 0.85
+  # 2026-09-03：识别可选列——新式样字段（手机号/车牌）抽取需要，但精简/旧式样
+  # 文件缺列不应降 L2 重合度（否则期望列集扩容会把 0.85 压线命中挤掉）
+  optional_headers:
+  - 手机号
+  - 车牌
 header:
   row_anchor: 序号
   two_row: false
@@ -31,11 +36,14 @@ columns:
   work_date: 做箱时间
   port_area: 港区
   driver_name: 司机
+  driver_phone: 手机号  # 2026-09-03 新式样列：费用自动发现误收手机号列致脏费用 + 司机建档缺手机（补映射）
+  plate_no: 车牌  # 同上：司机建档必填车牌（AddCarDriver num）
   remark: 应收备注
 normalizers:
   work_date: date_flex
   bl_no: strip_float_tail
   box_type_qty: box_parse
+  driver_phone: strip_float_tail  # 手机号列数值存储（xlrd 读出 13245694123.0）→ 去浮点尾巴
 # 费用段（T15）：应收对账家族仅应收；column_range 模式费用列自动发现（columns 未映射
 # 列排除锚点/备注），mapping 只负责码解析；无标准码的费目（如有）走字典 → to_other
 fees:
@@ -46,6 +54,10 @@ fees:
     应收.打/改单费: amend
     应收.其它费: other
   unmapped_fee: to_other
+  # 2026-09-03：新式样在费用区插入的业务列（非费目）——费用自动发现显式排除
+  #（如「箱量」冗余列；手机号/车牌已由 columns 声明承接，不在此列）
+  ignore_headers:
+  - 箱量
   fee_defaults:
     price_type: "1"
     is_profit: "1"

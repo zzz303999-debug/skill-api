@@ -593,9 +593,16 @@ def _discover_fee_columns(
             else:
                 fee_cols[col] = (section, name)
         return fee_cols, anchor_cols
-    # column_range：columns 未映射列（排除序号/锚点/备注/IGNORED）即费用列；
-    # 锚点列取 fees.anchors 显式声明（如 秋怡小计列；军羽小计列恒值无效则不配）
+    # column_range：columns 未映射列（排除序号/锚点/备注/IGNORED/模板 ignore_headers）
+    # 即费用列；锚点列取 fees.anchors 显式声明（如 秋怡小计列；军羽小计列恒值无效则不配）
     mapped = {c for cols in field_cols.values() for c in cols}
+    # 模板声明的非费目列（fees.ignore_headers，2026-09-03）：新式样费用区插入的
+    # 业务列（如「箱量」）不参与自动发现——此前手机号列被误收为其它费致脏费用
+    ignore_set = {
+        _normalize_header(str(h))
+        for h in (fees_cfg.get("ignore_headers") or [])
+        if str(h).strip()
+    }
     for col, name in enumerate(names, start=1):
         if col in mapped or not name:
             continue
@@ -605,6 +612,8 @@ def _discover_fee_columns(
             continue  # 合计/小计等锚点列非费目（锚点只取 fees.anchors 显式声明）
         if _is_note_column(name) or name in IGNORED_HEADERS:
             continue
+        if _normalize_header(name) in ignore_set:
+            continue  # 模板显式忽略列（非费目）
         fee_cols[col] = ("", name)
     anchors_cfg = fees_cfg.get("anchors") or {}
     for section, anchor_names in anchors_cfg.items():

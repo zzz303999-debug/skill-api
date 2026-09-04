@@ -18,6 +18,7 @@ import app.orders.bill.master_data as md_module
 import app.orders.bill.master_data_client as md_client_module
 import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
+from app.orders.bill.imported_registry import owner_key
 from app.orders.bill.master_data import (
     KIND_CLIENT,
     KIND_DRIVER,
@@ -32,6 +33,10 @@ from app.orders.bill.master_data_store import get_master_data_store
 from helpers import FakeResponse
 
 pytestmark = pytest.mark.asyncio
+
+# 本文件用例统一 sk（建档维度 owner = owner_key(sk)，2026-09 owner 化）
+_TEST_SK = "sk-token"
+_TEST_OWNER = owner_key(_TEST_SK)
 
 # 建档端点测试值（避开真实域名；与 test_master_data.TEST_ENDPOINTS 同口径）
 TEST_ENDPOINTS = {
@@ -162,7 +167,7 @@ class TestClientCreate:
         assert form["cg_id"] == "4" and form["cg_name"] == "同行"
         assert form["sys_type"] == "1" and form["su_id"] == "15478"
         assert form["data[0][n]"] == "张经理" and form["data[0][p]"] == "13900000000"
-        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["archive_id"] == "c-1001"
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"), _TEST_OWNER)["archive_id"] == "c-1001"
 
     async def test_success_without_contact_omits_contact_keys(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
@@ -182,7 +187,7 @@ class TestClientCreate:
         failed = [f for f in report["failed"] if f["kind"] == KIND_CLIENT]
         assert failed and "HTTP error: 500" in failed[0]["reason"]
         assert report["archived"] == []
-        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦")).get("archive_id") is None  # 不登记
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"), _TEST_OWNER).get("archive_id") is None  # 不登记
 
     async def test_failure_non_json(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
@@ -213,7 +218,7 @@ class TestClientCreate:
         assert report["failed"] == []
         ext = [e for e in report["exists_external"] if e["kind"] == KIND_CLIENT]
         assert ext and "已存在" in ext[0]["message"]
-        rec = get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))
+        rec = get_master_data_store().get(KIND_CLIENT, client_key("锦煦"), _TEST_OWNER)
         assert rec and rec.get("exists_external") is True and rec.get("archive_id") is None
 
     async def test_duplicate_branch_logging_extra_key_safe(
@@ -271,6 +276,62 @@ class TestFactoryCreate:
         assert form["sys_type"] == "1"
         # 依赖序：客户请求先于工厂请求
         assert fake_http.captured.index(factory_req) > 0
+
+    async def test_factory_archives_with_client_exists_external(
+        self, md_config, fake_http, real_archives
+    ):
+        """客户 TMS 已存在（exists_external、无本地 id）→ 工厂不再本地拦截：
+        client_id 发空串照常尝试（2026-09-03 修复）；TMS 接受 → 建档成功。"""
+        md_config(_md_cfg(threshold=1))
+        fake_http(
+            lambda url, **kw: FakeResponse(
+                {"code": "204", "msg": "客户名已存在,无法继续添加。"}
+                if "Client" in url
+                else _success(KIND_FACTORY)
+            )
+        )
+        # 仅客户+工厂候选（无司机，避免车辆/司机链干扰断言）
+        report = await run_master_data_async(
+            [_make_order(driver=None)], create_order=True, sk="sk-token"
+        )
+        assert report["failed"] == []
+        assert any(a["kind"] == KIND_FACTORY for a in report["archived"])
+        factory_req = next(r for r in fake_http.captured if "Factory" in r["url"])
+        # 已存在客户无本地 id → client_id 省略键（非必填空值省略，与 payload 语义一致）
+        assert "client_id" not in factory_req["data"]
+        assert factory_req["data"]["client_name"] == "锦煦"
+        rec = get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"), _TEST_OWNER)
+        assert rec and rec.get("archive_id") == "f-1002"
+
+    async def test_factory_rejected_without_client_id_marks_skip_once(
+        self, md_config, fake_http, real_archives
+    ):
+        """空 client_id 被 TMS 拒（非「已存在」）→ skip_archive 终态：本批记一次失败，
+        下批不再重发注定被拒的请求（防每批骚扰）。"""
+        md_config(_md_cfg(threshold=1))
+
+        def responder(url, **kw):
+            if "Client" in url:
+                return FakeResponse({"code": "204", "msg": "客户名已存在,无法继续添加。"})
+            return FakeResponse({"code": "500", "msg": "缺少客户信息"})  # 工厂拒
+
+        fake_http(responder)
+        report = await run_master_data_async(
+            [_make_order(driver=None)], create_order=True, sk="sk-token"
+        )
+        fac_failed = [f for f in report["failed"] if f["kind"] == KIND_FACTORY]
+        assert fac_failed  # 本次尝试失败进报告
+        rec = get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"), _TEST_OWNER)
+        assert rec and rec.get("skip_archive") is True  # 终态：不再重试
+        n_factory_requests = sum(1 for r in fake_http.captured if "Factory" in r["url"])
+        assert n_factory_requests == 1
+        # 下批：skip 终态 → 不再发工厂请求
+        report2 = await run_master_data_async(
+            [_make_order(driver=None)], create_order=True, sk="sk-token"
+        )
+        n2 = sum(1 for r in fake_http.captured if "Factory" in r["url"])
+        assert n2 == n_factory_requests
+        assert any(f["kind"] == KIND_FACTORY for f in report2["failed"]) is False
 
 
 class TestTruckCreate:
@@ -361,8 +422,8 @@ class TestParallelIsolation:
         assert any(f["kind"] == KIND_FACTORY and "所属客户未建档" in f["reason"] for f in report["failed"])
         assert [a["kind"] for a in report["archived"]] == [KIND_TRUCK, KIND_DRIVER]
         # 计数保留（下批重试语义）
-        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"))["count"] == 1
-        assert get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"))["count"] == 1
+        assert get_master_data_store().get(KIND_CLIENT, client_key("锦煦"), _TEST_OWNER)["count"] == 1
+        assert get_master_data_store().get(KIND_FACTORY, factory_key("上海仓", "浦东新区"), _TEST_OWNER)["count"] == 1
 
     async def test_driver_failure_does_not_break_others(self, md_config, fake_http, real_archives):
         md_config(_md_cfg(threshold=1))
@@ -375,7 +436,7 @@ class TestParallelIsolation:
             KIND_TRUCK,
         ]
         # 司机计数保留 → 下批重试
-        assert get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))["count"] == 1
+        assert get_master_data_store().get(KIND_DRIVER, driver_key("王师傅", "沪A12345"), _TEST_OWNER)["count"] == 1
 
 
 class TestSkPassthroughAllKinds:
@@ -462,4 +523,4 @@ class TestServiceIntegration:
         assert any(f["kind"] == KIND_CLIENT for f in md["failed"])
         assert md["archived"] == []  # 全部建档失败
         # 计数照常累计（下批重试语义）
-        assert get_master_data_store().get(KIND_CLIENT, client_key("客户甲"))["count"] == 1
+        assert get_master_data_store().get(KIND_CLIENT, client_key("客户甲"), _TEST_OWNER)["count"] == 1
