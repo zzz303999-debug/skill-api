@@ -1,6 +1,7 @@
 """竞品账单导入（Excel 对账单 → 业务订单）子包。"""
 
-from .aggregator import AggregationOutput, group_canonical, group_orders
+from .aggregator import AggregationOutput, group_orders
+from .canonical_aggregator import group_canonical
 from .parser import ParseOutput, parse_bill, parse_xls, parse_xlsx
 from .schema import (
     CANONICAL_REQUIRED,

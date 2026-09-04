@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.orders.bill import parse_bill
-from app.orders.bill.aggregator import group_canonical
+from app.orders.bill.canonical_aggregator import group_canonical
 from helpers import build_bill_bytes
 
 FAMILIES_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill" / "families"

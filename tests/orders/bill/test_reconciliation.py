@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.orders.bill import group_orders, parse_bill
-from app.orders.bill.aggregator import _parse_cn_upper_amount
+from app.orders.bill.cn_amount import parse_cn_upper_amount
 from helpers import build_bill_bytes
 
 # 合计行缓存值自解释文案（fees 明细留痕，不参与判定）
@@ -14,16 +14,16 @@ class TestCnUpperAmount:
     """中文大写金额解析单测（合计大写行第二锚点）。"""
 
     def test_cases(self):
-        assert _parse_cn_upper_amount("壹佰壹拾壹万贰仟肆佰零伍元整") == 1112405.0
-        assert _parse_cn_upper_amount("壹元贰角叁分") == 1.23
-        assert _parse_cn_upper_amount("伍角") == 0.5
-        assert _parse_cn_upper_amount("叁万元整") == 30000.0
-        assert _parse_cn_upper_amount("贰拾万零叁佰元整") == 200300.0
+        assert parse_cn_upper_amount("壹佰壹拾壹万贰仟肆佰零伍元整") == 1112405.0
+        assert parse_cn_upper_amount("壹元贰角叁分") == 1.23
+        assert parse_cn_upper_amount("伍角") == 0.5
+        assert parse_cn_upper_amount("叁万元整") == 30000.0
+        assert parse_cn_upper_amount("贰拾万零叁佰元整") == 200300.0
 
     def test_non_amount_returns_none(self):
-        assert _parse_cn_upper_amount("非大写文本 abc 100") is None
-        assert _parse_cn_upper_amount(None) is None
-        assert _parse_cn_upper_amount("人民币100元") is None  # 阿拉伯数字非大写段
+        assert parse_cn_upper_amount("非大写文本 abc 100") is None
+        assert parse_cn_upper_amount(None) is None
+        assert parse_cn_upper_amount("人民币100元") is None  # 阿拉伯数字非大写段
 
 
 def reconcile(path) -> dict:

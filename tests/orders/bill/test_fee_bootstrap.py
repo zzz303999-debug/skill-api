@@ -577,7 +577,7 @@ class TestServicePipeline:
         price_cfg(_fee_map_yaml(BS_CFG))
         md_endpoint()
         fake_create()
-        from app.orders.bill.aggregator import group_canonical
+        from app.orders.bill.canonical_aggregator import group_canonical
         from app.orders.bill.payload import build_order_payload
 
         rows = [

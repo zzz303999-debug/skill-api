@@ -130,7 +130,7 @@ class TestAiMapping:
         assert output.new_template["columns"]["bl_no"] == ["海运提单号"]
         assert output.new_template["normalizers"]["box_type_qty"] == "box_parse"
         # 归集：box 同型累加
-        from app.orders.bill.aggregator import group_canonical
+        from app.orders.bill.canonical_aggregator import group_canonical
 
         orders = group_canonical(
             output.canonical_rows, output.new_template, output.period

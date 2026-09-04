@@ -29,8 +29,9 @@ from pathlib import Path
 from app.core.errors import BadRequestError, LLMError, ParseError
 from app.llm import achat_json
 
-from .aggregator import group_canonical, group_orders
+from .aggregator import group_orders
 from .ai_header import build_llm_request, validate_ai_result
+from .canonical_aggregator import group_canonical
 from .client import create_canonical_orders_async, create_orders_async
 from .fee_bootstrap import run_fee_bootstrap_async
 from .fee_price_map import apply_price_map
