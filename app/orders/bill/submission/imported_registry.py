@@ -40,8 +40,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
 from app.core.logging_conf import get_logger
+
+# P6 起注册表公共工具单一实现（re-export 保持消费方 import 路径不变）
+from ...registry_common import normalize  # noqa: F401
 
 log = get_logger(__name__)
 
@@ -58,12 +60,6 @@ def owner_key(sk: str) -> str:
     """sk → 去重维度键：sha256 前 16 hex（注册表不落盘 token 原文）。"""
     return hashlib.sha256((sk or "").encode("utf-8")).hexdigest()[:16]
 
-
-def normalize(bl_no: str | None) -> str | None:
-    """去重键规范化：strip 首尾空白 + upper 统一大小写；空值原样返回。"""
-    if not bl_no:
-        return bl_no
-    return str(bl_no).strip().upper()
 
 
 # 组合键分隔符：真实提单号/箱号字符集（字母数字）不含该字符，解析无歧义；
@@ -147,13 +143,9 @@ class ImportedOrderRegistry:
 
     def _save(self) -> None:
         """原子写：临时文件 + replace（进程崩溃不损坏主文件）。"""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        from ...registry_common import atomic_write_json
+
+        atomic_write_json(self.path, self._data)
 
     def reload(self) -> None:
         """重新从磁盘加载（测试/多进程热加载用）。"""
@@ -240,7 +232,9 @@ async def alock_for(
 
 def store_path() -> Path:
     """注册表文件路径：{storage_dir}/imported_orders.json（测试可 monkeypatch）。"""
-    return settings.storage_dir / "imported_orders.json"
+    from ...registry_common import registry_storage_path
+
+    return registry_storage_path("imported_orders.json")
 
 
 # 进程内单例（惰性；测试用 reload_registry 重置路径与内存）
