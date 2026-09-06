@@ -17,17 +17,10 @@ _SheetView 统一两个引擎的单元格访问（合并单元格填充、值保
 from __future__ import annotations
 
 import re
-import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-import xlrd
-from openpyxl import load_workbook
-from openpyxl.utils.exceptions import InvalidFileException
-from openpyxl.worksheet.worksheet import Worksheet
-
-from app.core.errors import BadRequestError, ConvertError
+from app.core.errors import BadRequestError
 
 from ..fees.fee_name_map import canonicalize_fee, is_new_fee_schema
 from ..schema import (
@@ -40,7 +33,6 @@ from ..schema import (
     BillRow,
 )
 from . import template_store
-from .ai_header import format_header_zone
 from .columns import (
     business_end_col,
     discover_fee_columns,
@@ -49,6 +41,7 @@ from .columns import (
 )
 from .legacy_template import compute_legacy_fingerprint, load_template
 from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
+from .sheet_view import _SheetView  # noqa: F401（read_data_rows 等签名引用）
 
 # 支持的扩展名 → 期望的内容格式（与 _detect_format 的返回值对应）
 SUPPORTED_EXTS: dict[str, str] = {".xls": "xls", ".xlsx": "xlsx", ".xlsm": "xlsx"}
@@ -61,34 +54,6 @@ _XLSX_MAGIC = b"PK\x03\x04"
 _XLS_MAGIC = b"\xd0\xcf\x11\xe0"
 
 
-class _SheetView:
-    """统一工作表视图：1-based 行列访问，合并单元格按需填充左上角值。
-
-    表头/抬头区用 merged_cell（合并值填充），数据区用 cell（原生值，
-    合并区非左上角视为空——真实账单尾部「合计:」行为整行合并）。
-    """
-
-    def __init__(
-        self,
-        nrows: int,
-        ncols: int,
-        merged_map: dict[tuple[int, int], object],
-        get_cell,
-    ):
-        self.nrows = nrows
-        self.ncols = ncols
-        self._merged = merged_map
-        self._get_cell = get_cell
-
-    def cell(self, row: int, col: int) -> object:
-        """原生单元格值（不填充合并区）。"""
-        return self._get_cell(row, col)
-
-    def merged_cell(self, row: int, col: int) -> object:
-        """单元格值：合并区域内的非左上角坐标返回左上角值。"""
-        if (row, col) in self._merged:
-            return self._merged[(row, col)]
-        return self._get_cell(row, col)
 
 
 @dataclass
@@ -136,40 +101,10 @@ def _header_text(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
-def _openpyxl_merged_map(ws: Worksheet) -> dict[tuple[int, int], object]:
-    """openpyxl 合并单元格：左上角值映射到区域内所有坐标（1-based）。"""
-    values: dict[tuple[int, int], object] = {}
-    for merged in ws.merged_cells.ranges:
-        top_left = ws.cell(merged.min_row, merged.min_col).value
-        for row in range(merged.min_row, merged.max_row + 1):
-            for col in range(merged.min_col, merged.max_col + 1):
-                values[(row, col)] = top_left
-    return values
 
 
-def _xls_merged_map(sheet: xlrd.sheet.Sheet) -> dict[tuple[int, int], object]:
-    """xlrd 合并单元格：merged_cells 为 (rlo, rhi, clo, chi) 0-based 排他边界。"""
-    values: dict[tuple[int, int], object] = {}
-    for rlo, rhi, clo, chi in sheet.merged_cells:
-        top_left = _xls_cell_value(sheet, rlo, clo)
-        for row in range(rlo + 1, rhi + 1):
-            for col in range(clo + 1, chi + 1):
-                values[(row, col)] = top_left
-    return values
 
 
-def _xls_cell_value(sheet: xlrd.sheet.Sheet, row0: int, col0: int) -> object:
-    """xlrd 单元格 → 与 openpyxl 等价的 python 对象：number→float（保留浮点尾巴）、
-    date→datetime、text→str、其余（空/错误/布尔）→ None。"""
-    ctype = sheet.cell_type(row0, col0)
-    value = sheet.cell_value(row0, col0)
-    if ctype == xlrd.XL_CELL_NUMBER:
-        return float(value)
-    if ctype == xlrd.XL_CELL_DATE:
-        return xlrd.xldate_as_datetime(value, sheet.book.datemode)
-    if ctype == xlrd.XL_CELL_TEXT:
-        return value
-    return None
 
 
 def find_header_row(view: _SheetView) -> int:
@@ -796,6 +731,14 @@ def _parse_with_ai_result(
     return out
 
 
+def _parse_exact(view: _SheetView, engine: str) -> ParseOutput:
+    """现状精确匹配路径（LLM 不可用回退）：找不到表头照旧 400，无模板信息。"""
+    header_row = find_header_row(view)
+    rows, unmatched = read_data_rows(view, header_row)
+    period = extract_bill_period(view, header_row)
+    return ParseOutput(rows=rows, period=period, engine=engine, unmatched_headers=unmatched)
+
+
 def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutput:
     """统一解析核心（纯 CPU，parse_bill 入口）：L1/L2 模板识别 → 未命中
     精确匹配回退（找不到表头照旧 400）。
@@ -809,192 +752,29 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
     return _parse_exact(view, engine)
 
 
-def _parse_exact(view: _SheetView, engine: str) -> ParseOutput:
-    """现状精确匹配路径（LLM 不可用回退）：找不到表头照旧 400，无模板信息。"""
-    header_row = find_header_row(view)
-    rows, unmatched = read_data_rows(view, header_row)
-    period = extract_bill_period(view, header_row)
-    return ParseOutput(rows=rows, period=period, engine=engine, unmatched_headers=unmatched)
 
 
-def _open_view(path: str | Path, engine: str):
-    """打开 workbook 并构造统一视图：返回 (view, 引擎名, 文件名, 资源释放回调)。
-
-    资源释放责任在调用方：同步路径（_parse_with_engine）finally 即时释放；
-    两段式（open_and_identify）经 AiHeaderNeeded 移交编排层统一释放。
-    文件损坏/无法打开抛 ConvertError（与 parse_bill 同口径）。
-    """
-    if engine == "xls":
-        try:
-            book = xlrd.open_workbook(path, formatting_info=True)
-        except (xlrd.XLRDError, xlrd.compdoc.CompDocError, OSError) as exc:
-            raise ConvertError(
-                "failed to open workbook: file is corrupted, encrypted, or not a valid xls",
-                details={"path": str(path)},
-            ) from exc
-        sheet = book.sheet_by_index(0)
-        view = _SheetView(
-            sheet.nrows,
-            sheet.ncols,
-            _xls_merged_map(sheet),
-            lambda row, col: _xls_cell_value(sheet, row - 1, col - 1),
-        )
-        return view, "xlrd", Path(path).name, book.release_resources
-    try:
-        wb = load_workbook(path, data_only=True)
-    except (InvalidFileException, zipfile.BadZipFile, KeyError) as exc:
-        raise ConvertError(
-            "failed to open workbook: file is corrupted, encrypted, or not a valid xlsx",
-            details={"path": str(path)},
-        ) from exc
-    ws = wb.active
-    view = _SheetView(
-        ws.max_row,
-        ws.max_column,
-        _openpyxl_merged_map(ws),
-        lambda row, col: ws.cell(row, col).value,
-    )
-    return view, "openpyxl", Path(path).name, wb.close
 
 
-def _parse_with_engine(path: str | Path, engine: str) -> ParseOutput:
-    """按指定引擎打开并解析（同步完整路径）：返回完整 ParseOutput（含未识别列清单）。
-
-    文件损坏/无法打开抛 ConvertError（422 convert_error）；
-    结算区间识别不到时返回空 BillPeriod（不报错）。
-    """
-    view, engine_name, filename, closer = _open_view(path, engine)
-    try:
-        return _parse_sheet(view, engine_name, filename)
-    finally:
-        closer()
 
 
-def parse_xlsx(path: str | Path) -> tuple[list[BillRow], BillPeriod]:
-    """读取 .xlsx/.xlsm 竞品账单（openpyxl）：便捷包装，返回 (rows, period)。
-
-    未识别列清单等完整结果请用 parse_bill；找不到合法表头抛 BadRequestError。
-    """
-    out = _parse_with_engine(path, "xlsx")
-    return out.rows, out.period
 
 
-def parse_xls(path: str | Path) -> tuple[list[BillRow], BillPeriod]:
-    """读取 .xls 竞品账单（xlrd）：便捷包装，返回 (rows, period)。
-
-    未识别列清单等完整结果请用 parse_bill；找不到合法表头抛 BadRequestError。
-    """
-    out = _parse_with_engine(path, "xls")
-    return out.rows, out.period
 
 
-def _detect_format(head: bytes) -> str:
-    """按文件头 magic bytes 识别内容格式：'xlsx' / 'xls'；无法识别抛 ConvertError。"""
-    if head.startswith(_XLSX_MAGIC):
-        return "xlsx"
-    if head.startswith(_XLS_MAGIC):
-        return "xls"
-    raise ConvertError(
-        "cannot recognize file content: not a valid xlsx/xls file",
-        details={"magic": head[:8].hex()},
-    )
 
 
-def _detect_format_checked(path: str | Path) -> str:
-    """扩展名与内容格式校验（前置闸门）：返回内容格式（'xlsx' / 'xls'）。
-
-    扩展名不受支持 → BadRequestError（400 bad_request）；扩展名与内容格式
-    不符 → BadRequestError code=file_format_mismatch（400）。同步 parse_bill
-    与两段式 open_and_identify 共用，保证两入口前置校验一致。
-    """
-    ext = Path(path).suffix.lower()
-    if ext not in SUPPORTED_EXTS:
-        raise BadRequestError(
-            f"unsupported extension: {ext}",
-            details={"supported": list(SUPPORTED_EXTS)},
-        )
-    with open(path, "rb") as f:
-        head = f.read(8)
-    engine = _detect_format(head)
-    if SUPPORTED_EXTS[ext] != engine:
-        raise BadRequestError(
-            "file extension does not match file content",
-            code="file_format_mismatch",
-            details={"extension": ext, "detected_format": engine},
-        )
-    return engine
 
 
-def parse_bill(path: str | Path) -> ParseOutput:
-    """按内容格式分发解析（同步完整路径）：返回 ParseOutput（rows / period / engine / unmatched_headers）。
-
-    生产两段式编排走 open_and_identify 阶段 API（LLM 网络段真异步）；
-    本函数为纯 CPU 语义基准（tests 直调依赖），不含 LLM。
-    """
-    return _parse_with_engine(path, _detect_format_checked(path))
 
 
 # ---- 两段式阶段 API（生产编排：service._parse_stage_async；CPU 段均经 ----
 # ---- to_thread 执行，LLM 网络段在编排层真异步）--------------------
 
 
-class AiHeaderNeeded:
-    """L3 两段式信号：open_and_identify 未命中模板库时返回，待编排层
-    完成 LLM 表头映射后二次进段。
-
-    持有跨段资源（view 与 workbook 释放回调；同一时间仅单线程使用 view，
-    无并发访问）；资源责任由第一段移交给调用方，完成后须调 close()。
-    """
-
-    __slots__ = ("view", "engine", "filename", "zone_lines", "_closer", "_closed")
-
-    def __init__(self, view, engine: str, filename: str, zone_lines, closer) -> None:
-        self.view = view
-        self.engine = engine
-        self.filename = filename
-        self.zone_lines = zone_lines
-        self._closer = closer
-        self._closed = False
-
-    def close(self) -> None:
-        """释放 workbook 资源（幂等）。"""
-        if not self._closed:
-            self._closed = True
-            self._closer()
 
 
-def open_and_identify(path: str | Path) -> ParseOutput | AiHeaderNeeded:
-    """阶段 1（同步 CPU，编排层 to_thread 执行）：打开 workbook → L1/L2 指纹识别解析。
-
-    命中模板库 → ParseOutput（workbook 资源已释放，与 parse_bill 同口径，
-    常见路径零额外开销）；未命中 → AiHeaderNeeded（view 跨段传递，资源
-    责任移交调用方）。扩展名/内容格式前置校验与 parse_bill 完全一致。
-    """
-    engine = _detect_format_checked(path)
-    view, engine_name, filename, closer = _open_view(path, engine)
-    out = _match_template_and_parse(view, engine_name, filename)
-    if out is not None:
-        closer()
-        return out
-    return AiHeaderNeeded(
-        view=view,
-        engine=engine_name,
-        filename=filename,
-        zone_lines=format_header_zone(view),
-        closer=closer,
-    )
 
 
-def parse_ai_header(needed: AiHeaderNeeded, ai) -> ParseOutput:
-    """阶段 2（同步 CPU，编排层 to_thread 执行）：AI 映射结果 → 候选模板
-    → 配置驱动解析（与同步路径共用 _parse_with_ai_result）。
-
-    workbook 资源不在本函数释放（异常路径也要释放）——由编排层 finally
-    统一 close。"""
-    return _parse_with_ai_result(needed.view, needed.engine, needed.filename, ai)
 
 
-def parse_exact_fallback(needed: AiHeaderNeeded) -> ParseOutput:
-    """LLM 不可用/响应非法回退（同步 CPU，编排层 to_thread 执行）：
-    精确匹配（找不到表头照旧 400），与同步路径回退分支同实现。"""
-    return _parse_exact(needed.view, needed.engine)

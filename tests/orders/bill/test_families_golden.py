@@ -126,7 +126,7 @@ class TestFingerprintMatchesRealHeader:
     def test_real_header_fingerprint(self, family, fname, template_id):
         import xlrd
 
-        from app.orders.bill.parsing.parser import _SheetView, _xls_cell_value, _xls_merged_map
+        from app.orders.bill.parsing.sheet_view import _SheetView, _xls_cell_value, _xls_merged_map
 
         path = _family_path(family, fname)
         if not path.exists():

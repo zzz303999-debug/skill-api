@@ -2,7 +2,8 @@
 
 from .aggregation.aggregator import AggregationOutput, group_orders
 from .aggregation.canonical_aggregator import group_canonical, to_canonical
-from .parsing.parser import ParseOutput, parse_bill, parse_xls, parse_xlsx
+from .parsing.opener import parse_bill, parse_xls, parse_xlsx
+from .parsing.parser import ParseOutput
 from .schema import (
     CANONICAL_REQUIRED,
     HEADER_ALIASES,

@@ -14,7 +14,8 @@ from openpyxl.utils import get_column_letter
 
 import app.orders.bill.service as service_module
 from app.core.errors import BadRequestError, LLMError
-from app.orders.bill.parsing.parser import AiHeaderNeeded, ParseOutput, open_and_identify
+from app.orders.bill.parsing.opener import AiHeaderNeeded, open_and_identify
+from app.orders.bill.parsing.parser import ParseOutput
 from helpers import build_bill_bytes
 
 pytestmark = pytest.mark.asyncio
