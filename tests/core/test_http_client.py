@@ -4,7 +4,7 @@ HTTP 封装日志语义（同步版已退役）由 tests/test_async_clients.py �
 
 from __future__ import annotations
 
-from app.orders.http_client import pretty_json, unpack_json
+from app.core.http_client import pretty_json, unpack_json
 
 
 def test_unpack_json_returns_object():

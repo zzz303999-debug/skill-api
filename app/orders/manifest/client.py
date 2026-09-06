@@ -15,9 +15,8 @@ from __future__ import annotations
 import httpx
 
 from app.core.config import settings
+from app.core.http_client import post_json_async
 from app.core.logging_conf import get_logger
-
-from ..http_client import post_json_async
 
 log = get_logger(__name__)
 

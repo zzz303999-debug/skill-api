@@ -12,8 +12,8 @@ import json
 
 from fastapi.testclient import TestClient
 
+import app.core.http_client as http_client_module
 import app.orders.bill.submission.imported_registry as imported_registry
-import app.orders.http_client as http_client_module
 from app.main import app
 from app.orders.bill.submission.imported_registry import owner_key
 from helpers import FakeResponse, build_bill_bytes

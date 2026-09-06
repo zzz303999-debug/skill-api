@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+import app.core.http_client as http_client_mod
 import app.orders.bill.master_data.client as md_client
 import app.orders.bill.submission.client as bill_client
-import app.orders.http_client as http_client_mod
 from app.core.config import settings
 from app.llm import client as llm_client
 from app.mineru import client as mineru_mod

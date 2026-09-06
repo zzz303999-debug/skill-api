@@ -15,11 +15,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+import app.core.http_client as http_client_module
 import app.orders.bill.fees.fee_bootstrap as fb_module
 import app.orders.bill.fees.fee_price_map as fp_module
 import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.master_data.config as md_cfg_module
-import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem
 from app.orders.bill.fees.fee_bootstrap import (
     bootstrap_endpoint,

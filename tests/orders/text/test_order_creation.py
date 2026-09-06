@@ -5,7 +5,7 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
-import app.orders.http_client as http_client_module
+import app.core.http_client as http_client_module
 from app.core.config import settings
 from app.main import app
 from app.orders.text.client import publish_create_order_async

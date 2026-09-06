@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+import app.core.http_client as http_client_module
 import app.orders.bill.service as service_module
-import app.orders.http_client as http_client_module
 from app.core.config import settings
 from app.core.errors import ERROR_CODE_DESCRIPTIONS
 from app.main import app

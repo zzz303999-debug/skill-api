@@ -21,10 +21,10 @@ import pytest
 import yaml
 from openpyxl import Workbook
 
+import app.core.http_client as http_client_module
 import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.bill.parsing.template_store as ts_module
-import app.orders.http_client as http_client_module
 from app.orders.bill import build_result_async, group_canonical, parse_bill
 from app.orders.bill.fees.fee_bootstrap import run_fee_bootstrap_async
 from app.orders.bill.fees.fee_price_map import apply_price_map

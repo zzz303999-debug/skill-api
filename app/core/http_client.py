@@ -1,8 +1,8 @@
 """orders 域下游 HTTP 共享底座：请求/响应/异常全量结构化日志，便于排查下游错误。
 
-定位：仅供 orders 域（订单/账单/舱单）的 TMS 下游调用使用（llm/mineru 各自用
-SDK，不经本模块）；若未来出现第二个业务域需要同款日志语义，再提升至共享层
-（app/infra/ 或同级），避免跨域 import orders 内部模块。
+定位：横切共享层（2026-09 P2 起，原 orders/http_client.py 上提）——供订单
+（text）/账单（bill）/舱单（manifest）等业务域的 TMS 下游调用统一使用；
+llm/mineru 各自用 SDK，不经本模块。
 
 覆盖本项目全部业务下游 POST（下单 publishCreateOrder / AddWork、建档、舱单
 addBill），调用方无需自行记录请求与响应——每条调用产出三条日志：

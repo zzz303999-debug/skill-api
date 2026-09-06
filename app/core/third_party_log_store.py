@@ -1,6 +1,6 @@
 """日志存储服务：下游第三方调用日志（按天 JSONL 持久化 + 内存环形缓冲查询）。
 
-分层定位（docs/架构说明.md §0）：存储服务独立于业务域——由 orders/http_client.py
+分层定位（docs/架构说明.md §0）：存储服务独立于业务域——由 core/http_client.py
 写入、由 api/routes/meta.py 读取；本模块不含 HTTP 逻辑。
 
 与请求访问日志（access_log）同模式但独立文件，互不污染：

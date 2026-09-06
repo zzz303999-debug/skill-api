@@ -6,7 +6,7 @@ import hashlib
 
 import pytest
 
-import app.orders.http_client as http_client_module
+import app.core.http_client as http_client_module
 from app.core.errors import BadRequestError, ConvertError
 from app.orders.bill import BillParseResult, build_result_async
 from helpers import (

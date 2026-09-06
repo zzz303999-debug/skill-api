@@ -12,10 +12,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+import app.core.http_client as http_client_module
 import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.bill.master_data.orchestrator as md_module
-import app.orders.http_client as http_client_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.master_data.orchestrator import (
     KIND_CLIENT,

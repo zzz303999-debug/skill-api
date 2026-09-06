@@ -15,8 +15,8 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
+import app.core.http_client as http_client_module
 import app.orders.bill.submission.client as client_module
-import app.orders.http_client as http_client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
 from app.orders.bill.submission.client import (
     add_work_async,

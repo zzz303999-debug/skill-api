@@ -1,5 +1,5 @@
 """orders 域门面：自由文本下单（text）/ 附件文档抽取（document）/ 账单（bill）/
-舱单（manifest）四个子域；下游 HTTP 共享底座为 orders.http_client。
+舱单（manifest）四个子域；下游 HTTP 共享底座为 core.http_client（P2 起上提横切层）。
 
 分层定位见 docs/架构说明.md §0——跨域只经门面访问，子域私有符号不出域。
 """

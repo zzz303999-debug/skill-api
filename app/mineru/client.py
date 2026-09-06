@@ -270,7 +270,7 @@ def _quality_result(markdown: str, content_list: list[dict[str, Any]]) -> MinerU
     )
 
 
-# ---- 共享 AsyncClient 单例（2026-09 收尾计划 §8 拍板，对齐 orders/http_client 模式）----
+# ---- 共享 AsyncClient 单例（2026-09 收尾计划 §8 拍板，对齐 core/http_client 模式）----
 # 连接池复用（页级 OCR 并行时收益最大）；timeout 在构造时固定（MinerU 全端点同超时）。
 # 跨 loop 检测重建：AsyncClient 连接池绑定事件循环，pytest-asyncio 每测试新 loop
 # 的场景检测到 loop 变化时重建，生产单 loop 常驻不受影响。

@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import pytest
 
-import app.orders.http_client as http_client_module
+import app.core.http_client as http_client_module
 from app.orders.bill.schema import BoxGroup, CanonicalOrder, FeeItem
 from app.orders.bill.submission.client import create_canonical_orders_async
 from app.orders.bill.submission.payload import build_order_payload

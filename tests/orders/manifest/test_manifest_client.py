@@ -6,7 +6,7 @@ import httpx
 import pytest
 from manifest_helpers import FakeResponse
 
-import app.orders.http_client as http_client_module
+import app.core.http_client as http_client_module
 import app.orders.manifest.client as client_module
 
 pytestmark = pytest.mark.asyncio
