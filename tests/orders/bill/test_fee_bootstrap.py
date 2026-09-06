@@ -29,6 +29,7 @@ from app.orders.bill.fees.fee_bootstrap import (
 from app.orders.bill.fees.fee_price_map import apply_price_map
 from app.orders.bill.fees.fee_registry import get_fee_registry
 from app.orders.bill.master_data.orchestrator import KIND_PRICE
+from app.orders.bill.schema import BillOrder
 from helpers import inject_price_map
 
 pytestmark = pytest.mark.asyncio
@@ -618,27 +619,28 @@ class TestServicePipeline:
 
 
 class TestGoldenBootstrap:
-    """golden 集成：秋怡家族全量——preview 零副作用（planned 清单）/ create 真实
-    建档后 dropped 归零（1901 → 0，mock 建档固定 id）。
+    """golden 集成：志驿 2020 全量——preview 零副作用（planned 清单）/ create 真实
+    建档后 dropped 归零（mock 建档固定 id）。
 
+    用志驿 2020 样本（无缺提单号行、无非法箱型——2026-09-04 提单号缺失文件级
+    连坐拍板后，自举/建档集成改用干净样本；缺行家族样本（秋怡 2017 等）已整批
+    拒绝语义，不承载自举场景）。
     使用仓库真实配置（test 环境 enabled=true + 全量码映射）；建档调用由 conftest
-    全局 mock（零网络，成功返回递增 id）；create 用例另 mock 下单链路（零网络）。
+    全局 mock（零网络，成功返回递增 id）；create 用例另 mock 下单链路（零网络） 。
     """
 
     @pytest.mark.skipif(
-        not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
+        not (FAMILIES_DIR / "zhiyi").exists(), reason="样本未入库（表格文件不入 库）"
     )
-    async def test_qiuyi_preview_planned_only(self, monkeypatch):
+    async def test_zhiyi_preview_planned_only(self, monkeypatch):
         """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。
 
-        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
-        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
         注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
-        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
+        path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2017 样本缺失")
+            pytest.skip("志驿 2020 样本缺失")
         from app.orders.bill import build_result_async
 
         result = await build_result_async(filename=path.name, file_bytes=path.read_bytes())
@@ -651,19 +653,18 @@ class TestGoldenBootstrap:
         assert get_fee_registry().snapshot() == {}  # 零 registry 写入
 
     @pytest.mark.skipif(
-        not (FAMILIES_DIR / "qiuyi").exists(), reason="样本未入库（表格文件不入库）"
+        not (FAMILIES_DIR / "zhiyi").exists(), reason="样本未入库（表格文件不入 库）"
     )
-    async def test_qiuyi_create_dropped_to_zero(self, monkeypatch):
+    async def test_zhiyi_create_dropped_to_zero(self, monkeypatch):
         """create（真实导入）：建档成功 → dropped 归零 + 费用全部回填。
 
-        用 2017 样本（箱型全合法；2019/2020 含 20HQ 非法箱型会被整批拒，
-        2026-08-26 用户确认 20HQ 非法后自举测试改用干净样本）。
-        注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
+        志驿 2020 无缺提单号行（2026-09-04 连坐口径下全批可录）；注入旧版 null
+        费目（2026-09-01 真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
-        path = FAMILIES_DIR / "qiuyi" / "2017-01到2017-12上海秋怡应收对账单.xls"
+        path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
         if not path.exists():
-            pytest.skip("秋怡 2017 样本缺失")
+            pytest.skip("志驿 2020 样本缺失")
         from helpers import FakeResponse
 
         async def fake_post(url, **_kwargs):
@@ -681,10 +682,9 @@ class TestGoldenBootstrap:
         bootstrap = reports.get("fee_bootstrap")
         assert bootstrap is not None and bootstrap["mode"] == "create"
         assert bootstrap["failed"] == []
-        assert bootstrap["created"]  # 实测 14 码：other/yangshan/pre_inport/drop_box 等
-        assert reports.get("price_null_dropped") == []  # 1901 条降级 → 0
-        # 全量费用回填：非 excluded 项 price_id 均非空（当批正常录入的单）；
-        # 空提单号行标记 missing_bl_no 不录入，不参与自举/回填（一行一票口径）
+        assert bootstrap["created"]  # 志驿 mapping 缺码（other/waiting/yangshan 等）自举建档
+        assert reports.get("price_null_dropped") == []  # 注入 null 费目降级 → 0
+        # 全量费用回填：非 excluded 项 price_id 均非空；样本无缺提单号行（全批可录）
         null_prices = [
             (o.bl_no, f.code)
             for o in result.canonical_orders
@@ -693,11 +693,7 @@ class TestGoldenBootstrap:
             if not f.excluded and f.price_id is None
         ]
         assert null_prices == []
-        assert all(
-            (o.create_result or {}).get("error", {}).get("code") == "missing_bl_no"
-            for o in result.canonical_orders
-            if not o.bl_no
-        )
+        assert not [o for o in result.canonical_orders if not o.bl_no]  # 干净样本断言
         # registry 与建档清单一致（登记即命中）
         registered = {
             c["code"]: c["price_id"]
@@ -705,3 +701,130 @@ class TestGoldenBootstrap:
             if get_fee_registry().lookup(c["code"]) is not None
         }
         assert registered == {c["code"]: c["price_id"] for c in bootstrap["created"]}
+
+
+def _make_billrow_order(order_num1: str, fee_names: list[str]) -> BillOrder:
+    """构造 BillRow 链订单（order_data.shou 中文名直传形态）。"""
+    return BillOrder(
+        order_num1=order_num1,
+        c_title="测试客户",
+        order_data={
+            "shou": [{name: {"money": 100.0}} for name in fee_names],
+            "box": [{"b_type": "40HQ", "box_num": 1}],
+        },
+    )
+
+
+class TestBillrowNamedBootstrap:
+    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板）：
+
+    - 候选 = shou 名中无已建档档案者（运费等别名命中且 registry/YAML 有 id → 跳过）；
+    - 模板外新名（加班费等）→ 动态码（x+sha1 前 8）+ tms_name=原名建档；
+    - preview 零副作用（planned 清单，不发请求）；建档失败不阻塞（仅报告）；
+    - 幂等：registry 登记后同批/跨批不再建档。
+    """
+
+    async def test_preview_planned_only_no_requests(self, price_cfg, fake_create):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        fake_create()
+        orders = [
+            _make_billrow_order("BL001", ["运费", "加班费", "报关费", "运费"]),
+            _make_billrow_order("BL002", ["报关费", "查验费"]),
+        ]
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            orders, create_order=False, sk="sk"
+        )
+        assert report is not None and report["mode"] == "preview"
+        # 运费别名命中且已有 price_id(820) → 跳过；3 新名 → planned（动态码 + 原名）
+        planned = {p["tms_name"]: p["code"] for p in report["planned"]}
+        assert set(planned) == {"加班费", "报关费", "查验费"}
+        for code in planned.values():
+            assert code.startswith("x") and len(code) == 9
+        assert fake_create.calls == []  # 零请求
+        assert report["created"] == [] and report["failed"] == []
+
+    async def test_create_archives_dynamic_names_and_registers(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        orders = [_make_billrow_order("BL001", ["加班费", "报关费"])]
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            orders, create_order=True, sk="sk"
+        )
+        assert report is not None and report["mode"] == "create"
+        created = {c["tms_name"]: c for c in report["created"]}
+        assert set(created) == {"加班费", "报关费"}
+        # 表单：name=原名 + sn 含动态码大写；registry 已登记（幂等命中）
+        form_sent = fake_create.calls[0]["price"][created["加班费"]["code"]]
+        assert form_sent["name"] == "加班费"
+        assert created["加班费"]["code"].upper() in form_sent["sn"]
+        assert get_fee_registry().lookup(created["加班费"]["code"])["tms_name"] == "加班费"
+        assert get_fee_registry().lookup(created["报关费"]["code"])["tms_name"] == "报关费"
+
+    async def test_second_batch_no_create_calls(self, price_cfg, md_endpoint, fake_create):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL001", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert len(fake_create.calls) == 1
+        # 同批重复名一次；跨批已登记（registry 幂等）→ 无缺失（None 不产生报告段）
+        again = await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL002", ["加班费"])],
+            create_order=True,
+            sk="sk",
+        )
+        assert again is None  # 全部已建档 → 无候选
+        assert len(fake_create.calls) == 1  # 未再发建档
+
+    async def test_duplicate_marks_external(self, price_cfg, md_endpoint, monkeypatch):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+
+        async def _dup(forms_by_kind, sk=""):
+            return {
+                kind: {
+                    key: {
+                        "success": False,
+                        "archive_id": None,
+                        "error": {"code": "master_data_duplicate", "message": "已存在"},
+                        "duplicate": True,
+                    }
+                    for key in forms
+                }
+                for kind, forms in forms_by_kind.items()
+            }
+
+        monkeypatch.setattr(md_client_module, "create_archives_async", _dup)
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL001", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert report["exists_external"] and report["exists_external"][0]["tms_name"] == "加班费"
+        assert report["created"] == [] and report["failed"] == []
+        # 登记 exists_external → 下批不再重试
+        assert await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL002", ["加班费"])], create_order=True, sk="sk"
+        ) is None
+
+    async def test_failed_does_not_block_and_retries_next_batch(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create(fail_codes={fb_module._dynamic_fee_code("加班费")})
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL001", ["加班费", "报关费"])],
+            create_order=True,
+            sk="sk",
+        )
+        assert {f["tms_name"] for f in report["failed"]} == {"加班费"}
+        assert {c["tms_name"] for c in report["created"]} == {"报关费"}
+        # 失败不登记 → 下批重试仍建档（mock 修复后成功）
+        fake_create(fail_codes=None)
+        again = await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL002", ["加班费"])], create_order=True, sk="sk"
+        )
+        assert again["created"] and again["created"][0]["tms_name"] == "加班费"

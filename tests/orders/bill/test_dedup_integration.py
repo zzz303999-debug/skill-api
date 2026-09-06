@@ -166,6 +166,108 @@ class TestDedupSkE2E:
             assert summary["created"] == 1  # 新单照常创建
             assert calls["addwork"] == 2  # 首传 1 次 + 二传仅新单 1 次（已建单不调下游）
 
+    def test_missing_bl_no_after_prior_success_not_409(self, monkeypatch):
+        """缺号连坐 × 去重混合（2026-09-04 边界）：A 单已建成功，再传 A 原样 +
+        缺号行 → A 保持 skipped 不动（不误报 409）、缺号行整批拒、code=204。"""
+        from app.orders.bill.service import _MISSING_BL_NO_MSG
+
+        calls = _patch_downstream(monkeypatch)
+        first = _bill_file([_ROW1, _ROW2])
+        missing_row = {**dict(_ROW2), "E": None}  # 缺提单号行（其余字段同 ROW2）
+        second = _bill_file([_ROW1, missing_row, missing_row])
+
+        with TestClient(app) as client:
+            # 首次：两单建成
+            r = _upload(client, "one.xlsx", first, create=True, sk="sk-A")
+            assert r.json()["code"] == "200"
+            assert r.json()["data"]["summary"]["created"] == 2
+            assert calls["addwork"] == 2
+
+            # 二传：ROW1 命中注册表 → skipped；两缺号行触发文件级连坐
+            r = _upload(client, "two.xlsx", second, create=True, sk="sk-A")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["code"] == "204"  # skipped 与 failed 混合 → 不误报 409
+            assert body["msg"] == _MISSING_BL_NO_MSG
+            summary = body["data"]["summary"]
+            assert summary["total"] == 3
+            assert summary["skipped"] == 1  # ROW1 已建单不动
+            assert summary["failed"] == 2  # 两缺号行
+            assert summary["created"] == 0
+            assert calls["addwork"] == 2  # 零新增下游调用
+
+            # 单级：ROW1 保持 skipped=True 不被连坐覆盖；缺号行 missing_bl_no
+            # （junyu 表头走 canonical 链：单在 canonical_orders，键为 bl_no）
+            orders = body["data"]["canonical_orders"] or body["data"]["orders"]
+            by_bl = {
+                (o.get("bl_no") or o.get("order_num1")): o.get("create_result")
+                for o in orders
+            }
+            r1 = by_bl.get("OOLU10000001") or {}
+            assert r1.get("success") is True and r1.get("skipped") is True
+            missing_codes = [
+                (o.get("create_result") or {}).get("error", {}).get("code")
+                for o in orders
+                if not (o.get("bl_no") or o.get("order_num1"))
+            ]
+            assert missing_codes == ["missing_bl_no", "missing_bl_no"]
+
+    def test_missing_bl_no_canonical_family_rejected(self, monkeypatch):
+        """canonical 家族（junyu 表头）缺提单号行 → 文件级连坐同样生效
+        （2026-09-04：此前连坐用例只覆盖 jinxin BillRow 链）。"""
+        from app.orders.bill.service import _MISSING_BL_NO_MSG
+
+        calls = _patch_downstream(monkeypatch)
+        missing_row = {**dict(_ROW2), "E": None}
+        file_bytes = _bill_file([_ROW1, missing_row])
+
+        with TestClient(app) as client:
+            # preview：msg 拦截提示，code 200
+            r = _upload(client, "p.xlsx", file_bytes)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["code"] == "200"
+            assert body["msg"] == _MISSING_BL_NO_MSG
+
+            # create：整批拒、零下游
+            r = _upload(client, "c.xlsx", file_bytes, create=True, sk="sk-A")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["code"] == "204"
+            assert body["msg"] == _MISSING_BL_NO_MSG
+            summary = body["data"]["summary"]
+            assert summary["created"] == 0 and summary["failed"] == 2
+            # canonical_orders 侧单级 code 同样 missing_bl_no（双表示一致）
+            codes = {
+                (o.get("create_result") or {}).get("error", {}).get("code")
+                for o in body["data"]["canonical_orders"]
+            }
+            assert codes == {"missing_bl_no"}
+            assert calls["addwork"] == 0
+
+    def test_invalid_format_bl_no_canonical_chain_allowed(self, monkeypatch):
+        """canonical（junyu）链：提单号列非空但格式非法（纯字母）→ 仅存在性
+        判定放行（格式校验属下单链路职责，非连坐范围；与 jinxin 链差异为设计，
+        见 test_route.test_invalid_format_bl_no_jinxin_chain_rejected）。"""
+        calls = _patch_downstream(monkeypatch)
+        # 与 _ROW1 同构，仅提单号列（E）填非法值 "ABC"
+        bad_row = {k: v for k, v in dict(_ROW1).items()}
+        bad_row["E"] = "ABC"
+        file_bytes = _bill_file([bad_row])
+
+        with TestClient(app) as client:
+            r = _upload(client, "bad-bl.xlsx", file_bytes, create=True, sk="sk-A")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["code"] == "200" and body["msg"] == "添加成功"  # 未被连坐
+            summary = body["data"]["summary"]
+            assert summary["created"] == 1 and summary["failed"] == 0
+            assert calls["addwork"] == 1
+            # 单级 bl_no 原文保留（无 missing 标记）
+            cos = body["data"]["canonical_orders"]
+            assert cos and cos[0]["bl_no"] == "ABC"
+            assert cos[0]["missing_fields"] == []
+
     def test_legacy_global_registry_not_blocking(self, monkeypatch):
         """旧版全局注册表（跨人误拦根源）→ 自动迁移 legacy：任意 sk 照常创建。
 

@@ -63,17 +63,20 @@ def create_mode_shell(summary: dict, *, codes: tuple[str, ...] = ()) -> tuple[st
     return "204", failed_msg or "添加失败"
 
 
-def preview_mode_shell(orders: list, *, code: str | None = None) -> tuple[str, str]:
+def preview_mode_shell(
+    orders: list, *, codes: tuple[str, ...] | None = None
+) -> tuple[str, str]:
     """preview 模式映射：("200", "请求成功")；整批被拒时 msg 为首个错误文案。
 
-    code 非空时只认该错误码（账单仅认 unknown_box_type）；None 时任意错误
-    （舱单口径）。code 保持 "200"（preview 未产生下游动作，语义不冲突）。"""
+    codes 非空时只认该错误码集合（账单认 unknown_box_type / missing_bl_no，
+    2026-09-04 文件级连坐对齐）；None 时任意错误（舱单口径）。code 保持 "200"
+    （preview 未产生下游动作，语义不冲突）。"""
     msg = next(
         (
             (o.create_result or {}).get("error", {}).get("message")
             for o in orders
             if (o.create_result or {}).get("error")
-            and (code is None or (o.create_result or {}).get("error", {}).get("code") == code)
+            and (codes is None or (o.create_result or {}).get("error", {}).get("code") in codes)
         ),
         None,
     )

@@ -748,7 +748,9 @@ class TestGoldenIntegration:
         not (FAMILIES_DIR / "junyu").exists(), reason="样本未入库（表格文件不入库）"
     )
     async def test_junyu_create_report(self, monkeypatch):
-        path = FAMILIES_DIR / "junyu" / "2020-10上海军羽应收对账单.xls"
+        # 2026-09-04 提单号缺失文件级连坐：2020-10 样本含 8 行缺号（整批拒），
+        # 建档集成改用同家族干净样本（2020 全年，无缺号行）承载 create 场景
+        path = FAMILIES_DIR / "junyu" / "2020-01到2020-12上海军羽应收对账单.xls"
         if not path.exists():
             pytest.skip("junyu 样本缺失")
         # mock 下单通道（零网络）：AddWork 成功回显；建档族按 URL 回主键（sk 由调用方透传）
@@ -785,7 +787,7 @@ class TestGoldenIntegration:
             "所属客户未建档" in f["reason"] or "无车牌" in f["reason"]
             for f in report["failed"]
         )
-        # 达阈值候选建档成功并回填主键（junyu 2020-10 实测 13/13 客户/工厂类达阈值）
+        # 达阈值候选建档成功并回填主键（junyu 2020 全年实测达阈值客户/工厂建档）
         assert report["archived"]
         assert all(a["archive_id"] for a in report["archived"])
         # 司机无车牌列（账单无车牌字段）→ 全部 skip（failed「无车牌」），不建档

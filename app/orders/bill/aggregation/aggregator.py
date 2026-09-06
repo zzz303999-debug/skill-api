@@ -23,7 +23,6 @@ from ..schema import (
     MISSING_ORDER_NUM1,
     REASON_INVALID_FORMAT,
     REASON_NOT_FOUND,
-    RECEIVABLE_FEE_COLUMNS,
     BillOrder,
     BillPeriod,
     BillRow,
@@ -321,11 +320,15 @@ def _fill_year(md: str, period: BillPeriod) -> str | None:
 
 
 def _fee_entries(row: BillRow) -> tuple[list[dict], float]:
-    """行级费用条目：按 RECEIVABLE_FEE_COLUMNS 顺序，金额为数字才建条目；合计入 get_ys_zj。"""
+    """行级费用条目：按行 fees 键序（模板声明序/文件物理列序）遍历，金额为数字才建条目；合计入 get_ys_zj。
+
+    2026-09-04 费用动态化：不再按代码常量遍历——费用项以模板声明为源
+    （parser 侧未知列动态收录后直接进 fees），单行键序即列发现序；
+    同名费用跨行累加由一行一票（每行独立成单）消解。
+    """
     entries: list[dict] = []
     total = 0.0
-    for name in RECEIVABLE_FEE_COLUMNS:
-        amount = row.fees.get(name)
+    for name, amount in row.fees.items():
         if isinstance(amount, (int, float)):
             amount = round(amount, 2)
             entries.append({name: {"money": amount}})

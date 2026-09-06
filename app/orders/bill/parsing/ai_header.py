@@ -6,7 +6,7 @@
 - 校验闸门（全过才采纳）：
   a. order_num1 / c_title / b_type 来源列必须映射
   b. 同一字段不被多列重复映射（c_name / factory_bei 多来源列除外）
-  c. fee 目标必须在 RECEIVABLE_FEE_COLUMNS 白名单内，否则该列降级
+  c. fee 目标必须在模板库应收费用名池内（collect_fee_names），否则该列降级
      ignore 并记录 new_fees（上报人工确认）
   d. 抽样校验：用映射试读 20 行——提单号列 ≥50% 样本匹配
      ^[A-Za-z0-9-.]+$（字母数字/连字符/点，≥6 位）；费用列数字率 ≥80%；不过 → 拒绝
@@ -29,9 +29,8 @@ from ..schema import (
     HEADER_ALIASES,
     IGNORED_HEADERS,
     MAX_HEADER_SCAN_ROWS,
-    RECEIVABLE_FEE_COLUMNS,
 )
-from .template_store import alias_dictionary
+from .template_store import alias_dictionary, collect_fee_names
 
 log = get_logger(__name__)
 
@@ -93,52 +92,59 @@ _FIELD_CATALOG: dict[str, str] = {
     "port_in_time": "进港时间",
 }
 
-# target 合法取值（json_schema enum 强约束）：字段名 + 应收费用名 + ignore
-_AI_TARGETS: list[str] = [
-    *_FIELD_CATALOG,
-    *(f"fee:{name}" for name in RECEIVABLE_FEE_COLUMNS),
-    "ignore",
-]
+def _ai_targets() -> list[str]:
+    """target 合法取值（json_schema enum 强约束）：字段名 + 应收费用名 + ignore。
+
+    费用目标动态化（2026-09-04）：以模板库应收费用声明为源（collect_fee_names），
+    模板新增费目 AI 池自动扩，不再依赖代码常量。
+    """
+    return [*_FIELD_CATALOG, *(f"fee:{name}" for name in collect_fee_names()), "ignore"]
 
 # json_schema：AI 输出结构强约束（achat_json 优先走 structured output）。
 # 输出即模板配置片段的输入：mapping（columns 段）+ two_row/fee_boundary 判定。
-_AI_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "header_row": {
-            "type": "integer",
-            "description": "表头行号（1-based，在提供的前 15 行内）",
-        },
-        "two_row": {
-            "type": "boolean",
-            "description": "是否双行表头（表头上一行为区块名，如 应收/应付）",
-        },
-        "fee_boundary": {
-            "type": "string",
-            "enum": ["column_range", "section_header", "total_columns"],
-            "description": "费用区边界模式：column_range=费用列在右侧连续区间 / "
-            "section_header=双行表头区块分界 / total_columns=以应收合计列分界",
-        },
-        "mapping": {
-            "type": "array",
-            "description": "表头行每一列的目标映射（空白列不映射）",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "col": {"type": "integer", "description": "列号（1-based）"},
-                    "target": {
-                        "type": "string",
-                        "enum": _AI_TARGETS,
-                        "description": "目标字段 / fee:费用名 / ignore",
-                    },
-                },
-                "required": ["col", "target"],
+# 2026-09-04：target enum 不在此冻结——费用目标池随模板库变化（save_yaml_template
+# 固化后 reload_templates），schema 必须在每次请求时与 prompt/白名单同刻构建
+# （_ai_schema 函数；模块级常量会成 import 时快照，模板热更新后 enum 过期）。
+
+
+def _ai_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "header_row": {
+                "type": "integer",
+                "description": "表头行号（1-based，在提供的前 15 行内）",
             },
+            "two_row": {
+                "type": "boolean",
+                "description": "是否双行表头（表头上一行为区块名，如 应收/应付）",
+            },
+            "fee_boundary": {
+                "type": "string",
+                "enum": ["column_range", "section_header", "total_columns"],
+                "description": "费用区边界模式：column_range=费用列在右侧连续区间 / "
+                "section_header=双行表头区块分界 / total_columns=以应收合计列分界",
+            },
+            "mapping": {
+                "type": "array",
+                "description": "表头行每一列的目标映射（空白列不映射）",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "col": {"type": "integer", "description": "列号（1-based）"},
+                        "target": {
+                            "type": "string",
+                            "enum": _ai_targets(),
+                            "description": "目标字段 / fee:费用名 / ignore",
+                        },
+                    },
+                    "required": ["col", "target"],
+                },
+            },
+            "confidence": {"type": "number", "description": "本次映射置信度 0-1"},
         },
-        "confidence": {"type": "number", "description": "本次映射置信度 0-1"},
-    },
-    "required": ["header_row", "mapping", "confidence"],
-}
+        "required": ["header_row", "mapping", "confidence"],
+    }
 
 _SYSTEM_PROMPT = (
     "你是竞品物流应收账单的表头映射助手。用户提供 Excel 前若干行的表格文本"
@@ -202,7 +208,7 @@ def _build_messages(zone_lines: list[str]) -> list[dict[str, str]]:
     才依赖 LLM 判断（命中率越高越省 token、越稳定）。
     """
     catalog = "\n".join(f"- {target}: {desc}" for target, desc in _FIELD_CATALOG.items())
-    fee_targets = "、".join(f"fee:{name}" for name in RECEIVABLE_FEE_COLUMNS)
+    fee_targets = "、".join(f"fee:{name}" for name in collect_fee_names())
     ignored = "、".join(IGNORED_HEADERS)
     aliases = alias_dictionary()
     alias_lines = "\n".join(
@@ -230,7 +236,7 @@ def _normalize_fee_target(target: str) -> str | None:
     """fee:xxx → 标准费用名（过 HEADER_ALIASES 归一化）；白名单外返回 None。"""
     name = target.removeprefix("fee:").strip()
     name = HEADER_ALIASES.get(name, name)
-    return name if name in RECEIVABLE_FEE_COLUMNS else None
+    return name if name in collect_fee_names() else None
 
 
 def _to_money(value: Any) -> float | None:
@@ -321,7 +327,7 @@ def build_llm_request(
 
     两段式编排在 async 层持本请求调用 achat_json（网络段真异步）。
     """
-    return _build_messages(zone_lines), _AI_SCHEMA
+    return _build_messages(zone_lines), _ai_schema()
 
 
 def validate_ai_result(

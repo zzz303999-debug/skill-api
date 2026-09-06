@@ -270,6 +270,53 @@ def _reject_unknown_box_types(orders: list) -> bool:
 
 # ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义 ----
 
+# 提单号缺失文件级连坐的统一拦截文案（msg/单级 message 同口径，2026-09-04 用户指定）
+_MISSING_BL_NO_MSG = "提单号为必填项；文件存在提单号缺失行时整批不录入，请补全提单号后重新导入"
+
+
+def _reject_missing_bl_no(orders: list) -> bool:
+    """文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    提单号缺失 → 全部未决单拒绝（missing_bl_no，一单不录，不调下游），返回 True。
+
+    preview 与 create 统一执行（preview 也拒，msg 提示）；已标记（skipped）的单
+    不动。拦截文案统一（不分缺号行/连坐行）；details 仅报缺失行数（2026-09-04
+    精简：不收集行号——双表示（orders/canonical）下行号源不一致，且前端按 msg
+    排查即可）。
+    """
+    from .submission.imported_registry import normalize
+
+    missing_idx: list[int] = []
+    for idx, order in enumerate(orders):
+        if order.create_result is not None:
+            continue  # 已标记（skipped）的单不动
+        bl = normalize(
+            getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
+        )
+        if not bl:
+            missing_idx.append(idx)
+    if not missing_idx:
+        return False
+    for order in orders:
+        if order.create_result is not None:
+            continue
+        order.create_result = {
+            "success": False,
+            "skipped": False,
+            "sn": None,
+            "error": {
+                "code": "missing_bl_no",
+                "message": _MISSING_BL_NO_MSG,
+                "description": _MISSING_BL_NO_MSG,
+                "details": {
+                    "missing_bl_no_count": len(missing_idx),
+                    # 全场景业务码统一可达（§3.7/既有规范）：本地拦截等价于该单
+                    # 添加失败，对齐 TMS「新建全部失败 → 204」口径
+                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
+                },
+            },
+        }
+    return True
+
 
 def _write_tempfile(suffix: str, file_bytes: bytes) -> str:
     """写临时文件（磁盘 IO，编排层 to_thread 执行），返回路径。"""
@@ -341,6 +388,12 @@ def _aggregate_stage(output, create_order: bool, sk: str):
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
+    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号+箱号, sk) 维度）：
+    # create 模式先查同一 sk 已成功组合键，命中即标记 skipped（只查不登；登记在
+    # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。
+    # 一行一票（2026-08-31 业务拍板）：提单号必填；缺失行无去重键，不查重保持
+    # 未决，交下方文件级校验统一连坐拒绝（2026-09-04 用户拍板：与箱型同语义，
+    # 一单不录）。计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写）。
     if create_order:
         from .submission.imported_registry import get_imported_registry, normalize, owner_key
 
@@ -351,18 +404,7 @@ def _aggregate_stage(output, create_order: bool, sk: str):
                 getattr(order, "bl_no", None) or getattr(order, "order_num1", None)
             )
             if not bl:
-                order.create_result = {
-                    "success": False,
-                    "skipped": False,
-                    "sn": None,
-                    "error": {
-                        "code": "missing_bl_no",
-                        "message": "提单号缺失，未录入",
-                        "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
-                        "details": {},
-                    },
-                }
-                continue
+                continue  # 无键不查重；文件级 missing_bl_no 校验统一拒绝
             box, seq = _order_dedup_parts(order)
             if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
                 order.create_result = {
@@ -497,7 +539,21 @@ async def build_result_async(
         else None
     )
 
-    # 未决单（去重 + 箱型校验后真正待处理）：费目自举/建档只对可录单执行
+    # 文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    # 提单号缺失 → 全部未决单拒绝（一单不录，不调下游）。置于箱型校验之后：
+    # 两者同时存在时箱型先标记（路由 msg 优先级 unknown_box_type > missing_bl_no）。
+    # 双表示分组执行：既有语义路径 orders（BillRow 源）与 canonical_orders 同源
+    # 双份，各自组内自洽（缺失行数/行号不跨组重复计数）；标准字段路径 orders 空。
+    # preview 与 create 统一执行（纯内存标记，preview 响应消费 msg 提示）。
+    _reject_missing_bl_no([o for o in orders if o.create_result is None])
+    _reject_missing_bl_no(
+        [o for o in canonical_orders if o.create_result is None]
+    )
+
+    # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
+    # 2026-08-26 修正——必须在校验后重算，校验被拒单 create_result 已标记
+    # （非 None），自然排除，费目自举/建档只对可录单执行（被拒文件零下游副作用）；
+    # 校验前快照会让被拒单仍进入建档/自举（实测 AddCarClient 被误调）
     pending = [o for o in canonical_orders if o.create_result is None]
 
     fee_reconciliation = None
@@ -511,6 +567,22 @@ async def build_result_async(
             output, pending, create_order=create_order, sk=sk,
             bootstrap_report=bootstrap_report,
         )
+
+    # BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板；2026-09
+    # 异步化改造后建档段走 create_archives_async）：订单费用以中文名直传可录，
+    # 但 TMS「费用管理」只有 AddCarPrice 建档过的费目——模板外新费目订单有、
+    # 费用管理无档案 → create 自动建档同名档案（复用费目自举配置/端点/registry）；
+    # preview 只出 planned 计划清单零副作用；建档失败不阻塞下单（直传不依赖
+    # price_id，仅报告下批重试）；已建档名跳过（幂等）。
+    billrow_fee_bootstrap_report = None
+    if orders and not output.canonical_rows:
+        pending_legacy = [o for o in orders if o.create_result is None]
+        if pending_legacy:
+            from .fees.fee_bootstrap import run_billrow_fee_bootstrap_async
+
+            billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
+                pending_legacy, create_order=create_order, sk=sk
+            )
 
     # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
     master_data_report = None
@@ -552,6 +624,10 @@ async def build_result_async(
         meta["reconciliation"] = fee_reconciliation
     if master_data_report is not None:
         meta["master_data"] = master_data_report
+    # BillRow 链模板外费用建档报告（与 master_data 同风格：顶层独立键；
+    # canonical 链的费目自举报告在 meta.reconciliation.reports.fee_bootstrap）
+    if billrow_fee_bootstrap_report is not None:
+        meta["fee_bootstrap"] = billrow_fee_bootstrap_report
     if output.new_template is not None:
         meta["l3_template"] = output.new_template
 

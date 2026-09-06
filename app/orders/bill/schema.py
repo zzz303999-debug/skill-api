@@ -2,7 +2,6 @@
 
 本模块只定义数据结构与常量，不含解析/归集/下单逻辑：
 - REQUIRED_HEADERS：识别有效账单必需的列
-- RECEIVABLE_FEE_COLUMNS：应收费用列名（费用中文名作 shou 键）
 - HEADER_COLUMN_MAP：账单表头列名 → BillRow 字段名（列顺序变化不影响解析）
 - BillPeriod / BillRow / BillOrder / BillParseResult：结算区间、账单行、归集订单、响应模型
 
@@ -25,17 +24,9 @@ REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
 MAX_HEADER_SCAN_ROWS = 15
 
 # 应收费用列名：按费用中文名建立 shou 条目（如 shou[0][运费][money]），
-# 同费用名多行金额累加。本常量仅服务旧 BillRow.fees 流程（jinxin_v1 语义）；
-# 标准通道（模板驱动）的费用列发现见 parser.py T9：fees.channels 已支持应付/
-# 成本/车辆成本区块，四通道发射见 payload.py _emit_fees（T13）
-RECEIVABLE_FEE_COLUMNS: tuple[str, ...] = (
-    "运费",
-    "待时费",
-    "预提费",
-    "洋山费",
-    "落还箱费",
-    "其它费",
-)
+# 同费用名多行金额累加。费用名集以 templates/*.yaml fees 声明为源
+# （template_store.collect_legacy_fee_names / collect_fee_names，2026-09-04
+# 动态化后本模块不再持有费用列名常量）；
 
 # 表头列名变体 → 标准列名：真实账单表头存在内部空格（如「落/还箱 费」），
 # 匹配前先去除全部空白，别名表再处理去空白后仍不一致的变体（如斜杠）
@@ -137,7 +128,7 @@ class BillRow(BaseModel):
     payable_remark: str | None = Field(None, description="应付备注，追加到 c_note")
     fees: dict[str, float | str] = Field(
         default_factory=dict,
-        description="应收费用：费用中文名（RECEIVABLE_FEE_COLUMNS）→ 金额数字；非数字原文（含中文大写）原样保留，由归集侧按类型过滤",
+        description="应收费用：费用中文名（模板 fees 声明）→ 金额数字；非数字原文（含中文大写）原样保留，由归集侧按类型过滤",
     )
 
 

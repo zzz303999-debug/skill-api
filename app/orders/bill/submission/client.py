@@ -13,8 +13,9 @@
   已成功单 → skipped（不调下游，sn 回显首次创建）；不同 sk 各自可导（生产
   误拦修正）。提交前查 imported_registry（per-bl_no 锁包住「查重→提交→登记」
   临界区，owner=sk 哈希不落盘 token 原文）；提交成功才登记（登记失败仅日志
-  不冒泡）；无提单号单不查不登照常提交；service 层预判已标记 skipped 的单
-  直接跳过（create_result 非 None）
+  不冒泡）；提单号缺失/非法单由 service 层文件级连坐拒绝（2026-09-04，
+  missing_bl_no 整批不录、不调下游，不会到达本层）；service 层预判已标记
+  skipped 的单直接跳过（create_result 非 None）
 """
 
 from __future__ import annotations

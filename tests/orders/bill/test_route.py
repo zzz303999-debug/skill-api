@@ -16,6 +16,10 @@ from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
 
 AUTH_HEADERS = {"X-API-Key": "test-secret-key"}
 
+# 提单号缺失文件级连坐的统一拦截文案（与 service._MISSING_BL_NO_MSG 同口径，
+# 2026-09-04 用户指定 msg 只出此条说明）
+_MISSING_BL_MSG = "提单号为必填项；文件存在提单号缺失行时整批不录入，请补全提单号后重新导入"
+
 
 # AddWork 均成功（create 模式下游 mock；sk 由调用方请求头透传）
 def _ok_chain_post(url, **_kwargs):
@@ -329,12 +333,12 @@ class TestCreateMode:
                 {
                     "order_num": None,
                     "error_code": "missing_bl_no",
-                    "error_message": "提单号缺失，未录入",
+                    "error_message": _MISSING_BL_MSG,
                 },
                 {
                     "order_num": None,
                     "error_code": "missing_bl_no",
-                    "error_message": "提单号缺失，未录入",
+                    "error_message": _MISSING_BL_MSG,
                 },
             ],
         }
@@ -361,7 +365,7 @@ class TestCreateMode:
         assert r.status_code == 200
         body = r.json()
         assert body["code"] == "204"
-        assert body["msg"] == "提单号缺失，未录入"
+        assert body["msg"] == _MISSING_BL_MSG
         assert body["data"]["summary"]["failed"] == 2
 
     def test_mixed_block_reasons_box_msg_priority(self, monkeypatch):
@@ -381,7 +385,7 @@ class TestCreateMode:
                 {
                     "order_num": None,
                     "error_code": "missing_bl_no",
-                    "error_message": "提单号缺失，未录入",
+                    "error_message": _MISSING_BL_MSG,
                 },
                 {
                     "order_num": "OOLU40GOH002",
@@ -473,6 +477,167 @@ def test_unknown_box_type_zero_downstream(monkeypatch):
     assert body["data"]["summary"]["created"] == 0
     assert body["data"]["summary"]["failed"] == 1
     # 零下游调用：AddWork 0、建档族 0（含费目自举 AddCarPrice）
+    assert calls["addwork"] == 0
+    assert calls["archive"] == 0
+
+
+_JINXIN_HEADERS = [
+    "序号", "日期", "当前状态", "客户名称", "客户联系人", "客户编号", "业务类型",
+    "提单号", "门点", "箱型", "联系人", "联系电话", "装卸货地点", "装卸货地址",
+    "箱号", "做箱时间", "港区", "提箱堆场", "还箱堆场", "车牌号", "车队", "司机",
+    "司机手机", "运费", "待时费", "预提费", "洋山费", "落/还箱费", "其它费",
+    "已收/付金额", "备注", "应付备注",
+]
+
+
+def _two_row_bill_bytes() -> bytes:
+    """构造含缺提单号行的 jinxin 账单：行 1 正常、行 2 缺提单号（有客户/箱型）。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(_JINXIN_HEADERS)
+    ws.append(
+        [
+            1, "1-27", "", "测试客户", "", "TST001", "", "OOLU1234567", "测试门点",
+            "40HQ", "", "", "测试地址", "", "TCLU4000001", "", "洋山", "", "",
+            "", "", "", "", 2100, "", "", "", "", "", "", "", "",
+        ]
+    )
+    ws.append(
+        [
+            2, "1-27", "", "测试客户2", "", "TST002", "", "", "测试门点2",
+            "40HQ", "", "", "测试地址2", "", "", "", "洋山", "", "",
+            "", "", "", "", 1200, "", "", "", "", "", "", "", "",
+        ]
+    )
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
+    """提单号缺失文件级连坐（2026-09-04 拍板，对齐箱型）：任一单缺提单号 →
+    整批拒绝一单不录；msg 给文件级文案；零下游（AddWork/建档均不调）。"""
+    calls = {"addwork": 0, "archive": 0}
+
+    async def fake_post(url, **_kwargs):
+        if "/Car/Car" in url:
+            calls["archive"] += 1
+            return _archive_post(url)
+        calls["addwork"] += 1
+        return _ok_chain_post(url)
+
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+    with TestClient(app) as client:
+        r = upload(
+            client,
+            "missing-bl.xlsx",
+            _two_row_bill_bytes(),
+            data={"create_order": "true"},
+            headers={**AUTH_HEADERS, "sk": "sk-1"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "204"
+    # msg = 首个 failed_detail 文案（行 1 正常单在前 → 统一拦截说明）
+    assert body["msg"] == _MISSING_BL_MSG
+    summary = body["data"]["summary"]
+    assert summary["created"] == 0 and summary["failed"] == 2
+    msgs = {d["error_message"] for d in summary["failed_details"]}
+    assert msgs == {_MISSING_BL_MSG}
+    # details 契约（2026-09-04 用户拍板）：仅 missing_bl_no_count，无 missing_rows
+    d0 = body["data"]["orders"][0]["create_result"]["error"]["details"]
+    assert d0 == {
+        "missing_bl_no_count": 1,
+        "upstream": {"code": "204", "msg": "添加失败", "data": []},
+    }
+    assert "missing_rows" not in d0
+    # 零下游调用：AddWork 0、建档族 0
+    assert calls["addwork"] == 0
+    assert calls["archive"] == 0
+
+
+def test_missing_bl_no_preview_rejected_msg(monkeypatch):
+    """preview 同样文件级拒绝并提示（与箱型一致，2026-09-04）：缺提单号文件
+    preview 不再报「请求成功」，msg 给具体原因，code 保持 200（零下游动作）。"""
+    async def fake_post(url, **_kwargs):
+        return _ok_chain_post(url)
+
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+    with TestClient(app) as client:
+        r = upload(
+            client,
+            "missing-bl-preview.xlsx",
+            _two_row_bill_bytes(),
+            headers={**AUTH_HEADERS, "sk": "sk-1"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "200"
+    assert body["msg"] == _MISSING_BL_MSG
+    # 两单均被文件级拒绝（preview 响应单级可见）
+    codes = [
+        (o.get("create_result") or {}).get("error", {}).get("code")
+        for o in body["data"]["orders"]
+    ]
+    assert codes == ["missing_bl_no", "missing_bl_no"]
+
+
+def test_invalid_format_bl_no_jinxin_chain_rejected(monkeypatch):
+    """jinxin（BillRow）链：提单号列填非法值（纯字母，非空）→ 归集层
+    clean_order_num 判「格式不合法」清空 → 连坐视同缺失整批拒（2026-09-04
+    口径锁定：两链差异设计——canonical 链仅存在性判定放行，见
+    test_dedup_integration.test_invalid_format_bl_no_canonical_chain_allowed）。"""
+    from io import BytesIO
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(_JINXIN_HEADERS)
+    row = [""] * len(_JINXIN_HEADERS)
+    row[0] = 1
+    row[3] = "测试客户"
+    row[5] = "TST001"
+    row[7] = "ABC"  # 提单号列：纯字母非法值
+    row[8] = "门点"
+    row[9] = "40HQ"
+    row[12] = "地址"
+    row[14] = "C1"
+    row[16] = "港区"
+    row[23] = 2100
+    ws.append(row)
+    buf = BytesIO()
+    wb.save(buf)
+
+    calls = {"addwork": 0, "archive": 0}
+
+    async def fake_post(url, **_kwargs):
+        if "/Car/Car" in url:
+            calls["archive"] += 1
+            return _archive_post(url)
+        calls["addwork"] += 1
+        return _ok_chain_post(url)
+
+    monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+    with TestClient(app) as client:
+        r = upload(
+            client,
+            "bad-bl.xlsx",
+            buf.getvalue(),
+            data={"create_order": "true"},
+            headers={**AUTH_HEADERS, "sk": "sk-1"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["code"] == "204"
+    assert body["msg"] == _MISSING_BL_MSG
+    summary = body["data"]["summary"]
+    assert summary["created"] == 0 and summary["failed"] == 1
+    # 格式非法被归集层清空 → 单级 missing 原因留痕（格式不合法）供人工定位
     assert calls["addwork"] == 0
     assert calls["archive"] == 0
 

@@ -288,3 +288,89 @@ class TestServiceIntegration:
         # 费用降级：price_id null → excluded 不录入仅对账（dropped 清单可见）
         dropped = reports.get("price_null_dropped") or []
         assert any(d["code"] == "waiting" for d in dropped)
+
+
+class TestBillrowServiceIntegration:
+    """jinxin（BillRow 直传名）链模板外费用建档 service 集成（2026-09-04 拍板）：
+    订单费用可直传但 TMS 费用管理缺档案 → create 自动 AddCarPrice 建档同名档案；
+    preview 只出 planned；建档失败不阻塞下单；模板 6 名已建档不重复建。"""
+
+    _EXTRA_HEADERS = [
+        "加班费",
+        "报关费",
+        "查验费",
+    ]
+
+    def _bill_bytes(self) -> bytes:
+        from io import BytesIO
+
+        from openpyxl import Workbook
+        from test_route import _JINXIN_HEADERS
+
+        headers = _JINXIN_HEADERS[:29] + self._EXTRA_HEADERS + _JINXIN_HEADERS[29:]
+        wb = Workbook()
+        ws = wb.active
+        ws.append(headers)
+        r = [""] * len(headers)
+        r[0] = 1
+        r[1] = "1-27"
+        r[3] = "测试客户甲"
+        r[5] = "TST01"
+        r[7] = "OOLU90000001A"
+        r[8] = "门点"
+        r[9] = "40HQ"
+        r[12] = "地址"
+        r[14] = "C1"
+        r[16] = "洋山"
+        r[23:29] = [100, 20, 0, 10, 5, 3]  # 运费..其它费
+        r[29:32] = [8, 6, 0]  # 加班费/报关费/查验费
+        ws.append(r)
+        buf = BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    async def test_create_archives_unknown_names_and_registers(
+        self, price_cfg, md_endpoint, monkeypatch
+    ):
+        async def fake_addwork_post(
+            url, *, payload=None, headers=None, name=None, payload_kind=None, timeout=None, **kwargs
+        ):
+            return FakeResponse(
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EXBILL1"}]}
+            )
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_addwork_post)
+        # 建档走 conftest 全局 mock（create_archives 层零网络，递增主键）
+        result = await build_result_async(
+            filename="dyn.xlsx",
+            file_bytes=self._bill_bytes(),
+            create_order=True,
+            sk="sk-token",
+        )
+        # 订单照常创建成功
+        assert result.summary["success"] == 1 and result.summary["created"] == 1
+        fb = (result.meta or {}).get("fee_bootstrap") or {}
+        assert fb["mode"] == "create" and fb["failed"] == []
+        created = {c["tms_name"]: c for c in fb["created"]}
+        # 模板外 3 名建档（动态码）；已建档名（运费→freight 注入已有 price_id）不重复建
+        assert {"加班费", "报关费", "查验费"} <= set(created)
+        assert "运费" not in created
+        assert all(isinstance(c["price_id"], int) for c in created.values())
+        # registry 已登记（幂等：下次同文件不再建档）
+        reg = get_fee_registry()
+        assert all(reg.lookup(c["code"]) is not None for c in created.values())
+
+    async def test_preview_planned_only_zero_side_effect(self, price_cfg, md_endpoint):
+
+        result = await build_result_async(
+            filename="dyn.xlsx",
+            file_bytes=self._bill_bytes(),
+            create_order=False,
+        )
+        fb = (result.meta or {}).get("fee_bootstrap") or {}
+        assert fb["mode"] == "preview"
+        planned = {p["tms_name"] for p in fb["planned"]}
+        # 3 模板外名进 planned；已建档名（运费）不在计划内
+        assert {"加班费", "报关费", "查验费"} <= planned
+        assert "运费" not in planned
+        assert fb["created"] == [] and fb["failed"] == []

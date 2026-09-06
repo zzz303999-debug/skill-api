@@ -109,8 +109,10 @@ async def import_bill(
             result.summary, codes=("unknown_box_type", "missing_bl_no")
         )
     else:
-        # preview：整批箱型被拒时 msg 给具体原因（仅认 unknown_box_type）
+        # preview：整批被本地文件级校验拒绝时 msg 给具体原因（认 unknown_box_type /
+        # missing_bl_no，2026-09-04 提单号缺失连坐对齐）
         code, msg = preview_mode_shell(
-            (*result.orders, *result.canonical_orders), code="unknown_box_type"
+            (*result.orders, *result.canonical_orders),
+            codes=("unknown_box_type", "missing_bl_no"),
         )
     return BillImportResponse(code=code, msg=msg, data=result)
