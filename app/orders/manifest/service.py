@@ -28,10 +28,10 @@ from datetime import UTC, datetime
 
 from app.core.logging_conf import get_logger
 
-from .client import submit_manifest_async
-from .parser import parse_manifest
-from .payload import build_order_data, to_submit_payload
+from .parsing.parser import parse_manifest
 from .schema import MANIFEST_REQUIRED, ManifestParseResult
+from .submission.client import submit_manifest_async
+from .submission.payload import build_order_data, to_submit_payload
 
 log = get_logger(__name__)
 

@@ -4,7 +4,7 @@
 契约见 docs/舱单/舱单导入需求文档.md 与 舱单导入接口文档.md（v1.0 冻结）。
 """
 
-from .parser import ManifestParseOutput, parse_manifest
+from .parsing.parser import ManifestParseOutput, parse_manifest
 from .schema import (
     MANIFEST_REQUIRED,
     ManifestBoxGroup,

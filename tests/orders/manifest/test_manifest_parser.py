@@ -107,7 +107,7 @@ class TestSplitPartyBlock:
     """三栏合并大格拆分：名称/地址/电话归位（2026-08-20 TMS 三栏空值核查）。"""
 
     def test_si_v2_shipper_labeled_lines(self):
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         name, addr, tel = _split_party_block(
             " PT BINTAN CELLULAR INDONESIA                      \n"
@@ -120,7 +120,7 @@ class TestSplitPartyBlock:
         assert tel == "6285376250031"
 
     def test_si_v2_consignee_inline_phone_and_no(self):
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         name, addr, tel = _split_party_block(
             "Mianyang Yingfa Ruiyang New Energy Technology Co.,Ltd. No. 202 Liaoning Avenue, "
@@ -131,7 +131,7 @@ class TestSplitPartyBlock:
         assert tel == "18281968110"  # 11 位手机号形态；残留联系人名进地址（不猜切）
 
     def test_si_v2_notify_add_prefix(self):
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         name, addr, tel = _split_party_block(
             "NINGBO HETIAN SUPPLY CHAIN MANAGEMENT CO.,LTD.\n"
@@ -142,7 +142,7 @@ class TestSplitPartyBlock:
         assert tel is None
 
     def test_authorization_consignee_phone_label(self):
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         name, addr, tel = _split_party_block(
             "INTERPLEX (SUZHOU) PRECISION ENGINEERING LTD. No. 36, Xing Ming Street, Suzhou Industrial Park, "
@@ -154,7 +154,7 @@ class TestSplitPartyBlock:
 
     def test_si_v1_gap_layout(self):
         """SI v1 排版：名称␣␣␣␣地址（≥4 空隙 + 后半含数字）。"""
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         name, addr, tel = _split_party_block(
             "CV VANYA COCO UNIVERSAL                                                                                                                                                                                                                                                                                                       "
@@ -166,14 +166,14 @@ class TestSplitPartyBlock:
 
     def test_no_marker_stays_whole(self):
         """无任何标记（托书发货人格）→ 整块进名称，不猜切分。"""
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         blob = "PT ENNOVI METAL CAST ENGINEERING SERVICES BATAM TUNAS INDUSTRIAL ESTATE (BIZ PARK) BLOK 9B"
         name, addr, tel = _split_party_block(blob)
         assert (name, addr, tel) == (blob, None, None)
 
     def test_empty(self):
-        from app.orders.manifest.parser import _split_party_block
+        from app.orders.manifest.parsing.parser import _split_party_block
 
         assert _split_party_block("") == (None, None, None)
         assert _split_party_block(None) == (None, None, None)
@@ -288,7 +288,7 @@ class TestSI:
 
     def test_dirty_vgm_normalized(self, si_shifted_bytes):
         """脏 VGM（20.652.00 多点号）：数字清洗最后一个点为小数点。"""
-        from app.orders.manifest.parser import _clean_number
+        from app.orders.manifest.parsing.parser import _clean_number
 
         assert _clean_number("20.652.00") == 20652.0
         assert _clean_number("16,000") == 16000.0

@@ -21,7 +21,7 @@ def _isolate_manifest_registry(tmp_path):
     防止 create 用例（service/路由编排）写入真实 storage/imported_manifests.json
     并在用例间泄漏登记结果（去重命中会掩盖重导/并发断言）。
     """
-    from app.orders.manifest import imported_registry
+    from app.orders.manifest.submission import imported_registry
 
     imported_registry.reload_registry(tmp_path / "imported_manifests.json")
     yield

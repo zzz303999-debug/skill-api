@@ -15,7 +15,7 @@ build_order_data 为纯函数，客户端与测试共用同一实现。
 
 from __future__ import annotations
 
-from .schema import ManifestOrder
+from ..schema import ManifestOrder
 
 # 常量（v1.0 冻结：抓包样例，用户确认恒定）
 _TYPE = 2

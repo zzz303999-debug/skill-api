@@ -36,7 +36,7 @@ class TestPreview:
         assert result.summary is None
         assert result.upstream is None
         assert result.orders[0].create_result is None
-        from app.orders.manifest import imported_registry
+        from app.orders.manifest.submission import imported_registry
 
         assert imported_registry.get_manifest_registry().snapshot() == {}
 
@@ -121,7 +121,7 @@ class TestCreate:
         result = await build_manifest_result_async("a.xlsx", auth_bytes, create_order=True, sk="tk")
         assert result.orders[0].create_result["success"] is False
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
-        from app.orders.manifest import imported_registry
+        from app.orders.manifest.submission import imported_registry
 
         assert imported_registry.get_manifest_registry().snapshot() == {}
 
@@ -189,7 +189,7 @@ class TestBoxMissing:
         assert order.create_result["error"]["code"] == "manifest_box_missing"
         assert result.summary["failed"] == 1
         assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
-        from app.orders.manifest import imported_registry
+        from app.orders.manifest.submission import imported_registry
 
         assert imported_registry.get_manifest_registry().snapshot() == {}
 

@@ -35,7 +35,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 
 from app.core.errors import BadRequestError, ConvertError, UnknownManifestFamilyError
 
-from .schema import (
+from ..schema import (
     ManifestBoxGroup,
     ManifestContainer,
     ManifestOrder,

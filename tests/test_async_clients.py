@@ -280,7 +280,7 @@ async def test_submit_canonical_async_success(monkeypatch):
 
 
 async def test_submit_manifest_async_success(monkeypatch):
-    from app.orders.manifest import client as manifest_client
+    from app.orders.manifest.submission import client as manifest_client
 
     async def fake_post(url, payload=None, **kwargs):
         assert kwargs["headers"]["sk"] == "sk-token"
@@ -297,7 +297,7 @@ async def test_submit_manifest_async_success(monkeypatch):
 
 
 async def test_submit_manifest_async_network_error(monkeypatch):
-    from app.orders.manifest import client as manifest_client
+    from app.orders.manifest.submission import client as manifest_client
 
     async def fake_post(url, payload=None, **kwargs):
         raise httpx.TimeoutException("timeout")

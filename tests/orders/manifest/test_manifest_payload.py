@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.orders.manifest import parse_manifest
-from app.orders.manifest.payload import build_order_data, to_submit_payload
+from app.orders.manifest.submission.payload import build_order_data, to_submit_payload
 
 
 class TestBuildOrderData:
