@@ -6,12 +6,29 @@ import re
 from datetime import date
 from typing import Any
 
-from .normalize import (
-    normalize_label,
-    normalize_review_issues,
-    parse_date_or_none,
+from .checks.common import (
+    _FIELD_LABEL_VOCAB,
+    _MARKDOWN_PARAGRAPH_PREFIX_RE,
+    _append_issue,
+    _append_top_level_remark,
+    _carrier_from_mbl,
+    _customer_notice_heading_candidates,
+    _deduplicate_review_issues,
+    _extract_explicit_carriers,
+    _extract_explicit_values,
+    _extract_fragmented_dates,
+    _extract_separated_label_values,
+    _extract_table_column_values,
+    _field_value,
+    _header_company_candidates,
+    _looks_like_field_label,
+    _person_name_is_in_source,
+    _recipient_row_extras,
+    _remove_issue,
+    _remove_remark_clauses_containing,
+    _value_grounded_in_source,
 )
-from .post_checks import (
+from .checks.validators import (
     _build_order_note,
     _ground_free_text_fields,
     _inherit_single_container_mbl,
@@ -34,27 +51,10 @@ from .post_checks import (
     _validate_sender_contact,
     _validate_shipper_company,
 )
-from .post_common import (
-    _FIELD_LABEL_VOCAB,
-    _MARKDOWN_PARAGRAPH_PREFIX_RE,
-    _append_issue,
-    _append_top_level_remark,
-    _carrier_from_mbl,
-    _customer_notice_heading_candidates,
-    _deduplicate_review_issues,
-    _extract_explicit_carriers,
-    _extract_explicit_values,
-    _extract_fragmented_dates,
-    _extract_separated_label_values,
-    _extract_table_column_values,
-    _field_value,
-    _header_company_candidates,
-    _looks_like_field_label,
-    _person_name_is_in_source,
-    _recipient_row_extras,
-    _remove_issue,
-    _remove_remark_clauses_containing,
-    _value_grounded_in_source,
+from .normalize import (
+    normalize_label,
+    normalize_review_issues,
+    parse_date_or_none,
 )
 
 _PERSON_FIELDS = ("sender", "sender_contact", "factory.contact")

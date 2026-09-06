@@ -6,13 +6,14 @@ import html
 import re
 from typing import Any
 
-from .normalize import (
+from ..normalize import (
     STANDARD_CONTAINER_SUFFIXES,
     is_known_container_type,
     normalize_container_type,
     normalize_date_value,
 )
-from .post_common import (
+from ..schema import DATE_OR_DATETIME_PATTERN, DATE_PATTERN
+from .common import (
     _BARE_COMPANY_RE,
     _append_issue,
     _carrier_from_mbl,
@@ -24,7 +25,6 @@ from .post_common import (
     _remove_issue,
     _remove_remark_clauses_containing,
 )
-from .schema import DATE_OR_DATETIME_PATTERN, DATE_PATTERN
 
 _MEASUREMENT_LABELS = {
     "packages": ("件数", "包装件数", "packages"),
