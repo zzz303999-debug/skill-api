@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Request, UploadFile
 
-from app.api.bridges import _extract_order_text
+from app.api.bridges import extract_order_text, parse_document_to_order, publish_order
 from app.api.uploads import _read_upload
 from app.core.config import settings
 from app.core.errors import BadRequestError
@@ -38,13 +38,11 @@ async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, 
             details={"max_bytes": settings.api_max_upload_bytes},
         )
 
-    extracted, meta = await _extract_order_text(text)
+    extracted, meta = await extract_order_text(text)
     order_data = build_order_data(extracted)
-    # 下单经 app.main 命名空间解析：测试以 setattr(main_module, "_publish_order", ...)
-    # 注入替身（保持拆分前的 patch 点不变，2026-09）
-    from app.main import _publish_order
-
-    upstream = await _publish_order(
+    # 下单编排经本模块命名空间解析（P1 起不经 app.main）：测试以
+    # setattr(routes.orders, "publish_order", ...) 注入替身
+    upstream = await publish_order(
         order_data,
         room_id=body.roomId,
         user_id=body.userId,
@@ -81,7 +79,8 @@ async def parse_order_document(
     request.state.file_name = file.filename or "unnamed"
     content = await _read_upload(file)
     request.state.file_size = len(content)
-    from app.main import _parse_document_to_order
 
     async with _inflight_guard():
-        return await _parse_document_to_order(content, file.filename or "unnamed")
+        # 编排入口经本模块命名空间解析（P1 起不经 app.main）：测试以
+        # setattr(routes.orders, "parse_document_to_order", ...) 注入替身
+        return await parse_document_to_order(content, file.filename or "unnamed")

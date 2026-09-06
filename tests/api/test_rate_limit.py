@@ -5,7 +5,10 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.api.middleware import rate_limit
-from app.main import _LIMITERS, app
+from app.api.middleware.rate_limit import _LIMITERS
+from app.core import access_log_store
+from app.core.config import settings
+from app.main import app
 
 client = TestClient(app)
 
@@ -108,9 +111,7 @@ def test_build_rate_limited_response_description_from_registry():
 
 
 def test_rate_limit_blocks_heavy_after_threshold(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 2)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
     monkeypatch.setattr(_LIMITERS["light"], "max_requests", 100)
@@ -129,12 +130,10 @@ def test_rate_limit_blocks_heavy_after_threshold(monkeypatch):
 
 def test_rate_limit_records_access_log(monkeypatch):
     captured = []
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 1)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
-    monkeypatch.setattr(main_module.access_log, "record", lambda entry: captured.append(entry))
+    monkeypatch.setattr(access_log_store, "record", lambda entry: captured.append(entry))
 
     client.post("/orders/parse-document")  # 第 1 次放行
     response = client.post("/orders/parse-document")  # 第 2 次 429
@@ -146,9 +145,7 @@ def test_rate_limit_records_access_log(monkeypatch):
 
 
 def test_rate_limit_free_paths_not_limited(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 1)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
     monkeypatch.setattr(_LIMITERS["light"], "max_requests", 1)
@@ -160,10 +157,8 @@ def test_rate_limit_free_paths_not_limited(monkeypatch):
 
 
 def test_rate_limit_whitelist_exempts_ip(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
-    monkeypatch.setattr(main_module, "_rate_limit_whitelist", frozenset({"testclient"}))
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(rate_limit, "_rate_limit_whitelist", frozenset({"testclient"}))
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 0)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
 
@@ -173,9 +168,7 @@ def test_rate_limit_whitelist_exempts_ip(monkeypatch):
 
 
 def test_rate_limit_disabled_passes_through(monkeypatch):
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", False)
+    monkeypatch.setattr(settings, "rate_limit_enabled", False)
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 0)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
 

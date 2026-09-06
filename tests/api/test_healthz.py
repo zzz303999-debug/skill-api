@@ -9,14 +9,14 @@ import threading
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.config import settings
-from app.main import (
+from app.api.routes.health import (
     _probe_dependencies,
     _probe_llm,
     _probe_mineru,
     _probe_order_config,
-    app,
 )
+from app.core.config import settings
+from app.main import app
 
 
 class _ProbeHandler(http.server.BaseHTTPRequestHandler):

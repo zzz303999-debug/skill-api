@@ -1151,7 +1151,7 @@ async def test_parse_document_to_order_rejects_unsupported_extension(monkeypatch
 
 
 async def test_parse_document_route_success(monkeypatch):
-    import app.main as main_module
+    import app.api.routes.orders as main_module
 
     async def fake_parse(file_bytes, filename):
         return {
@@ -1168,7 +1168,7 @@ async def test_parse_document_route_success(monkeypatch):
             "meta": {"order_created": False, "model": "fake"},
         }
 
-    monkeypatch.setattr(main_module, "_parse_document_to_order", fake_parse)
+    monkeypatch.setattr(main_module, "parse_document_to_order", fake_parse)
 
     response = client.post(
         "/orders/parse-document",
@@ -1186,7 +1186,7 @@ async def test_parse_document_route_success(monkeypatch):
 
 
 async def test_parse_document_route_needs_manual_confirmation(monkeypatch):
-    import app.main as main_module
+    import app.api.routes.orders as main_module
 
     async def fake_parse(file_bytes, filename):
         return {
@@ -1202,7 +1202,7 @@ async def test_parse_document_route_needs_manual_confirmation(monkeypatch):
             "meta": {"order_created": False, "model": "fake"},
         }
 
-    monkeypatch.setattr(main_module, "_parse_document_to_order", fake_parse)
+    monkeypatch.setattr(main_module, "parse_document_to_order", fake_parse)
 
     response = client.post(
         "/orders/parse-document",

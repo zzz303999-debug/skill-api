@@ -153,7 +153,7 @@ def test_ip_and_user_agent_recorded():
 
 def test_xff_spoofed_prefix_ignored_for_rate_limit():
     """客户端伪造的 XFF 前缀不影响限流 key：取最后一个地址。"""
-    from app.main import _resolve_client_ip
+    from app.api.middleware.rate_limit import _resolve_client_ip
 
     client = TestClient(app)
     response = client.get(
@@ -186,12 +186,12 @@ def test_query_filter_by_ip():
 
 
 def test_json_body_recorded_for_orders(monkeypatch):
-    import app.main as main_module
+    import app.api.routes.orders as main_module
 
     async def fake_publish(order_data, *, room_id, user_id):
         return {"code": "200", "msg": "ok", "data": []}
 
-    monkeypatch.setattr(main_module, "_publish_order", fake_publish)
+    monkeypatch.setattr(main_module, "publish_order", fake_publish)
     client = TestClient(app)
     resp = client.post(
         "/orders",
@@ -211,7 +211,7 @@ def test_json_body_recorded_for_orders(monkeypatch):
 
 
 def test_json_body_truncated_when_over_limit(monkeypatch):
-    import app.main as main_module
+    import app.api.routes.orders as main_module
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "access_log_body_max_chars", 64)
@@ -219,7 +219,7 @@ def test_json_body_truncated_when_over_limit(monkeypatch):
     async def fake_publish(order_data, *, room_id, user_id):
         return {"code": "200", "msg": "ok", "data": []}
 
-    monkeypatch.setattr(main_module, "_publish_order", fake_publish)
+    monkeypatch.setattr(main_module, "publish_order", fake_publish)
     client = TestClient(app)
     resp = client.post(
         "/orders",
@@ -345,7 +345,7 @@ def test_bill_import_409_summarized_for_log(monkeypatch):
     审计 error_code 保持旧口径 duplicate_bill（审查修正 2026-08-27 补测）。"""
     import json
 
-    import app.main as main_module
+    import app.api.routes.bill_import as main_module
     from app.orders.bill import BillParseResult
 
     summary = {
@@ -368,7 +368,7 @@ def test_bill_import_409_summarized_for_log(monkeypatch):
             meta={},
         )
 
-    monkeypatch.setattr(main_module, "build_result", fake_build_result)
+    monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
     client = TestClient(app)
     resp = client.post(
         "/orders/bill/import",
@@ -417,7 +417,7 @@ def test_bill_import_summarize_disabled_when_paths_empty(monkeypatch):
 
 def test_summarize_import_response_fallback_on_unparseable():
     """摘要函数对非 JSON / 非对象响应回退 None（调用方保持原文）。"""
-    from app.main import _summarize_import_response
+    from app.api.middleware.access_log import _summarize_import_response
 
     assert _summarize_import_response("not json") is None
     assert _summarize_import_response("[1, 2]") is None
@@ -432,7 +432,7 @@ def test_summarize_import_response_truncates_large_meta():
     """未映射表头与建档明细超限时只留前 N 条 + 截断计数。"""
     import json
 
-    from app.main import _summarize_import_response
+    from app.api.middleware.access_log import _summarize_import_response
 
     payload = {
         "file": "a.xlsx",

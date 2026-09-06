@@ -191,7 +191,7 @@ async def test_parse_box_quantity_defaults_to_one(box_value, expected):
 
 
 async def test_create_from_text_extracts_then_publishes(monkeypatch):
-    import app.main as main_module
+    import app.api.routes.orders as main_module
 
     _configure(monkeypatch)
     captured = {}
@@ -206,7 +206,7 @@ async def test_create_from_text_extracts_then_publishes(monkeypatch):
             "data": [{"sn": "EX26040001", "sns": "EX26040001-1"}],
         }
 
-    monkeypatch.setattr(main_module, "_publish_order", fake_publish)
+    monkeypatch.setattr(main_module, "publish_order", fake_publish)
 
     response = client.post(
         "/orders",

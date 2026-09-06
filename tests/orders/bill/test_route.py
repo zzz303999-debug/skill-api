@@ -270,7 +270,7 @@ class TestCreateMode:
 
     def test_unknown_box_type_msg_specific(self, monkeypatch):
         """箱型白名单拦截（unknown_box_type）→ 外层 msg 返回具体原因，而非笼统「添加失败」。"""
-        import app.main as main_module
+        import app.api.routes.bill_import as main_module
         from app.orders.bill import BillParseResult
 
         summary = {
@@ -299,7 +299,7 @@ class TestCreateMode:
                 meta={},
             )
 
-        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -319,7 +319,7 @@ class TestCreateMode:
 
         2026-09-03 扩展：全部失败分支的本地拦截文案从箱型白名单推广到提单号缺失。
         """
-        import app.main as main_module
+        import app.api.routes.bill_import as main_module
         from app.orders.bill import BillParseResult
 
         summary = {
@@ -353,7 +353,7 @@ class TestCreateMode:
                 meta={},
             )
 
-        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -370,7 +370,7 @@ class TestCreateMode:
 
     def test_mixed_block_reasons_box_msg_priority(self, monkeypatch):
         """混合失败原因（缺提单号 + 箱型拒）→ msg 取箱型文案（文件级拦截优先级更高）。"""
-        import app.main as main_module
+        import app.api.routes.bill_import as main_module
         from app.orders.bill import BillParseResult
 
         summary = {
@@ -405,7 +405,7 @@ class TestCreateMode:
                 meta={},
             )
 
-        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
         with TestClient(app) as client:
             r = upload(
                 client,
@@ -658,9 +658,9 @@ def test_error_envelope_payload_too_large_413(monkeypatch):
 
 def test_error_envelope_rate_limited_429(monkeypatch):
     """限流 429 → 统一外壳 code/msg/data + Retry-After（v2.2 起）。"""
-    import app.main as main_module
+    import app.api.middleware.rate_limit as main_module
 
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
     monkeypatch.setattr(main_module, "_rate_limit_whitelist", frozenset())
     monkeypatch.setattr(main_module._LIMITERS["heavy"], "max_requests", 1)
     monkeypatch.setattr(main_module._LIMITERS["heavy"], "_hits", {})
@@ -677,13 +677,13 @@ def test_error_envelope_rate_limited_429(monkeypatch):
 
 def test_error_envelope_server_busy_503(monkeypatch):
     """服务繁忙 503 → 统一外壳 code/msg/data（v2.2 起）。"""
-    import app.main as main_module
+    import app.api.routes.bill_import as main_module
     from app.core.errors import ServiceBusyError
 
     async def fake_build_result(**kwargs):
         raise ServiceBusyError("concurrent tasks full, queue timeout")
 
-    monkeypatch.setattr(main_module, "build_result", fake_build_result)
+    monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
     with TestClient(app) as client:
         r = upload(client, "b.xlsx", b"x")
     assert r.status_code == 503
@@ -961,7 +961,7 @@ class TestAuth:
         审查修正 2026-08-27：默认 _AUTH_FREE_PATHS 豁免该路径使统一 401 分支
         不可达零测试，此处清空豁免验证分支行为（对外开放部署移出豁免时生效）。
         """
-        import app.main as main_module
+        import app.api.middleware.auth as main_module
         from app.core.errors import ERROR_CODE_DESCRIPTIONS
 
         monkeypatch.setattr(settings, "api_key", "test-secret-key")
@@ -1027,7 +1027,7 @@ class TestDedupConflict:
 
     @staticmethod
     def _fake_build_result(monkeypatch, summary: dict):
-        import app.main as main_module
+        import app.api.routes.bill_import as main_module
         from app.orders.bill import BillParseResult
 
         async def fake_build_result(**kwargs):
@@ -1040,7 +1040,7 @@ class TestDedupConflict:
                 meta={},
             )
 
-        monkeypatch.setattr(main_module, "build_result", fake_build_result)
+        monkeypatch.setattr(main_module, "build_result_async", fake_build_result)
 
     def test_all_skipped_returns_409(self, monkeypatch):
         """全部命中成功单注册表（无新建）→ 409 统一外壳（code="409" + 业务数据）。"""

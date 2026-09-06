@@ -129,6 +129,12 @@ _light_limiter = SlidingWindowLimiter(
 )
 _LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
 
+# 免限流 IP 白名单（P1 起定义归位本模块，不经 app.main；settings 逗号分隔解析）。
+# 测试接缝：setattr(middleware.rate_limit, "_rate_limit_whitelist", ...) 注入替身。
+_rate_limit_whitelist = frozenset(
+    ip.strip() for ip in settings.rate_limit_whitelist.split(",") if ip.strip()
+)
+
 
 def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
     """解析客户端 IP，返回 (客户端IP, 原始X-Forwarded-For头)。
@@ -164,10 +170,6 @@ async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:
     if group is None:
         return await call_next(request)
     client_ip, _ = _resolve_client_ip(request)
-    # 免限流白名单经 app.main 命名空间解析：测试以 setattr(main_module,
-    # "_rate_limit_whitelist", ...) 注入替身（保持拆分前的 patch 点不变，2026-09）
-    from app.main import _rate_limit_whitelist
-
     if not client_ip or client_ip in _rate_limit_whitelist:
         return await call_next(request)
     allowed, retry_after = _LIMITERS[group].allow(client_ip)

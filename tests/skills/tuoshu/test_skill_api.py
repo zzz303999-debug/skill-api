@@ -684,12 +684,12 @@ def test_server_busy_returns_503(monkeypatch):
     """在途任务满载且排队超时时返回 503 server_busy（而非 500）。"""
     import asyncio
 
-    import app.main as main
+    import app.core.executor as executor
 
     async def _never_acquire():
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(main._inflight_semaphore, "acquire", _never_acquire)
+    monkeypatch.setattr(executor._inflight_semaphore, "acquire", _never_acquire)
     monkeypatch.setattr(settings, "skill_queue_wait_seconds", 0.05)
     resp = client.post(
         "/skills/tuoshu/extract",

@@ -8,7 +8,7 @@
 - 集成测试：TestClient 全链路 + mock 转换/LLM，验证成功响应 data 内
   {skill, version, result, meta, content} 与原顶层字段迁移一致
 
-路径白名单见 app/main.py `_UNIFIED_RESPONSE_PATHS`；本文件任一场景变红
+路径白名单见 app/api/response_shell.py `_UNIFIED_RESPONSE_PATHS`；本文件任一场景变红
 即说明白名单/异常处理器/中间件分流被破坏（退回 {error: ...} 或
 {"detail": ...} 旧结构）。
 """
@@ -19,9 +19,11 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
+from app.api.middleware.rate_limit import _LIMITERS
 from app.core import skill_registry
+from app.core.config import settings
 from app.core.errors import ConvertError, ParseError
-from app.main import _LIMITERS, app
+from app.main import app
 from app.skills.tuoshu import skill as skill_module
 
 client = TestClient(app)
@@ -91,9 +93,7 @@ def test_422_validation_missing_file():
 
 def test_429_rate_limited(monkeypatch):
     """限流中间件：heavy 档超限 → 429 rate_limited（含 Retry-After 头）。"""
-    import app.main as main_module
-
-    monkeypatch.setattr(main_module.settings, "rate_limit_enabled", True)
+    monkeypatch.setattr(settings, "rate_limit_enabled", True)
     monkeypatch.setattr(_LIMITERS["heavy"], "max_requests", 1)
     monkeypatch.setattr(_LIMITERS["heavy"], "_hits", {})
     monkeypatch.setattr(_LIMITERS["light"], "max_requests", 100)
@@ -130,13 +130,13 @@ def test_500_internal_error(monkeypatch):
 
 def test_503_server_busy(monkeypatch):
     """并发控制：在途任务满载且排队超时 → 503 server_busy。"""
-    import app.main as main_module
+    import app.core.executor as executor
 
     async def _never_acquire():
         await asyncio.sleep(3600)
 
-    monkeypatch.setattr(main_module._inflight_semaphore, "acquire", _never_acquire)
-    monkeypatch.setattr(main_module.settings, "skill_queue_wait_seconds", 0.05)
+    monkeypatch.setattr(executor._inflight_semaphore, "acquire", _never_acquire)
+    monkeypatch.setattr(settings, "skill_queue_wait_seconds", 0.05)
     resp = client.post(
         "/skills/tuoshu/extract",
         files={"file": ("a.xlsx", b"x", "application/octet-stream")},
