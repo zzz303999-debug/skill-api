@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from app.core.errors import ParseError
-from app.skills.tuoshu.finalize import finalize_extraction
+from app.skills.tuoshu.mapping.finalize import finalize_extraction
 from app.skills.tuoshu.normalize import normalize_llm_output
 
 

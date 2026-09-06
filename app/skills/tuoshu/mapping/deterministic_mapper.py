@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .normalize import (
+from ..normalize import (
     extract_number,
     is_separator_row,
     normalize_label,

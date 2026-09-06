@@ -6,7 +6,7 @@ textutil 把老式 .doc 表格展平为 `_pN_` 段落流（标签带与值带分
 
 from __future__ import annotations
 
-from app.skills.tuoshu.finalize import finalize_extraction
+from app.skills.tuoshu.mapping.finalize import finalize_extraction
 
 
 def _finalize(source_text: str, **fields) -> dict:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.skills.tuoshu.deterministic_mapper import (
+from app.skills.tuoshu.mapping.deterministic_mapper import (
     map_template,
     merge_deterministic_values,
 )

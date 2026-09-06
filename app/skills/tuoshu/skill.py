@@ -25,8 +25,8 @@ from app.core.skill_base import SkillBase
 from app.llm import achat_json, image_to_data_url
 from app.mineru import client as mineru
 
-from .deterministic_mapper import map_template, merge_deterministic_values
-from .finalize import finalize_extraction
+from .mapping.deterministic_mapper import map_template, merge_deterministic_values
+from .mapping.finalize import finalize_extraction
 from .normalize import normalize_llm_output
 from .prompt import (
     build_few_shot_messages,

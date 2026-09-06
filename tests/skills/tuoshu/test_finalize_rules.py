@@ -6,7 +6,7 @@ import pytest
 
 from app.skills.tuoshu.checks.common import _clean_labeled_value, _header_company_candidates
 from app.skills.tuoshu.chinese_schema import to_chinese
-from app.skills.tuoshu.finalize import finalize_extraction
+from app.skills.tuoshu.mapping.finalize import finalize_extraction
 from app.skills.tuoshu.normalize import normalize_llm_output
 from app.skills.tuoshu.prompt import format_to_chat_text
 from app.skills.tuoshu.schema import TuoshuOutput

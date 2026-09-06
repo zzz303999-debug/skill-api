@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import Any
 
-from .checks.common import (
+from ..checks.common import (
     _FIELD_LABEL_VOCAB,
     _MARKDOWN_PARAGRAPH_PREFIX_RE,
     _append_issue,
@@ -28,7 +28,7 @@ from .checks.common import (
     _remove_remark_clauses_containing,
     _value_grounded_in_source,
 )
-from .checks.validators import (
+from ..checks.validators import (
     _build_order_note,
     _ground_free_text_fields,
     _inherit_single_container_mbl,
@@ -51,7 +51,7 @@ from .checks.validators import (
     _validate_sender_contact,
     _validate_shipper_company,
 )
-from .normalize import (
+from ..normalize import (
     normalize_label,
     normalize_review_issues,
     parse_date_or_none,
