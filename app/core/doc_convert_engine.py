@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 tuoshu-extractor：任意格式 → Markdown（无损转换）。
 

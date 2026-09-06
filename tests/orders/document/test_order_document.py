@@ -1689,7 +1689,7 @@ def _image_sentinel(file_bytes=b"fake-image", filename="order.png"):
 async def test_image_sentinel_awaits_async_ocr_and_assembles(monkeypatch):
     """图片哨兵：await convert_image_to_parse_result_async → 组装段输出四元组
     （markdown 作 source_text，parser 记入 conversion_meta）。"""
-    import app.skills.tuoshu.convert_service as convert_service_module
+    import app.core.doc_convert as convert_service_module
 
     captured = {}
     monkeypatch.setattr(
@@ -1718,7 +1718,7 @@ async def test_image_sentinel_awaits_async_ocr_and_assembles(monkeypatch):
 async def test_image_sentinel_no_ocr_text_raises(monkeypatch):
     """图片 OCR 无文本（markdown 空）→ ConvertError(vision_disabled_no_ocr)——
     空文档绝不喂 LLM（捏造防护语义与改造前一致）。"""
-    import app.skills.tuoshu.convert_service as convert_service_module
+    import app.core.doc_convert as convert_service_module
 
     monkeypatch.setattr(
         document_module, "_convert_file", lambda fb, fn: _image_sentinel(fb, fn)
@@ -1741,7 +1741,7 @@ async def test_image_sentinel_no_ocr_text_raises(monkeypatch):
 async def test_doc_sentinel_awaits_async_convert_and_assembles(monkeypatch):
     """文档哨兵：await convert_to_markdown_async → 组装段输出四元组
     （Word/Excel 本地转换 + PDF 页级路由均收敛于 async 入口）。"""
-    import app.skills.tuoshu.convert_service as convert_service_module
+    import app.core.doc_convert as convert_service_module
 
     captured = {}
     monkeypatch.setattr(
@@ -1773,7 +1773,7 @@ async def test_doc_sentinel_awaits_async_convert_and_assembles(monkeypatch):
 async def test_doc_sentinel_hint_defense_routes_to_scan_ocr(monkeypatch):
     """文档组装 HINT 防御链：async 转换返回 HINT（扫描 PDF 形态）→ 组装产出
     _NeedsMineruOcr → _resolve_scan_sentinel 终解（await parse_document_async）。"""
-    import app.skills.tuoshu.convert_service as convert_service_module
+    import app.core.doc_convert as convert_service_module
 
     monkeypatch.setattr(
         document_module,

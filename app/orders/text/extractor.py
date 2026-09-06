@@ -9,7 +9,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.core.errors import BadRequestError
-from app.skills.tuoshu.normalizer import normalize_date_value
+from app.core.text_normalize import normalize_date_value
 
 from .schema import BoxItem, DriverItem, OrderTextExtraction
 

@@ -5,7 +5,9 @@ import asyncio
 import pytest
 
 import app.mineru.client as mineru_module
+from app.core import doc_convert as convert_service
 from app.core.config import settings
+from app.core.doc_convert import ConversionText, detect_image_mime
 from app.core.errors import ConvertError
 from app.mineru.client import (
     MINERU_REQUEST_PROFILE,
@@ -18,8 +20,6 @@ from app.mineru.client import (
     _strip_markdown_images,
     parse_document_async,
 )
-from app.skills.tuoshu import convert_service
-from app.skills.tuoshu.convert_service import ConversionText, detect_image_mime
 
 
 def test_extract_markdown_from_nested_mineru_response():
@@ -502,7 +502,7 @@ def _make_fake_pdf(pages_text):
 @pytest.mark.asyncio
 async def test_mixed_pdf_async_routes_only_bad_page_to_mineru(monkeypatch):
     """async 版与同步版同语义：合格页 pdfplumber 直出，仅不合格页送 OCR。"""
-    import app.skills.tuoshu.convert_service as convert_service
+    import app.core.doc_convert as convert_service
 
     pdfplumber, FakePdf = _make_fake_pdf(
         ["提单号 船名 件数 " + "有效文本" * 20, ""]
@@ -531,7 +531,7 @@ async def test_mixed_pdf_async_routes_only_bad_page_to_mineru(monkeypatch):
 async def test_pdf_page_routing_async_bounds_ocr_concurrency(monkeypatch):
     """多页 OCR：gather 并发受 mineru_ocr_concurrency 有界（峰值 = 上限而非任务数），
     结果按文档序合并（页序不因完成顺序漂移）。"""
-    import app.skills.tuoshu.convert_service as convert_service
+    import app.core.doc_convert as convert_service
 
     pdfplumber, FakePdf = _make_fake_pdf(["", "", ""])  # 3 页全不合格 → 全 OCR
 

@@ -1,6 +1,6 @@
 """附件文档 → 下单接口字段转换（不实际下单）。
 
-流程：上传文件 → 复用 tuoshu 转换链得到 markdown/vision 内容 → LLM 按
+流程：上传文件 → 复用 core 文档转换链（doc_convert）得到 markdown/vision 内容 → LLM 按
 `OrderDocumentExtraction` schema 抽取 → 归一化并校验必填字段 → 组装成
 下单接口的 order_data 返回，调用方自行决定是否提交。
 """
@@ -15,15 +15,15 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
-from app.core.errors import BadRequestError, ConvertError, ParseError
-from app.core.logging_conf import get_logger
-from app.llm import achat_json, image_to_data_url
-from app.mineru import client as mineru
-from app.skills.tuoshu.convert_service import (
+from app.core.doc_convert import (
     SUPPORTED_EXTS,
     is_image,
     render_pdf_pages,
 )
+from app.core.errors import BadRequestError, ConvertError, ParseError
+from app.core.logging_conf import get_logger
+from app.llm import achat_json, image_to_data_url
+from app.mineru import client as mineru
 
 # 规则族 re-export（拆分兼容层：纯函数本体在 rules；测试与历史
 # import 路径保持有效）
@@ -508,7 +508,7 @@ async def _convert_file_async(
     """
     import asyncio
 
-    from app.skills.tuoshu.convert_service import (
+    from app.core.doc_convert import (
         convert_image_to_parse_result_async,
         convert_to_markdown_async,
     )

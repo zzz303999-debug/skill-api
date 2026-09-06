@@ -119,7 +119,7 @@ def test_pending_expected_candidate_is_schema_valid(case):
 @pytest.mark.asyncio
 async def test_local_parser_golden_regression(case, monkeypatch):
     from app.core.config import settings
-    from app.skills.tuoshu.convert_service import convert_to_markdown_async
+    from app.core.doc_convert import convert_to_markdown_async
 
     monkeypatch.setattr(settings, "mineru_enabled", False)
     document = _case_path(case, "document")
@@ -192,9 +192,9 @@ def test_expected_template_route_is_pinned(case):
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
 @pytest.mark.asyncio
 async def test_quality_router_matches_expected_parser(case, monkeypatch):
+    from app.core import doc_convert as convert_service
     from app.core.config import settings
     from app.mineru.client import MinerUParseResult
-    from app.skills.tuoshu import convert_service
 
     document = _case_path(case, "document")
     monkeypatch.setattr(settings, "mineru_enabled", True)

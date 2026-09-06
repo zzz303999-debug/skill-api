@@ -12,13 +12,12 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from app.core import doc_convert_engine as _conv
 from app.core.config import settings
 from app.core.errors import BadRequestError, ConvertError
 from app.core.logging_conf import get_logger
 from app.mineru import client as mineru
 from app.mineru.schema import PageQuality, ParsedPage, ParseIssue, ParseResult
-
-from . import converter as _conv
 
 log = get_logger(__name__)
 

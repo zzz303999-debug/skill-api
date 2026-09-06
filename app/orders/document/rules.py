@@ -13,7 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.core.errors import ParseError
-from app.skills.tuoshu.normalizer import (
+from app.core.text_normalize import (
     STANDARD_CONTAINER_LENGTHS,
     STANDARD_CONTAINER_SUFFIXES,
     normalize_date_value,

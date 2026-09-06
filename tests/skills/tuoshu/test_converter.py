@@ -11,8 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.core import doc_convert as convert_service
+from app.core import doc_convert_engine as converter
 from app.core.errors import BadRequestError, ConvertError
-from app.skills.tuoshu import convert_service, converter
 
 
 def _make_complex_docx(tmp_path: Path) -> Path:
