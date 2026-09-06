@@ -6,7 +6,7 @@ import pytest
 
 from app.core.errors import ParseError
 from app.skills.tuoshu.finalize import finalize_extraction
-from app.skills.tuoshu.normalizer import normalize_llm_output
+from app.skills.tuoshu.normalize import normalize_llm_output
 
 
 def test_business_number_and_customs_number_are_not_conflated():

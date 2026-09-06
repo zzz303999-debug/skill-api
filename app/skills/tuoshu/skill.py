@@ -27,7 +27,7 @@ from app.mineru import client as mineru
 
 from .deterministic_mapper import map_template, merge_deterministic_values
 from .finalize import finalize_extraction
-from .normalizer import normalize_llm_output
+from .normalize import normalize_llm_output
 from .prompt import (
     build_few_shot_messages,
     build_system_prompt,

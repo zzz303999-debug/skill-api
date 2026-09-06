@@ -6,7 +6,7 @@ import html
 import re
 from typing import Any
 
-from .normalizer import (
+from .normalize import (
     STANDARD_CONTAINER_SUFFIXES,
     is_known_container_type,
     normalize_container_type,

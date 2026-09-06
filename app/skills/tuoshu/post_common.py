@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .normalizer import (
+from .normalize import (
     is_separator_row,
     normalize_label,
     parse_date_or_none,

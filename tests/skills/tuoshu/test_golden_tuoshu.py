@@ -15,7 +15,7 @@ import pytest
 
 from app.skills.tuoshu.deterministic_mapper import map_template
 from app.skills.tuoshu.finalize import finalize_extraction
-from app.skills.tuoshu.normalizer import normalize_llm_output
+from app.skills.tuoshu.normalize import normalize_llm_output
 from app.skills.tuoshu.prompt import detect_prompt_route
 from app.skills.tuoshu.schema import TuoshuOutput
 

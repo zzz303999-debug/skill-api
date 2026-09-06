@@ -6,7 +6,7 @@ import re
 from datetime import date
 from typing import Any
 
-from .normalizer import (
+from .normalize import (
     normalize_label,
     normalize_review_issues,
     parse_date_or_none,
