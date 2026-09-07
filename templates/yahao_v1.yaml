@@ -116,6 +116,9 @@ fees:
     车辆成本.预进港: pre_inport
     车辆成本.其它费: other
   unmapped_fee: to_other
+    # 2026-09-07：公司利润为业务展示列非应收费用（B1' 动态收录防误收声明）
+  ignore_headers:
+  - 公司利润
   fee_defaults:
     price_type: "1"
     is_profit: "1"

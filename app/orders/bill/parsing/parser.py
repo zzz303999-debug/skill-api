@@ -22,7 +22,7 @@ from typing import Any
 
 from app.core.errors import BadRequestError
 
-from ..fees.fee_name_map import canonicalize_fee, is_new_fee_schema
+from ..fees.fee_name_map import canonicalize_fee, canonicalize_fee_name, is_new_fee_schema
 from ..schema import (
     HEADER_ALIASES,
     HEADER_COLUMN_MAP,
@@ -486,20 +486,46 @@ def _parse_with_template(
     canonical_rows: list[dict] = [] if not is_billrow else []
 
     # 未知列动态费用收录（2026-09-04 用户拍板：费用项不写死、账单新增费用列
-    # 无需先声明模板）：仅 BillRow 语义模板（jinxin/builtin 迁移，费用名直配）
-    # ——数据区含金额的未知列自动转费用列（列名去空白归一作费用名），金额进
-    # fees、非数字原文保留，与声明费用列同口径；纯文本未知列保持上报。
-    # canonical 家族（T10 channels）费目需字典码映射，未知列不走此路（沿用
-    # L3 new_fee 降级上报，人工固化模板补 fees 映射）。
-    if is_billrow and unmatched_raw:
+    # 无需先声明模板）：数据区含金额的未知列自动转费用列（列名去空白归一作
+    # 费用名），金额进费用、非数字原文保留，与声明费用列同口径；纯文本未知列
+    # 保持上报。
+    # B1'（2026-09-07 用户拍板）：两家族统一收录——此前仅 BillRow 语义模板生效，
+    # canonical 家族（AI 映射/L1）未知金额列被沉默吞掉（生产实证：L3 认出运费列
+    # 却只上报不解析，费用管理无建档）。canonical 收录列行级走 _fees，code 经
+    # 别名字典（命中→标准码；未命中→other+原名，建档由 fee_bootstrap B2 兑底）。
+    # 边界：仅单行表头（column_range 家族，sections 空）收录——two_row 区块表头
+    # 的费用区由区块结构严格界定（_discover_fee_columns two_row 分支），区块外
+    # 表尾列（抬头费/港杂费等杂项段）语义无保证，保持上报不收录（yahao golden
+    # 实证：区块外收录打破对账恒等）。
+    # 防误收：列名含「合计/小计/利润」（对账锚点/内部展示特征，与 _ANCHOR_KEYWORDS
+    # 同口径）不收；row_anchor 序号列不收（junyu 新式样序号列值 1 被误收事故
+    # 回归：序号是行键非金额）；模板级 fees.ignore_headers 同样生效（与
+    # _discover_fee_columns 共享排除语义，junyu 箱量列同因）；命中 IGNORED_HEADERS
+    # 的列已在 unmatched_raw 构造时排除。
+    _anchor_name = normalize_header(str(header_cfg.get("row_anchor") or "序号"))
+    _ignore_names = {
+        normalize_header(str(n)) for n in (fees_cfg.get("ignore_headers") or [])
+    }
+    dynamic_fee_cols: dict[int, str] = {}  # canonical 家族收录列（列号→费用名）
+    if unmatched_raw and not any(sections):
         for col, raw_text in list(unmatched_raw.items()):
             name = normalize_header(raw_text)
-            if not name:
+            if (
+                not name
+                or name == _anchor_name
+                or "合计" in name
+                or "小计" in name
+                or "利润" in name
+                or name in _ignore_names
+            ):
                 continue
             for row in range(header_row + 1, view.nrows + 1):
                 raw = view.cell(row, col)
                 if raw is not None and _to_money(raw) is not None:
-                    fee_cols[col] = name
+                    if is_billrow:
+                        fee_cols[col] = name
+                    else:
+                        dynamic_fee_cols[col] = name
                     del unmatched_raw[col]
                     break
     unmatched_hits = {col: 0 for col in unmatched_raw}
@@ -590,14 +616,37 @@ def _parse_with_template(
                         "money": money,
                     }
                 )
-            for col, (section, name) in anchor_cols.items():
+        # B1'：canonical 家族动态收录列的行级抽取（金额→_fees；code 走别名字典，
+        # 未命中归 other+原名——归集侧 _merge_fee_note 合并，建档由 B2 兑底）
+        if dynamic_fee_cols:
+            for col, name in dynamic_fee_cols.items():
                 raw = view.cell(row, col)
                 if raw is None or not str(raw).strip():
                     continue
                 money = _to_money(raw)
-                if money is None:
-                    continue
-                anchors.setdefault(section, {})[name] = money
+                if money is None or money == 0:
+                    continue  # 空值/0 不生成记录（与新 fees schema 同口径）
+                code, _ = canonicalize_fee_name(name)
+                fee_items.append(
+                    {
+                        "section": "",
+                        "name": name,
+                        "channel": "shou",
+                        "code": code,
+                        "import": True,
+                        "reconcile": True,
+                        "negative": False,
+                        "money": money,
+                    }
+                )
+        for col, (section, name) in anchor_cols.items():
+            raw = view.cell(row, col)
+            if raw is None or not str(raw).strip():
+                continue
+            money = _to_money(raw)
+            if money is None:
+                continue
+            anchors.setdefault(section, {})[name] = money
         if not values and not fees_map and not fee_items:
             if is_billrow:
                 # 与迁移前 read_data_rows 一致：仅未映射列有值的行也保留（字段为空）
