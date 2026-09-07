@@ -18,8 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.core.config import settings
 from app.core.logging_conf import get_logger
+from app.orders.registry_common import atomic_write_json, registry_storage_path
 
 log = get_logger(__name__)
 
@@ -80,14 +80,9 @@ class MasterDataStore:
         return data
 
     def _save(self) -> None:
-        """原子写：临时文件 + replace（进程崩溃不损坏主文件）。"""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
+        """原子写：委托 registry_common.atomic_write_json（同目录临时文件 + replace，
+        进程崩溃不损坏主文件；与两侧 imported_registry 同一实现，P6 模式）。"""
+        atomic_write_json(self.path, self._data)
 
     def reload(self) -> None:
         """重新从磁盘加载（测试/多进程热加载用）。"""
@@ -177,8 +172,9 @@ class MasterDataStore:
 
 
 def store_path() -> Path:
-    """计数存储文件路径：{storage_dir}/master_data.json（测试可 monkeypatch）。"""
-    return settings.storage_dir / "master_data.json"
+    """计数存储文件路径：{storage_dir}/master_data.json（委托 registry_common，
+    与注册表同模式；测试可 monkeypatch）。"""
+    return registry_storage_path("master_data.json")
 
 
 # 进程内单例（惰性；测试用 reload_store 重置路径与内存）
