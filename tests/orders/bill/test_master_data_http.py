@@ -18,14 +18,12 @@ import app.core.http_client as http_client_module
 import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.master_data.config as md_cfg_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
+from app.orders.bill.master_data.keys import client_key, driver_key, factory_key
 from app.orders.bill.master_data.orchestrator import (
     KIND_CLIENT,
     KIND_DRIVER,
     KIND_FACTORY,
     KIND_TRUCK,
-    client_key,
-    driver_key,
-    factory_key,
     run_master_data_async,
 )
 from app.orders.bill.master_data.store import get_master_data_store

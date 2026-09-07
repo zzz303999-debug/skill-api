@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from typing import Any
 
@@ -38,6 +37,12 @@ from .config import (
     load_config,
     sn_for,
 )
+from .keys import (
+    client_key,
+    driver_key,
+    factory_key,
+    plate_key,
+)
 from .store import DEFAULT_OWNER, get_master_data_store
 
 log = get_logger(__name__)
@@ -47,51 +52,6 @@ COUNT_KINDS: tuple[str, ...] = (KIND_CLIENT, KIND_FACTORY, KIND_DRIVER)
 
 # 报告未达阈值 TOP 清单条数上限
 PENDING_TOP_N = 10
-
-# 空白归一：全部空白（含全角空格/连续空白）一律删除——任何空白差异都不产生
-# 新计数键（防「锦煦 」/「锦　煦」/「锦 煦」算两个；宁合并不拆分）
-_WHITESPACE_RE = re.compile(r"\s+")
-_FULL_WIDTH_RE = re.compile(r"[\uFF01-\uFF5E]")
-
-
-def _to_half_width(text: str) -> str:
-    """全角 → 半角（全角字母/数字/符号；全角空格单独处理）。"""
-
-    def _sub(ch: str) -> str:
-        code = ord(ch)
-        return chr(code - 0xFEE0) if 0xFF01 <= code <= 0xFF5E else ch
-
-    return "".join(_sub(ch) for ch in text)
-
-
-def normalize_key(text: str) -> str:
-    """归一名：全角→半角 + 删除全部空白（计数键共用口径；见 _WHITESPACE_RE 注释）。"""
-    if not text:
-        return ""
-    return _WHITESPACE_RE.sub("", _to_half_width(str(text))).strip()
-
-
-def plate_key(plate: str | None) -> str:
-    """车牌归一：全大写 + 去空白（T17 明确：车牌额外做全大写+去空格归一）。"""
-    if not plate:
-        return ""
-    return normalize_key(str(plate)).upper()
-
-
-def client_key(name: str | None) -> str:
-    """客户计数键：归一名。"""
-    return normalize_key(name)
-
-
-def factory_key(name: str | None, address: str | None) -> str:
-    """工厂计数键：「名+地址」复合键（口径 1；地址缺失时退化为按名）。"""
-    return f"{normalize_key(name)}|{normalize_key(address)}"
-
-
-def driver_key(name: str | None, plate: str | None) -> str:
-    """司机+车辆计数键：「司机名+车牌」组合键（口径 2——同人换车/同车换人
-    算不同档案；车牌缺失时退化为按司机名）。"""
-    return f"{normalize_key(name)}|{plate_key(plate)}"
 
 
 def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate]:
