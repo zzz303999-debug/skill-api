@@ -231,6 +231,9 @@ def read_data_rows(
     未知列动态收录（2026-09-04）：数据区含金额的未知列自动转费用列，金额进
     费用、非数字原文保留（与声明费用列同口径）；未收录列仅在其数据区至少有
     一个非空单元格时上报（全空装饰列/间距列不报；AI 明确 ignore 的列不报）。
+    忽略列二次收录（2026-09-07 B1）：AI/模板忽略列（_ignored_cols）同样过
+    金额判据——数据区有可转金额的收为费用列（列名命中 IGNORED_HEADERS 的
+    对账列除外），修复 L3 闸门 c 降级后新费用列被沉默吞掉的问题。
     """
     data_cols, fee_cols, unmatched_cols = _header_columns(
         view, header_row, data_lookup, fee_lookup, ignored_cols
@@ -239,6 +242,23 @@ def read_data_rows(
         view, header_row, unmatched_cols
     )
     fee_cols = {**fee_cols, **dynamic_fee_cols}
+    # B1：忽略列金额判据二次收录（2026-09-07 用户拍板）——L3 闸门 c 将白名单外
+    # 费用列降级 ignore 并固化 _ignored_cols，堵死了动态收录入口（模板路径新
+    # 费用列沉默丢失）；列名命中 IGNORED_HEADERS（状态/已收付对账列，数据区
+    # 可能全是金额）不收，防误收。
+    if ignored_cols:
+        ignored_unmatched = {
+            col: _header_text(view.merged_cell(header_row, col))
+            for col in ignored_cols
+            if col not in data_cols and col not in fee_cols
+        }
+        ignored_unmatched = {
+            col: text
+            for col, text in ignored_unmatched.items()
+            if text and normalize_header(text) not in IGNORED_HEADERS
+        }
+        recovered_fee_cols, _ = _dynamic_fee_cols(view, header_row, ignored_unmatched)
+        fee_cols.update(recovered_fee_cols)
     unmatched_counts = {col: 0 for col in unmatched_cols}
 
     rows: list[BillRow] = []

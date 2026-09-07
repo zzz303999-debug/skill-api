@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import app.orders.bill.parsing.template_store as template_store
 from app.orders.bill.aggregation.aggregator import _fee_entries
+from app.orders.bill.parsing.parser import _SheetView, read_data_rows
 from app.orders.bill.schema import BillRow
 
 _LEGACY_TEMPLATE = {
@@ -134,3 +135,62 @@ class TestAiTargetsDynamic:
         enum_after = ai_header._ai_schema()["properties"]["mapping"]["items"]["properties"]["target"]["enum"]
         assert "fee:港杂费" in enum_after
         assert "fee:港杂费" not in enum_base  # 新快照含、旧快照不含（证明非 import 冻结）
+
+
+class TestIgnoredColsRecovery:
+    """B1（2026-09-07 用户拍板）：忽略列金额判据二次收录。
+
+    背景：L3 闸门 c 将白名单外费用列降级 ignore 并固化 _ignored_cols，
+    堵死动态收录入口（模板路径新费用列沉默丢失、费用管理无建档）。
+    """
+
+    @staticmethod
+    def _view(rows: list[list[object]]) -> _SheetView:
+        """构造单 sheet 视图：rows[0] 为表头，其余为数据行（1-based 访问）。"""
+
+        def get_cell(r: int, c: int):
+            try:
+                return rows[r - 1][c - 1]
+            except (IndexError, TypeError):
+                return None
+
+        return _SheetView(len(rows), max(len(r) for r in rows), {}, get_cell)
+
+    def test_ignored_money_col_recovered_as_fee(self):
+        """忽略列数据区有金额 → 收为费用列（闸门 c 降级列复活，费用名=列名）。"""
+        view = self._view([
+            ["序号", "提单号", "未知附加费", "备注列"],
+            ["1", "BL001", 100.0, "文本"],
+        ])
+        rows, unmatched = read_data_rows(view, 1, ignored_cols={3, 4})
+        assert rows[0].fees == {"未知附加费": 100.0}
+        assert unmatched == []  # 忽略列不告警语义保持
+
+    def test_ignored_reconcile_headers_not_recovered(self):
+        """列名命中 IGNORED_HEADERS（已付金额）→ 不收（防对账列误收；数据区全是金额）。"""
+        view = self._view([
+            ["序号", "提单号", "已付金额"],
+            ["1", "BL001", 500.0],
+        ])
+        rows, unmatched = read_data_rows(view, 1, ignored_cols={3})
+        assert rows[0].fees == {}
+
+    def test_ignored_text_col_not_recovered_no_warning(self):
+        """纯文本忽略列（无可转金额）→ 不收、不告警（保持既有语义）。"""
+        view = self._view([
+            ["序号", "提单号", "月份"],
+            ["1", "BL001", "九月"],
+        ])
+        rows, unmatched = read_data_rows(view, 1, ignored_cols={3})
+        assert rows[0].fees == {}
+        assert unmatched == []
+
+    def test_non_ignored_unknown_money_col_still_dynamic(self):
+        """非忽略的未知金额列 → 原有动态收录不受 B1 影响（回归锁定）。"""
+        view = self._view([
+            ["序号", "提单号", "新费用X"],
+            ["1", "BL001", 88.0],
+        ])
+        rows, unmatched = read_data_rows(view, 1)  # 无 ignored_cols
+        assert rows[0].fees == {"新费用X": 88.0}
+        assert unmatched == []  # 已收为费用列，不再上报未识别
