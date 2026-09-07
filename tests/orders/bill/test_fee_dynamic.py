@@ -194,3 +194,102 @@ class TestIgnoredColsRecovery:
         rows, unmatched = read_data_rows(view, 1)  # 无 ignored_cols
         assert rows[0].fees == {"新费用X": 88.0}
         assert unmatched == []  # 已收为费用列，不再上报未识别
+
+
+class TestIgnoredColsTemplatePath:
+    """B1' 补丁（2026-09-07 小王费实证）：_parse_with_template 路径收录
+    _ignored_cols（AI 降级 ignore 固化列）——canonical 家族金额列进 _fees。"""
+
+    HEADERS = ["序号", "客户名称", "提单号", "箱型箱量", "小王费"]
+
+    @staticmethod
+    def _template(ignored_cols: list[int]) -> dict:
+        """L3 候选形态模板：columns 标准字段 + _ignored_cols（无 fees 段）。"""
+        return {
+            "template_id": "ignored_recover_v1",
+            "family": "ignored_recover",
+            "name": "忽略列收录最小模板（测试）",
+            "match": {
+                "fingerprints": [template_store.compute_fingerprint(TestIgnoredColsTemplatePath.HEADERS)],
+                "family_min_overlap": 0.3,
+            },
+            "header": {"row_anchor": "序号", "two_row": False},
+            "data": {"row_filter": "seq_numeric"},
+            "columns": {
+                "seq": "序号",
+                "customer_name": "客户名称",
+                "bl_no": "提单号",
+                "box_type_qty": "箱型箱量",
+            },
+            "normalizers": {"box_type_qty": "box_parse"},
+            "_ignored_cols": ignored_cols,
+        }
+
+    COL_LETTERS = ["A", "B", "C", "D", "E"]
+
+    @classmethod
+    def _headers_dict(cls) -> dict:
+        return dict(zip(cls.COL_LETTERS, cls.HEADERS, strict=True))
+
+    def _rows(self, fee_value: object) -> list[dict]:
+        return [{"A": 1, "B": "客户甲", "C": "OOLU1", "D": "40HQ", "E": fee_value}]
+
+    def _parse(self, monkeypatch, ignored_cols: list[int], fee_value: object):
+        from pathlib import Path
+
+        from app.orders.bill import parse_bill
+        from app.orders.bill.aggregation.canonical_aggregator import group_canonical
+        from helpers import build_bill_bytes
+
+        tpl = self._template(ignored_cols)
+        monkeypatch.setattr(template_store, "_TEMPLATE_CACHE", {"ignored_recover_v1": tpl})
+        bill = build_bill_bytes(self._headers_dict(), self._rows(fee_value))
+        path = Path(".tmp") / "ignored_recover.xlsx"
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(bill)
+        out = parse_bill(path)
+        canon = group_canonical(out.canonical_rows, out.template_match.template, out.period)
+        return out, (canon[0].fees if canon else [])
+
+    def test_ignored_fee_col_recovered_to_other(self, monkeypatch):
+        """AI 降级 ignore 的费用列（小王费，金额 77）→ 收进 _fees（other+原名），
+        建档由 fee_bootstrap B2 兑底（费用管理自动建档）。"""
+        out, fees = self._parse(monkeypatch, ignored_cols=[5], fee_value=77.0)
+        other = [f for f in fees if f.code == "other"]
+        assert other and other[0].money == 77.0
+        assert "小王费" in (other[0].note or "")
+
+    def test_ignored_anchor_col_not_recovered(self, monkeypatch):
+        """ignored 的对账列（未付，锚点特征）数据区全金额 → 不收（防重复计费）。"""
+
+        # 前提：未付靠锚点特征排除（_is_anchor_column），非 IGNORED_HEADERS
+        tpl = self._template(ignored_cols=[5])
+        monkeypatch.setattr(template_store, "_TEMPLATE_CACHE", {"ignored_recover_v1": tpl})
+        from pathlib import Path
+
+        from app.orders.bill import parse_bill
+        from app.orders.bill.aggregation.canonical_aggregator import group_canonical
+        from helpers import build_bill_bytes
+
+        bill = build_bill_bytes(self._headers_dict(), self._rows(15.0))
+        path = Path(".tmp") / "ignored_anchor.xlsx"
+        path.write_bytes(bill)
+        out = parse_bill(path)
+        canon = group_canonical(out.canonical_rows, out.template_match.template, out.period)
+        fees = canon[0].fees if canon else []
+        assert not [f for f in fees if f.note and "未付" in f.note]
+
+    def test_ignored_text_col_kept_unmatched(self, monkeypatch):
+        """纯文本 ignored 列（月份类）→ 不收录、保持静默（_ignored_cols 不告警）。"""
+        tpl = self._template(ignored_cols=[5])
+        monkeypatch.setattr(template_store, "_TEMPLATE_CACHE", {"ignored_recover_v1": tpl})
+        from pathlib import Path
+
+        from app.orders.bill import parse_bill
+        from helpers import build_bill_bytes
+
+        bill = build_bill_bytes(self._headers_dict(), self._rows("九月"))
+        path = Path(".tmp") / "ignored_text.xlsx"
+        path.write_bytes(bill)
+        out = parse_bill(path)
+        assert out.unmatched_headers == []  # 忽略列不告警语义保持

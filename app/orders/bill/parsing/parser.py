@@ -36,6 +36,8 @@ from . import template_store
 from .columns import (
     business_end_col,
     discover_fee_columns,
+    is_anchor_column,
+    is_note_column,
     match_source_cols,
     normalize_header,
 )
@@ -244,8 +246,8 @@ def read_data_rows(
     fee_cols = {**fee_cols, **dynamic_fee_cols}
     # B1：忽略列金额判据二次收录（2026-09-07 用户拍板）——L3 闸门 c 将白名单外
     # 费用列降级 ignore 并固化 _ignored_cols，堵死了动态收录入口（模板路径新
-    # 费用列沉默丢失）；列名命中 IGNORED_HEADERS（状态/已收付对账列，数据区
-    # 可能全是金额）不收，防误收。
+    # 费用列沉默丢失）；锚点特征列（合计/未付等对账列，数据区可能全是金额）
+    # 与备注/IGNORED_HEADERS 名不收，防误收。
     if ignored_cols:
         ignored_unmatched = {
             col: _header_text(view.merged_cell(header_row, col))
@@ -255,7 +257,10 @@ def read_data_rows(
         ignored_unmatched = {
             col: text
             for col, text in ignored_unmatched.items()
-            if text and normalize_header(text) not in IGNORED_HEADERS
+            if text
+            and not is_anchor_column(normalize_header(text))
+            and not is_note_column(normalize_header(text))
+            and normalize_header(text) not in IGNORED_HEADERS
         }
         recovered_fee_cols, _ = _dynamic_fee_cols(view, header_row, ignored_unmatched)
         fee_cols.update(recovered_fee_cols)
@@ -497,25 +502,34 @@ def _parse_with_template(
     # 的费用区由区块结构严格界定（_discover_fee_columns two_row 分支），区块外
     # 表尾列（抬头费/港杂费等杂项段）语义无保证，保持上报不收录（yahao golden
     # 实证：区块外收录打破对账恒等）。
-    # 防误收：列名含「合计/小计/利润」（对账锚点/内部展示特征，与 _ANCHOR_KEYWORDS
-    # 同口径）不收；row_anchor 序号列不收（junyu 新式样序号列值 1 被误收事故
-    # 回归：序号是行键非金额）；模板级 fees.ignore_headers 同样生效（与
-    # _discover_fee_columns 共享排除语义，junyu 箱量列同因）；命中 IGNORED_HEADERS
-    # 的列已在 unmatched_raw 构造时排除。
+    # 防误收：锚点特征（_is_anchor_column：合计/小计/已收/未收/已付/未付/利润，
+    # 与 _ANCHOR_KEYWORDS 同口径）、备注类列、命中 IGNORED_HEADERS 的列、
+    # row_anchor 序号列（junyu 新式样序号列值 1 被误收事故回归：序号是行键
+    # 非金额）、模板级 fees.ignore_headers（junyu 箱量列）均不收；命中
+    # IGNORED_HEADERS 的列已在 unmatched_raw 构造时排除，锚点/备注在此统一排除。
+    # 收录源扩展（小王费实证）：_ignored_cols（AI 降级 ignore 固化列）同样过
+    # 金额判据——否则 L3 白名单外费用列降级固化后依然被沉默吞掉。
     _anchor_name = normalize_header(str(header_cfg.get("row_anchor") or "序号"))
     _ignore_names = {
         normalize_header(str(n)) for n in (fees_cfg.get("ignore_headers") or [])
     }
+    candidates: dict[int, str] = dict(unmatched_raw)
+    for _col in ignored_cols:
+        if _col in mapped_cols_flat or _col in candidates:
+            continue
+        _text = _header_text(view.merged_cell(header_row, _col))
+        if _text:
+            candidates[_col] = _text
     dynamic_fee_cols: dict[int, str] = {}  # canonical 家族收录列（列号→费用名）
-    if unmatched_raw and not any(sections):
-        for col, raw_text in list(unmatched_raw.items()):
+    if candidates and not any(sections):
+        for col, raw_text in list(candidates.items()):
             name = normalize_header(raw_text)
             if (
                 not name
                 or name == _anchor_name
-                or "合计" in name
-                or "小计" in name
-                or "利润" in name
+                or is_anchor_column(name)
+                or is_note_column(name)
+                or name in IGNORED_HEADERS
                 or name in _ignore_names
             ):
                 continue
@@ -526,7 +540,7 @@ def _parse_with_template(
                         fee_cols[col] = name
                     else:
                         dynamic_fee_cols[col] = name
-                    del unmatched_raw[col]
+                    unmatched_raw.pop(col, None)
                     break
     unmatched_hits = {col: 0 for col in unmatched_raw}
 
