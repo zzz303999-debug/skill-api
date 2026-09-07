@@ -15,7 +15,6 @@ import yaml
 import app.core.http_client as http_client_module
 import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.master_data.config as md_cfg_module
-import app.orders.bill.master_data.orchestrator as md_module
 from app.orders.bill import BoxGroup, CanonicalOrder, build_result_async
 from app.orders.bill.master_data.orchestrator import (
     KIND_CLIENT,
@@ -33,6 +32,7 @@ from app.orders.bill.master_data.orchestrator import (
     sn_for,
 )
 from app.orders.bill.master_data.store import MasterDataStore, get_master_data_store
+from app.orders.bill.submission.imported_registry import owner_key
 from app.orders.bill.submission.payload import build_order_payload
 
 pytestmark = pytest.mark.asyncio
@@ -809,8 +809,8 @@ class TestOwnerIsolation:
     async def test_store_record_get_isolated_by_owner(self, md_config):
         md_config(_default_cfg(threshold=5))
         store = get_master_data_store()
-        owner_a = md_module.owner_key("sk-a")
-        owner_b = md_module.owner_key("sk-b")
+        owner_a = owner_key("sk-a")
+        owner_b = owner_key("sk-b")
         store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
         store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
         store.record(KIND_CLIENT, client_key("锦煦"), owner_b)
@@ -823,8 +823,8 @@ class TestOwnerIsolation:
     async def test_archive_terminal_state_isolated_by_owner(self, md_config):
         """A 已建档/已存在不阻塞 B 建档（TMS 各 su 空间独立）。"""
         store = get_master_data_store()
-        owner_a = md_module.owner_key("sk-a")
-        owner_b = md_module.owner_key("sk-b")
+        owner_a = owner_key("sk-a")
+        owner_b = owner_key("sk-b")
         store.record(KIND_CLIENT, client_key("锦煦"), owner_a)
         store.set_archive(KIND_CLIENT, client_key("锦煦"), "c-a", owner_a)
         # B 侧无终态 → 建档判定应重试（run_master_data 建档循环中 get 只取 B 槽）
@@ -850,4 +850,4 @@ class TestOwnerIsolation:
         owners = snap["client"][client_key("锦煦")]
         assert owners["_legacy"]["count"] == 764
         # 真实 owner 不受 legacy 影响（从 0 计，不误判已存在/已建档）
-        assert store.get(KIND_CLIENT, client_key("锦煦"), md_module.owner_key("sk-new")) is None
+        assert store.get(KIND_CLIENT, client_key("锦煦"), owner_key("sk-new")) is None

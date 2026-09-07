@@ -20,6 +20,8 @@ from typing import Any
 
 from app.core.logging_conf import get_logger
 
+# 本模块 import 仅自用；跨包引用 config/store/keys 符号请直引定义模块，此处不做转口
+# （2026-09-07 P-A 口径：防止“定义在 A、引用从 B 转口”再生）
 from ..schema import CanonicalOrder
 from ..submission.imported_registry import owner_key
 from .config import (
@@ -161,8 +163,8 @@ def _owner_for(sk: str, create_order: bool) -> str | None:
     return DEFAULT_OWNER if create_order else None
 
 
-def _failure_reason(outcome: dict[str, Any]) -> str:
-    """建档失败原因摘要（error 三元组 → 可读串）。"""
+def failure_reason(outcome: dict[str, Any]) -> str:
+    """建档失败原因摘要（error 三元组 → 可读串；公开口径：fees 报告复用）。"""
     error = outcome.get("error") or {}
     if not isinstance(error, dict):
         return str(error)
@@ -385,7 +387,7 @@ async def _create_one_async(
                             "kind": KIND_TRUCK,
                             "key": plate_key_,
                             "display": candidate.plate,
-                            "reason": _failure_reason(truck_out),
+                            "reason": failure_reason(truck_out),
                         }
                     )
         forms[kind] = {
@@ -419,7 +421,7 @@ async def _create_one_async(
             "kind": kind,
             "key": candidate.key,
             "display": candidate.display,
-            "reason": _failure_reason(outcome) or "未知错误",
+            "reason": failure_reason(outcome) or "未知错误",
         }
     )
     if kind == KIND_FACTORY and no_client_id:

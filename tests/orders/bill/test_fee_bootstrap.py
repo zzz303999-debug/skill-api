@@ -28,7 +28,7 @@ from app.orders.bill.fees.fee_bootstrap import (
 )
 from app.orders.bill.fees.fee_price_map import apply_price_map
 from app.orders.bill.fees.fee_registry import get_fee_registry
-from app.orders.bill.master_data.orchestrator import KIND_PRICE
+from app.orders.bill.master_data.config import KIND_PRICE
 from app.orders.bill.schema import BillOrder
 from helpers import inject_price_map
 
