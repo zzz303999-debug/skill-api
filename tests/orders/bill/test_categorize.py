@@ -536,7 +536,7 @@ class TestE2EMock:
         # 基础建档（依赖序：客户 → 工厂 → 车辆 → 司机）
         archived = [a["kind"] for a in result.meta["master_data"]["archived"]]
         assert archived == ["client", "factory", "truck", "driver"]
-        assert state["archives"] and all(f[0] == "price" for f in state["archives"][:2])
+        assert state["archives"] and all(f[0] == "price" for f in state["archives"][:3])
         # 费用栏目自举：other/waiting 建档成功并回填 price_id（按缺失出现序）
         bootstrap = result.meta["reconciliation"]["reports"]["fee_bootstrap"]
         assert bootstrap["created"] == [
@@ -554,9 +554,14 @@ class TestE2EMock:
         assert form["pay[0][油费][money]"] == "80.00"
         assert form["cost[0][打劫费][money]"] == "30.00"
         assert form["driver[0][get_ys_zj]"] == "156.00"
-        # 建档请求体：客户/工厂（依赖前置 client_id）/车辆/司机（带 truck_id）
+        # 建档请求体：客户/工厂（依赖前置 client_id）/车辆/司机（带 truck_id）；
+        # 第 3 个 price 是 B2（2026-09-07）canonical to_other 原名建档（高速费）
         archive_kinds = [a[0] for a in state["archives"]]
-        assert archive_kinds == ["price", "price", "client", "factory", "truck", "driver"]
+        assert archive_kinds == [
+            "price", "price", "price", "client", "factory", "truck", "driver",
+        ]
+        b2_price_form = state["archives"][2][1]
+        assert b2_price_form["name"] == "高速费"  # to_other 原名 → 费用管理补档
         client_form = next(f for k, f in state["archives"] if k == "client")
         assert client_form["client_name"] == "客户甲"
         assert client_form["cg_id"] == "4"
@@ -580,5 +585,5 @@ class TestE2EMock:
             "failed_details": [],
         }
         assert state["addwork"] == 2  # 不重复下单
-        assert len(state["archives"]) == 6  # 不重复建档（自举/基础档案均零新增）
+        assert len(state["archives"]) == 7  # 不重复建档（自举/B2/基础档案均零新增）
         assert get_master_data_store().snapshot() == counts_after_first  # 计数不被重导推高

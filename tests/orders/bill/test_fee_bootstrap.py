@@ -828,3 +828,84 @@ class TestBillrowNamedBootstrap:
             [_make_billrow_order("BL002", ["加班费"])], create_order=True, sk="sk"
         )
         assert again["created"] and again["created"][0]["tms_name"] == "加班费"
+
+
+def _make_canonical_order(other_note: str | None, *, decided: bool = False):
+    """构造 canonical 链未决单 stub（fees 含 other+note 形态；decided=True 模拟已标记单）。"""
+    from types import SimpleNamespace
+
+    fees = []
+    if other_note:
+        fees.append(SimpleNamespace(code="other", note=other_note, money=100.0))
+    fees.append(SimpleNamespace(code="freight", note=None, money=200.0))
+    order = SimpleNamespace(fees=fees, create_result={"success": True} if decided else None)
+    return order
+
+
+class TestCanonicalOtherBootstrap:
+    """B2（2026-09-07 用户拍板）：canonical 链 to_other 原名自动建档。
+
+    - 候选源 = 未决单 fees 中 code=other 的 note 原名（逗号拆分，与
+      reconciliation to_other_counts 同口径）；
+    - 订单照常 other+note 提交（payload 零变更），建档只是费用管理侧补档；
+    - 幂等：建一次后 registry 跳过（下批继续 other+note 可接受，无 B3 闭环）；
+    - preview 只出 planned 零副作用。
+    """
+
+    def test_collect_names_note_split_and_decided_skipped(self):
+        """note 逗号拆分 + 非空过滤；已标记单（skipped/被拒）不构成候选。"""
+        orders = [
+            _make_canonical_order("加班费,报关费"),
+            _make_canonical_order("查验费"),
+            _make_canonical_order("加班费", decided=True),  # 已决单跳过
+            _make_canonical_order(None),  # 无 other 项
+        ]
+        names = fb_module.collect_canonical_other_names(orders)
+        assert names == ["加班费", "报关费", "查验费"]
+
+    async def test_preview_planned_zero_side_effect(self, price_cfg, fake_create):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        fake_create()
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            [], create_order=False, sk="sk", extra_names=["加班费", "报关费"]
+        )
+        assert report is not None and report["mode"] == "preview"
+        planned = {p["tms_name"] for p in report["planned"]}
+        assert planned == {"加班费", "报关费"}
+        assert fake_create.calls == []  # 零请求
+
+    async def test_create_archives_and_registry_idempotent(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            [], create_order=True, sk="sk", extra_names=["加班费", "报关费"]
+        )
+        assert report is not None and report["mode"] == "create"
+        created = {c["tms_name"] for c in report["created"]}
+        assert created == {"加班费", "报关费"}
+        assert len(fake_create.calls) == 1  # 同批一次
+        # 幂等：registry 登记后跨批不再建档（报告段不产生）
+        again = await fb_module.run_billrow_fee_bootstrap_async(
+            [], create_order=True, sk="sk", extra_names=["加班费", "报关费"]
+        )
+        assert again is None and len(fake_create.calls) == 1
+
+    async def test_billrow_candidates_priority_on_same_name(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        """双链同名去重：BillRow 候选优先（保序），extra_names 同名不重复建。"""
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        report = await fb_module.run_billrow_fee_bootstrap_async(
+            [_make_billrow_order("BL001", ["加班费"])],
+            create_order=True,
+            sk="sk",
+            extra_names=["加班费", "查验费"],
+        )
+        planned_all = [c["tms_name"] for c in report["created"]]
+        assert planned_all == ["加班费", "查验费"]  # 加班费只出现一次
+        assert len(fake_create.calls) == 1

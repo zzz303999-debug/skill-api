@@ -266,6 +266,31 @@ def _dynamic_fee_code(name: str) -> str:
     return "x" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
+def _filter_missing_names(names) -> list[tuple[str, str]]:
+    """裸名清单的幂等过滤（建档候选 (code, tms_name)；B2 提取，两链共用）。"""
+    from .fee_name_map import fee_alias_dictionary
+
+    alias = fee_alias_dictionary()
+    registry = get_fee_registry()
+    seen: set[str] = set()
+    missing: list[tuple[str, str]] = []
+    for raw in names:
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        # 字典码与动态码统一幂等判定：YAML/registry 已有 id → 跳过；
+        # TMS 已存在（204）→ 跳过不重试（动态码同规则，否则每次重试再撞 204）
+        code = alias.get(name)
+        eff_code = code or _dynamic_fee_code(name)
+        if resolve_price_id(eff_code) is not None:
+            continue  # 档案已建档（幂等：不重发）
+        if registry.exists_external(eff_code):
+            continue  # T27b：TMS 已存在（204 已存在）→ 不再重试自举
+        seen.add(name)
+        missing.append((eff_code, name))
+    return missing
+
+
 def _collect_billrow_missing(orders) -> list[tuple[str, str]]:
     """BillRow 链（订单费用为直传中文名）建档候选：(code, tms_name)。
 
@@ -274,33 +299,34 @@ def _collect_billrow_missing(orders) -> list[tuple[str, str]]:
     但无 price_id → 建档候选（code=字典码或动态码，tms_name=原名）。
     同批同名只收集一次，保持出现顺序。
     """
-    from .fee_name_map import fee_alias_dictionary
-
-    alias = fee_alias_dictionary()
-    registry = get_fee_registry()
-    seen: set[str] = set()
-    missing: list[tuple[str, str]] = []
+    names: list[str] = []
     for order in orders:
         for entry in order.order_data.get("shou") or []:
-            for name in entry:
-                name = str(name).strip()
-                if not name or name in seen:
-                    continue
-                # 字典码与动态码统一幂等判定：YAML/registry 已有 id → 跳过；
-                # TMS 已存在（204）→ 跳过不重试（动态码同规则，否则每次重试再撞 204）
-                code = alias.get(name)
-                eff_code = code or _dynamic_fee_code(name)
-                if resolve_price_id(eff_code) is not None:
-                    continue  # 档案已建档（幂等：不重发）
-                if registry.exists_external(eff_code):
-                    continue  # T27b：TMS 已存在（204 已存在）→ 不再重试自举
-                seen.add(name)
-                missing.append((eff_code, name))
-    return missing
+            names.extend(str(name).strip() for name in entry if str(name).strip())
+    return _filter_missing_names(names)
+
+
+def collect_canonical_other_names(orders) -> list[str]:
+    """canonical 链 to_other 原名清单（B2 建档候选源，2026-09-07 用户拍板）。
+
+    未决单 fees 中 code=other 的 note（逗号分隔原名，与 reconciliation
+    to_other_counts 同口径拆分）；订单照常 other+note 提交（payload 零变更），
+    建档只是费用管理侧补档（幂等：建一次后 registry 跳过，下批继续 other+note
+    可接受——不写别名字典，无 B3 闭环）。
+    """
+    names: list[str] = []
+    for order in orders:
+        if getattr(order, "create_result", None) is not None:
+            continue  # 已标记（skipped/被拒）的单不建档（与 BillRow 链同防御）
+        for fee in order.fees:
+            if fee.code == "other" and fee.note:
+                names.extend(n.strip() for n in fee.note.split(",") if n.strip())
+    return names
 
 
 async def run_billrow_fee_bootstrap_async(
-    orders, *, create_order: bool, sk: str = ""
+    orders, *, create_order: bool, sk: str = "", extra_names: list[str] | None = None
+
 ) -> dict[str, Any] | None:
     """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板；2026-09
     异步化改造后建档段走 create_archives_async）。
@@ -321,6 +347,13 @@ async def run_billrow_fee_bootstrap_async(
         return None
     orders = [o for o in orders if getattr(o, "create_result", None) is None]
     missing = _collect_billrow_missing(orders)
+    if extra_names:
+        # B2（2026-09-07）：canonical 链 to_other 原名并入——同款幂等判定，
+        # 与 BillRow 候选同名去重（BillRow 链优先保序）
+        have = {name for _, name in missing}
+        missing.extend(
+            pair for pair in _filter_missing_names(extra_names) if pair[1] not in have
+        )
     if not missing:
         return None
     if not create_order:

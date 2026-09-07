@@ -583,6 +583,20 @@ async def build_result_async(
             billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
                 pending_legacy, create_order=create_order, sk=sk
             )
+    elif canonical_orders:
+        # B2（2026-09-07 用户拍板）：canonical 链 to_other 原名并入建档——订单照常
+        # other+note 提交（payload 零变更），费用管理侧自动补档（幂等：建一次后
+        # registry 跳过，下批继续 other+note 可接受）；preview 只出 planned 零副作用
+        from .fees.fee_bootstrap import (
+            collect_canonical_other_names,
+            run_billrow_fee_bootstrap_async,
+        )
+
+        other_names = collect_canonical_other_names(canonical_orders)
+        if other_names:
+            billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
+                [], create_order=create_order, sk=sk, extra_names=other_names
+            )
 
     # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
     master_data_report = None
