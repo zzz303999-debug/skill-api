@@ -369,9 +369,12 @@ def _build_summary(total: int, created: list) -> dict:
 
 
 def _build_upstream(created: list) -> dict | None:
-    """上游回显：存在非 skipped 已处理单时回显（200 有新建/204 全失败）；
-    无已处理单或全部 skipped → None（与既有语义一致）。"""
-    if not created or all(o.create_result.get("skipped") for o in created):
+    """成功单的上游回显明细：本批有新建成功单 → 200 壳 + 每单原始回显。
+
+    无新建成功单（全部失败/全部 skipped/空）→ None——失败不伪造上游回显
+    （本地拦截或上游拒绝均无成功回显可透传；前端按外壳 code/msg 分流，
+    2026-09-09 R3 去伪）。"""
+    if not created:
         return None
     upstream_data = [
         o.create_result.get("upstream")
@@ -382,9 +385,9 @@ def _build_upstream(created: list) -> dict | None:
         o.create_result.get("success") and not o.create_result.get("skipped")
         for o in created
     )
-    if created_ok:
-        return {"code": "200", "msg": "添加成功", "data": upstream_data}
-    return {"code": "204", "msg": "添加失败", "data": []}
+    if not created_ok:
+        return None
+    return {"code": "200", "msg": "添加成功", "data": upstream_data}
 
 
 async def build_result_async(

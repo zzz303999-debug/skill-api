@@ -164,9 +164,9 @@ class BillOrder(BaseModel):
 class BillParseResult(BaseModel):
     """账单导入的解析结果响应（对齐接口文档 3.3 响应总览）。
 
-    orders 为既有流程语义归集（BillOrder）；canonical_orders 为标准
-    字段归集（CanonicalOrder，TMS 通道）——两条路径互斥填充，字段为新增，
-    既有消费者不受影响。
+    orders：既有流程语义归集（BillOrder）；canonical_orders：标准字段源归集
+    （CanonicalOrder）。解析输入层两路互斥；输出层填充规则见 service 编排
+    （BillRow 源会 to_canonical 双份表达，收敛方向见 docs/service.py拆分计划 R2）。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -186,10 +186,10 @@ class BillParseResult(BaseModel):
     upstream: dict[str, Any] | None = Field(
         None,
         description=(
-            "上游回显（create 模式且本批确有新建成功单时填充，对齐 TMS 通道格式）："
-            "新建成功 → {code:\"200\", msg:\"添加成功\", data:[每单原始回显（含 sn/sns）]}；"
-            "新建全部失败 → {code:\"204\", msg:\"添加失败\", data:[]}；"
-            "preview 模式、无单可创建或全部 skipped 时为 null"
+            "成功单的上游回显明细（create 且本批确有新建成功单时填充）："
+            "{code:\"200\", msg:\"添加成功\", data:[每单原始回显（含 sn/sns）]}；"
+            "无新建成功单（全部失败/全部 skipped/preview/无单可创建）→ null"
+            "（失败不伪造上游回显，2026-09-09 R3 去伪）"
         ),
     )
     meta: dict[str, Any] = Field(

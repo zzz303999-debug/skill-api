@@ -363,8 +363,8 @@ class TestCreateMode:
             "failed_details": [],
         }
 
-    async def test_all_failed_upstream_204(self, monkeypatch):
-        """build_result 直测：新建全失败 → upstream 204 结构（锁死契约）。"""
+    async def test_all_failed_upstream_null(self, monkeypatch):
+        """build_result 直测：新建全失败 → upstream null（失败不伪造上游回显，R3）。"""
         calls = {"addwork": 0}
 
         async def fake_post(url, **_kwargs):
@@ -376,7 +376,7 @@ class TestCreateMode:
             filename="junyu.xlsx", file_bytes=self._junyu_file(), create_order=True, sk="sk"
         )
         assert result.summary["success"] == 0 and result.summary["failed"] == 2
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.upstream is None
         assert calls["addwork"] == 2
 
     async def test_success_without_upstream_echo_is_200(self, monkeypatch):

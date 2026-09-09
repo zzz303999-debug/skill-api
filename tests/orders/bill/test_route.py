@@ -237,8 +237,8 @@ class TestCreateMode:
         assert data["orders"][0]["create_result"]["error"]["details"]["upstream_code"] == "204"
         assert all(o["create_result"]["success"] for o in data["orders"][1:])
 
-    def test_all_failed_upstream_204(self, monkeypatch):
-        """全部单失败 → 200 + summary.failed 全量；upstream 返回 204 结构。"""
+    def test_all_failed_upstream_null(self, monkeypatch):
+        """全部单失败 → 200 + summary.failed 全量；upstream null（失败不伪造上游回显）。"""
         calls = {"addwork": 0}
 
         async def fake_post(url, **_kwargs):
@@ -263,8 +263,8 @@ class TestCreateMode:
         data = body["data"]
         assert data["summary"]["total"] == REAL_ORDER_COUNT
         assert data["summary"]["success"] == 0 and data["summary"]["failed"] == REAL_ORDER_COUNT
-        # 全部失败：upstream 对齐 TMS 错误格式（code "204" + 空 data）
-        assert data["upstream"] == {"code": "204", "msg": "添加失败", "data": []}
+        # 全部失败：upstream null（无成功回显可透传，R3 去伪）
+        assert data["upstream"] is None
         assert all(not o["create_result"]["success"] for o in data["orders"])
         assert calls["addwork"] == REAL_ORDER_COUNT
 
