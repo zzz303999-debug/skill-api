@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+from ..parsing.normalizers import strip_float_tail
 from ..schema import (
     MISSING_BOX,
     MISSING_C_TITLE,
@@ -27,8 +28,6 @@ from .cn_amount import parse_cn_upper_amount
 _SEQ_RE = re.compile(r"^\d+(\.\d+)?$")
 # 提单号：清洗后 ≥8 位字母数字
 _BL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
-# 浮点尾巴：纯数字 + .0+（xlrd/openpyxl 数字单元格）
-_FLOAT_TAIL_RE = re.compile(r"^\d+\.0+$")
 # 箱型：不做格式校验，非空即合法（2026-08-12 业务确认：真实账单含大量
 # 非标表述，如 45HQ/大冷/飞翼车/2X20/12T/拼箱 等，均须正常归集）
 # 月-日日期（账单内通常只有月-日，如 "9-1"）
@@ -216,8 +215,9 @@ def clean_order_num(raw: str | None) -> tuple[str | None, str | None]:
     if raw is None or not raw.strip():
         return None, REASON_NOT_FOUND
     cleaned = raw.strip().replace(" ", "").replace("-", "")
-    if _FLOAT_TAIL_RE.match(cleaned):
-        cleaned = cleaned.split(".")[0]
+    # 浮点尾巴去除单源（..parsing.normalizers.strip_float_tail，P2 收口；
+    # 非纯数字形态原样返回 = 原 if 不命中路径）
+    cleaned = strip_float_tail(cleaned)
     if _BL_NO_RE.match(cleaned) and not cleaned.isalpha():
         return cleaned, None
     return None, REASON_INVALID_FORMAT
@@ -239,29 +239,14 @@ def _text_values(row: BillRow, *attrs: str) -> dict[str, str]:
     }
 
 
-def _strip_float_tail(text: str) -> str:
-    """Excel 数字单元格浮点尾巴（9486.0 → 9486）。"""
-    return text.split(".")[0] if _FLOAT_TAIL_RE.match(text) else text
-
-
 def clean_plate_no(value) -> str | None:
     """车牌清洗：去浮点尾巴（9486.0 → 9486），其余原样（公开导出，两通道同口径）。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    return _strip_float_tail(text)
+    return strip_float_tail(value)
 
 
 def clean_group_key(value) -> str | None:
     """归集键清洗：去浮点尾巴（提单号/业务编号被 Excel 存成数字）（公开导出，两通道同口径）。"""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    return _strip_float_tail(text)
+    return strip_float_tail(value)
 
 
 def _box_entries(row: BillRow) -> tuple[list[dict], bool]:

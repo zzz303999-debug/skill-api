@@ -39,7 +39,7 @@ _NON_FEE_KEYWORDS = (
 
 def normalize_header(text: str) -> str:
     """表头文本归一化：去除全部空白后参与列名匹配（仅表头识别用，数据行不处理）。"""
-    return _HEADER_WHITESPACE_RE.sub("", text)
+    return _HEADER_WHITESPACE_RE.sub("", text or "")
 
 
 def business_end_col(

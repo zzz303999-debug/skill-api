@@ -32,22 +32,15 @@ import yaml
 from app.core.logging_conf import get_logger
 
 from ..schema import MAX_HEADER_SCAN_ROWS
+from .columns import normalize_header
 
 log = get_logger(__name__)
 
 # 模板配置目录（项目根 templates/，与 storage 运行时数据分离）
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "templates"
 
-# 表头文本中的空白（含全角空格），与 parser 表头归一化口径一致
-_HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")
-
 # 列名消歧后缀：配置源列名「车牌号#1」→ 参与指纹/重合度比较时取「车牌号」
 _COL_ORDINAL_RE = re.compile(r"^(.*?)#\d+$")
-
-
-def _normalize(text: str) -> str:
-    """表头文本归一化：去除全部空白（指纹与列名比较共用口径）。"""
-    return _HEADER_WHITESPACE_RE.sub("", text or "")
 
 
 def _source_col_names(template: dict) -> set[str]:
@@ -69,7 +62,7 @@ def _source_col_names(template: dict) -> set[str]:
             if m:
                 col = m.group(1)
             if col:
-                names.add(_normalize(col))
+                names.add(normalize_header(col))
     fees = template.get("fees", {}) or {}
     if not (isinstance(fees, dict) and "channels" in fees):
         # 旧 fees schema（费目名 → 源列名）参与 L2；新 schema 自动发现不参与
@@ -77,16 +70,16 @@ def _source_col_names(template: dict) -> set[str]:
             for col in value if isinstance(value, list) else [value]:
                 col = str(col).strip()
                 if col:
-                    names.add(_normalize(col))
+                    names.add(normalize_header(col))
     optional = template.get("match", {}).get("optional_headers") or []
     if optional:
-        names -= {_normalize(str(h)) for h in optional if str(h).strip()}
+        names -= {normalize_header(str(h)) for h in optional if str(h).strip()}
     return names
 
 
 def compute_fingerprint(headers: list[str]) -> str:
     """表头行指纹：非空单元格去空白后以 '¶' 连接，md5 前 8 位。"""
-    parts = [_normalize(h) for h in headers if str(h or "").strip()]
+    parts = [normalize_header(h) for h in headers if str(h or "").strip()]
     return hashlib.md5("¶".join(parts).encode("utf-8")).hexdigest()[:8]
 
 
@@ -152,7 +145,7 @@ def _row_headers(view, row: int) -> list[str]:
 
 def _row_nonempty(view, row: int) -> set[str]:
     """行内非空单元格去空白后的列名集合。"""
-    return {_normalize(h) for h in _row_headers(view, row) if h.strip()}
+    return {normalize_header(h) for h in _row_headers(view, row) if h.strip()}
 
 
 def identify(view) -> TemplateMatch | None:

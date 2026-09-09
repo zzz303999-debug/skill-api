@@ -27,16 +27,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from app.core.config import settings
 
 from ..schema import HEADER_ALIASES, HEADER_COLUMN_MAP
-
-# 表头文本中的空白（含全角空格），与 parser 的表头识别口径一致
-_HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")
+from .columns import normalize_header
 
 # 真实应收对账单表头行（golden 2015-01到2015-12上海通寰应收对账单.xls
 # 第 6 行，32 列；「 箱号」带前导空格、「落/还箱费」为别名，均原样保留，
@@ -79,14 +76,9 @@ BUILTIN_HEADERS: tuple[str, ...] = (
 )
 
 
-def _normalize(text: str) -> str:
-    """表头文本归一化：去除全部空白（与 parser._normalize_header 同口径）。"""
-    return _HEADER_WHITESPACE_RE.sub("", text or "")
-
-
 def compute_legacy_fingerprint(headers: list[str]) -> str:
     """表头行指纹：各列归一化文本按列序拼接的 sha1 前 16 位。"""
-    payload = "".join(_normalize(h) for h in headers)
+    payload = "".join(normalize_header(h) for h in headers)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 

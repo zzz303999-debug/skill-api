@@ -30,12 +30,10 @@ from ..schema import (
     IGNORED_HEADERS,
     MAX_HEADER_SCAN_ROWS,
 )
+from .columns import normalize_header
 from .template_store import alias_dictionary, collect_fee_names
 
 log = get_logger(__name__)
-
-# 表头文本中的空白（含全角空格），归一化口径与 parser/template 一致
-_HEADER_WHITESPACE_RE = re.compile(r"[\s\u3000]+")
 
 # 每格输入 LLM 的最大字符数（表头区只做映射，20 字符足够识别列名）
 _CELL_MAX_CHARS = 20
@@ -412,12 +410,12 @@ def validate_ai_result(
         str(view.merged_cell(header_row, col)).strip() if col else "" for col in range(1, ncols + 1)
     ]
     column_map = {
-        _strip_whitespace(header_texts[col - 1]): target
+        normalize_header(header_texts[col - 1]): target
         for col, target in data_cols.items()
         if header_texts[col - 1]
     }
     fee_map = {
-        _strip_whitespace(header_texts[col - 1]): name
+        normalize_header(header_texts[col - 1]): name
         for col, name in fee_cols.items()
         if header_texts[col - 1]
     }
@@ -463,8 +461,3 @@ def validate_ai_result(
         ignored_cols=ignored_cols,
         raw=raw,
     )
-
-
-def _strip_whitespace(text: str) -> str:
-    """去全部空白（与 template 指纹归一化同口径）。"""
-    return _HEADER_WHITESPACE_RE.sub("", text or "")
