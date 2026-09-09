@@ -97,6 +97,8 @@ class Settings(BaseSettings):
     storage_dir: Path = Path("./storage")
     # YAML 配置目录（fee_price_map.*/fee_alias_dictionary 等）
     config_dir: Path = Path("./config")
+    # YAML 模板库目录（项目根 templates/*.yaml，与 storage 运行时数据分离）
+    templates_dir: Path = Path("./templates")
     # 审计场景建议调大（如 720 = 30 天），保证留痕可追溯
     storage_keep_hours: int = 24
 
@@ -111,6 +113,13 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_config_dir(cls, value: Path) -> Path:
         """相对路径统一基于项目根目录解析（与 storage_dir 同规则）。"""
+        path = Path(value)
+        return path if path.is_absolute() else _PROJECT_ROOT / path
+
+    @field_validator("templates_dir")
+    @classmethod
+    def _resolve_templates_dir(cls, value: Path) -> Path:
+        """相对路径统一基于项目根目录解析（与 config_dir 同规则）。"""
         path = Path(value)
         return path if path.is_absolute() else _PROJECT_ROOT / path
 

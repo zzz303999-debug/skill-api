@@ -7,14 +7,9 @@ date_flex 用）。纯 view 只读零副作用，与行解析无耦合。
 
 from __future__ import annotations
 
-import re
-
 from ..schema import BillPeriod
-from .normalizers import parse_year_hint
+from .normalizers import _SETTLEMENT_RE, parse_year_hint
 from .sheet_view import _SheetView
-
-# 结算区间日期，如「结算日期：2018-01-01-2018-12-31」
-_PERIOD_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
 
 
 def _format_period_date(parts: tuple[str, str, str]) -> str | None:
@@ -35,7 +30,9 @@ def extract_bill_period(view: _SheetView, header_row: int) -> BillPeriod:
             text = str(raw)
             if "结算" not in text:
                 continue
-            matches = _PERIOD_DATE_RE.findall(text)
+            # 结算日期形如「2018-01-01-2018-12-31」；YYYY-MM-DD 正则单源
+            # （normalizers._SETTLEMENT_RE，2026-09-09 收敛重复定义）
+            matches = _SETTLEMENT_RE.findall(text)
             if len(matches) < 2:
                 continue
             start = _format_period_date(matches[0])

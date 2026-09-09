@@ -29,6 +29,7 @@ from pathlib import Path
 
 import yaml
 
+from app.core.config import settings
 from app.core.logging_conf import get_logger
 
 from ..schema import MAX_HEADER_SCAN_ROWS
@@ -36,8 +37,9 @@ from .columns import normalize_header
 
 log = get_logger(__name__)
 
-# 模板配置目录（项目根 templates/，与 storage 运行时数据分离）
-_TEMPLATES_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "templates"
+# 模板配置目录（settings.templates_dir：相对路径按项目根解析 → 项目根
+# templates/，与 storage 运行时数据分离；2026-09-09 收敛 5 层 parent 魔法）
+_TEMPLATES_DIR = settings.templates_dir
 
 # 列名消歧后缀：配置源列名「车牌号#1」→ 参与指纹/重合度比较时取「车牌号」
 _COL_ORDINAL_RE = re.compile(r"^(.*?)#\d+$")

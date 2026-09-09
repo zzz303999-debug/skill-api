@@ -1,6 +1,7 @@
-# parsing 包冗余收敛方案（P1-P3 已实施；P4 S1/S2 已实施）
+# parsing 包冗余收敛方案（P1-P5 已实施）
 
-> 状态：P1/P2（0699199）、P3 A 案（2aec0bb）；P4-S1（66184ab）与 P4-S2 已实施
+> 状态：P1/P2（0699199）、P3 A 案（2aec0bb）；P4-S1（66184ab）与 P4-S2 已实施；
+> P5 收尾两项已实施（2026-09-09）
 > 范围：`app/orders/bill/parsing/`（columns / template_store / legacy_template /
 > ai_header / normalizers）+ `app/orders/bill/aggregation/aggregator.py`（仅正则/清洗收口）
 > 性质：P1/P2 结构性收敛，**行为零变更**（输出/采纳判定/指纹逐字节不变）；
@@ -168,6 +169,33 @@ S1/S2 独立提交；每步：bill 域 + 全量 pytest（golden 家族样本守�
   `_append_parsed_row`（35 行）——**338 行单体消除，最大函数 102 行**；
 - 门禁：bill 域 554 / 全量 1188 passed、ruff、dep_check 全绿；
 - 后续：S3（read_data_rows 簇，可选）视需要另开。
+
+### P5 · 收尾两项（正则单源 + 目录魔法配置化，2026-09-09）
+
+**现状（实证）**：P1-P4 后包内残留 2 处：
+
+1. `period._PERIOD_DATE_RE` ≡ `normalizers._SETTLEMENT_RE` 逐字重复
+   （`(\d{4})-(\d{1,2})-(\d{1,2})`，分别服务 extract_bill_period 与
+   parse_year_hint）——唯一残留的纯重复代码；
+2. `template_store._TEMPLATES_DIR` 5 层 `parent` 魔法——与 fees 包 `_CONFIG_DIR`
+   （ea7d677 已改走 core.config.config_dir）同反模式，parsing 侧漏网。
+
+**改法**：
+
+1. period.py 删 `_PERIOD_DATE_RE` 与 `import re`，改引
+   `normalizers._SETTLEMENT_RE`（同包私有引用，先例 ai_header →
+   parser._to_money）；
+2. core/config.py 新增 `templates_dir`（默认 `./templates`，与
+   config_dir 同规则 validator：相对路径按项目根解析）；template_store
+   改 `_TEMPLATES_DIR = settings.templates_dir`（删除 5 层 parent，
+   `Path` import 保留——save_yaml_template 返回注解仍用）。
+
+**效果**：正则单源；目录解析与 config/storage 同规则（容器内 CWD 变化
+不再影响模板目录定位）。
+
+**风险**：低（默认值 = 现状路径，行为零变更；golden 样本守护指纹加载）。
+
+**门禁**：bill 域 554 / 全量 1188 passed、ruff、dep_check 全绿。
 
 ---
 
