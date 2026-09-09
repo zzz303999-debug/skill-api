@@ -40,6 +40,7 @@ from .parsing.opener import (
     parse_exact_fallback,
 )
 from .parsing.parser import ParseOutput
+from .response_build import build_summary, build_upstream, order_dedup_parts
 from .schema import BillParseResult
 from .submission.client import create_canonical_orders_async, create_orders_async
 from .validation import reject_missing_bl_no, reject_unknown_box_types
@@ -48,20 +49,6 @@ from .validation import reject_missing_bl_no, reject_unknown_box_types
 def _sha256(data: bytes) -> str:
     """文件内容 sha256（meta 溯源用）。"""
     return hashlib.sha256(data).hexdigest()
-
-
-def _order_dedup_parts(order) -> tuple[str | None, str | None]:
-    """订单去重键段 (箱号, 行序号)：canonical 取结构化箱号 + row_seq，
-    旧链路 BillOrder 取 container_no + row_seq；箱号缺失时键退化为行序号兜底
-    （提单号|#seq），双缺再退化纯提单号（见 imported_registry.dedup_key）。"""
-    container_no = None
-    for container in getattr(order, "containers", None) or []:
-        if getattr(container, "container_no", None):
-            container_no = container.container_no
-            break
-    if container_no is None:
-        container_no = getattr(order, "container_no", None)
-    return container_no, getattr(order, "row_seq", None)
 
 
 # ---- 异步编排（Phase 3 新增）：CPU 段 to_thread、网络段全 async，语义 ----
@@ -156,7 +143,7 @@ def _aggregate_stage(output, create_order: bool, sk: str):
             )
             if not bl:
                 continue  # 无键不查重；文件级 missing_bl_no 校验统一拒绝
-            box, seq = _order_dedup_parts(order)
+            box, seq = order_dedup_parts(order)
             if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
                 order.create_result = {
                     "success": True,
@@ -168,63 +155,6 @@ def _aggregate_stage(output, create_order: bool, sk: str):
     all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
     reject_unknown_box_types(all_pending)
     return orders, canonical_orders, agg
-
-
-def _build_failed_details(created: list) -> list[dict]:
-    """失败单明细（summary.failed_details）：单号/错误码/消息。
-
-    本地拦截不再模拟上游回显（2026-09-09 B 案：前端只消费顶层 code/msg/data，
-    删除 error_upstream 透传与单级 details.upstream 模拟壳）。"""
-    return [
-        {
-            "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-            "error_code": (o.create_result.get("error") or {}).get("code"),
-            "error_message": (o.create_result.get("error") or {}).get("message"),
-        }
-        for o in created
-        if not o.create_result.get("success")
-    ]
-
-
-def _build_summary(total: int, created: list) -> dict:
-    """create 结果统计（六字段 + failed_details）；created = 有 create_result 的单。"""
-    return {
-        "total": total,
-        "success": sum(1 for o in created if o.create_result.get("success")),
-        "failed": sum(1 for o in created if not o.create_result.get("success")),
-        "skipped": sum(1 for o in created if o.create_result.get("skipped")),
-        "created": sum(
-            1
-            for o in created
-            if o.create_result.get("success") and not o.create_result.get("skipped")
-        ),
-        "success_sns": [
-            o.create_result.get("sn") for o in created if o.create_result.get("success")
-        ],
-        "failed_details": _build_failed_details(created),
-    }
-
-
-def _build_upstream(created: list) -> dict | None:
-    """成功单的上游回显明细：本批有新建成功单 → 200 壳 + 每单原始回显。
-
-    无新建成功单（全部失败/全部 skipped/空）→ None——失败不伪造上游回显
-    （本地拦截或上游拒绝均无成功回显可透传；前端按外壳 code/msg 分流，
-    2026-09-09 R3 去伪）。"""
-    if not created:
-        return None
-    upstream_data = [
-        o.create_result.get("upstream")
-        for o in created
-        if o.create_result.get("success") and o.create_result.get("upstream")
-    ]
-    created_ok = any(
-        o.create_result.get("success") and not o.create_result.get("skipped")
-        for o in created
-    )
-    if not created_ok:
-        return None
-    return {"code": "200", "msg": "添加成功", "data": upstream_data}
 
 
 async def build_result_async(
@@ -361,8 +291,8 @@ async def build_result_async(
             )
         pipeline = orders if orders else canonical_orders
         created = [o for o in pipeline if getattr(o, "create_result", None)]
-        summary = _build_summary(len(canonical_orders) or len(orders), created)
-        upstream = _build_upstream(created)
+        summary = build_summary(len(canonical_orders) or len(orders), created)
+        upstream = build_upstream(created)
 
     meta: dict = {
         "source_sha256": file_sha256,
