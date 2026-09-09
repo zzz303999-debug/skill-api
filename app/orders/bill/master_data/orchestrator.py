@@ -269,20 +269,25 @@ class _ArchiveSession:
 async def _ensure_truck_archive_async(
     candidate: MasterDataCandidate, session: _ArchiveSession
 ) -> str:
-    """车辆前置建档（依赖序：车辆 → 司机；M1b，2026-09-09 自 driver 分支抽取）。
+    """车辆前置建档（依赖序：车辆 → 司机；M1b 自 driver 分支抽取，M5 补终态）。
 
-    同车牌本侧已建档（archive_id）→ 复用；否则端点可用且本批未试 → 建档登记
-    （成功进 archived / 失败进 failed）；返回 truck_archive_id（无则空串——truck_id
-    可空，建车失败不阻塞建司机）。attempted 防重为单批语义（M5 另开：车辆
-    exists_external 跨批重发修复，2026-09-09 拍板不混入本重构）。
+    同车牌已达终态（本侧建档 archive_id → 复用 id；TMS 已存在 exists_external →
+    不再重发）直接返回；否则端点可用且本批未试 → 建档登记（成功进 archived /
+    已存在 duplicate → 登记 exists_external / 其余失败进 failed）；返回
+    truck_archive_id（无则空串——truck_id 可空，建车失败不阻塞建司机）。
     """
     plate = str(candidate.plate or "").strip()
     if not plate:
         return ""
     plate_key_ = plate_key(plate)
     truck_rec = session.store.get(KIND_TRUCK, plate_key_, session.owner)
-    if truck_rec and truck_rec.get("archive_id"):
-        return str(truck_rec["archive_id"])
+    if truck_rec:
+        if truck_rec.get("archive_id"):
+            return str(truck_rec["archive_id"])
+        if truck_rec.get("exists_external"):
+            # M5（2026-09-09）：TMS 已存在（无查询接口取 id）→ 不再重发建车
+            # 请求，司机照常建档（truck_id 可空，不阻塞）
+            return ""
     if (
         endpoint_for(KIND_TRUCK) is None
         or (KIND_TRUCK, plate_key_) in session.attempted
@@ -305,6 +310,18 @@ async def _ensure_truck_archive_async(
         )
         session.record_archive(KIND_TRUCK, plate_key_, plate, truck_archive_id)
         return truck_archive_id
+    if truck_out.get("duplicate") or truck_out.get("no_id_created"):
+        # M5（2026-09-09）：TMS 已存在拒单/无主键回值 → 登记 exists_external
+        # 终态（此前只进 failed，存量车牌跨批每批重发注定被拒的建车请求——
+        # 对齐主建档路径 _create_one_async 三态处理）
+        session.store.mark_exists_external(KIND_TRUCK, plate_key_, session.owner)
+        session.record_exists_external(
+            KIND_TRUCK,
+            plate_key_,
+            plate,
+            (truck_out.get("error") or {}).get("message") or "已存在",
+        )
+        return ""
     if truck_out.get("error"):
         session.record_fail(KIND_TRUCK, plate_key_, plate, failure_reason(truck_out))
     return ""

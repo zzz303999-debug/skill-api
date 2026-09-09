@@ -5,8 +5,8 @@
 > 性质：结构性简化，**行为零变更**（报告键集/键序、store 落盘结构、日志事件逐项不变）
 > 背景：编排大脑 orchestrator 497 行，`_create_one_async` 160 行 + 12 参数为复杂度
 > 热点。M2（建档 outcome 模型化）/ S1（JSON store 骨架横向收敛）另开，不入本轮；
-> **M5（车辆 exists_external 跨批重发修复）已拍板另开：单独提交、单独加测试，
-> 不混入 M1c（M1c 保持纯重构，2026-09-09 用户拍板）**。
+> **M5（车辆建档 duplicate 漏登记终态修复）已拍板另开：单独提交、单独加测试，
+> 不混入 M1c（M1c 保持纯重构；M5 已实施于 2026-09-09，见 §5）**。
 
 ---
 
@@ -154,32 +154,34 @@ refactor(bill): master_data 建档编排简化——_ArchiveSession 收口 + 终
 
 ## 5. 后续项
 
-### M5 · 车辆 exists_external 跨批重发修复（**已拍板另开**：单独提交 + 单独加测试，不混 M1c）
+### M5 · 车辆建档 duplicate 漏登记终态——跨批重发建车请求修复（**已拍板另开**：单独提交 + 单独加测试，不混 M1c）
 
-**问题**：driver 建档前"查车已建"只看 `archive_id`（orchestrator driver 分支
-`truck_rec.get("archive_id")`）。车辆为 TMS 存量车牌时首次建档被拒 → 登记
-`exists_external`（无 id）→ **跨批每次重发注定被拒的建车请求**（attempted 仅单批
-防重）。与客户侧 2026-09-03 修复（客户 exists_external 不再拦截工厂）同源问题，
-车辆→司机这对未做过对应修复。
+**问题（M1b 执行实证校准，2026-09-09）**：truck 建档分支只处理 success/error
+两态——TMS"已存在"拒单（duplicate 标记，client 归一化同主路径）**只进 failed、
+不登记 exists_external**（无 mark_exists_external 调用，原 driver 内嵌段亦如此）
+→ 存量车牌每批建档被拒 → failed 跨批重发注定被拒的建车请求（attempted 仅单批
+防重）。与客户侧 2026-09-03 修复同源，车辆→司机这对漏修——但机制为 duplicate
+**未登记终态**（非"已登记但判定漏认"：truck 路径本无登记）；主建档路径
+_create_one_async 三态一致处理，truck 分支漏登记。
 
-**改法**（单点，orchestrator driver 分支）：
+**改法**（`_ensure_truck_archive_async` 两处，对齐主路径三态）：
 
-```python
-if truck_rec and (truck_rec.get("archive_id") or truck_rec.get("exists_external")):
-    truck_archive_id = truck_rec.get("archive_id") or ""  # exists_external 无 id → 空
-```
+1. 结果登记：响应带 duplicate/no_id_created → `mark_exists_external` 登记 +
+   进报告 exists_external 段（与 failed 区分，message 取 error.message 兜底"已存在"）；
+2. 预检判定：truck_rec 认 exists_external（无 id → 返回空串——truck_id 可空，
+   司机照常建档；archive_id 仍优先复用）。
 
-**效果**：exists_external 车不再跨批重发；司机照常建（truck_id 可空，不阻塞）——
-与客户侧 2026-09-03 修复同款语义；成功路径（archive_id 复用）零变化。
+**效果**：存量车牌首批 duplicate → 登记终态 → 后续批次不再重发建车请求；司机
+不阻塞；成功路径（archive_id 复用）零变化。
 
-**测试（新增）**："车辆 exists_external 登记后第二批不重发"——首批建车返回
-duplicate → 登记 exists_external；第二批同车牌 driver 候选 → 建车请求计数仍为 1
-（不新增）；司机照常建档成功。
+**测试（新增 1 例）**："truck duplicate 登记 exists_external 后第二批不重发"——
+首批建车返回 duplicate → exists_external 单列（failed 不含 truck）+ store 标记；
+司机照常建档成功（truck_id 空）；第二批建车请求计数仍为 1。
 
 **提交**：单独 commit（不带 M1-M4 文件）；建议信息：
 
 ```
-fix(bill): 车辆 exists_external 后跨批不再重发建车请求（与客户侧同源修复）
+fix(bill): 车辆建档 duplicate 漏登记终态——跨批重发建车请求修复（M5）
 ```
 
 ### 待议项（不入本轮）

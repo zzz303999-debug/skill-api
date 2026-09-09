@@ -607,6 +607,59 @@ class TestDuplicateExternal:
         # 订单不标注客户未建档（已存在外部，仅无 id；司机降级标注不影响）
         assert "客户「锦煦」未建档" not in (orders[0].unmapped_note or "")
 
+    async def test_truck_duplicate_marks_external_no_retry(
+        self, md_config, monkeypatch, tmp_path
+    ):
+        """司机建档前置建车被拒（TMS 已存在 duplicate）→ truck 登记 exists_external
+        终态；第二批不再重发建车请求；司机照常建档（truck_id 空不阻塞）。M5 锁死。"""
+        from app.orders.bill.master_data.store import reload_store
+
+        store = reload_store(tmp_path / "md-truck.json")
+        calls: list[dict] = []
+
+        async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
+            calls.append(forms_by_kind)
+            results: dict = {}
+            for kind, forms in forms_by_kind.items():
+                results[kind] = {}
+                for i, key in enumerate(forms):
+                    if kind == KIND_TRUCK:
+                        results[kind][key] = {
+                            "success": False,
+                            "archive_id": None,
+                            "duplicate": True,
+                            "error": {"code": "master_data_duplicate", "message": "该车牌已存在"},
+                        }
+                    else:
+                        results[kind][key] = {
+                            "success": True,
+                            "archive_id": f"aid-{kind}-{i}",
+                            "error": None,
+                        }
+            return results
+
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
+        md_config(_default_cfg(threshold=1))
+        # 仅司机候选（无客户/门点，避免依赖链干扰断言）
+        order = _make_order(
+            customer=None, door=None, address=None,
+            driver="王师傅", plate="沪A12345",
+        )
+        # 第一批：truck duplicate → exists_external 单列（不记 failed）+ store 终态
+        report = await run_master_data_async([order], create_order=True)
+        assert [e["kind"] for e in report["exists_external"]] == [KIND_TRUCK]
+        assert not any(f["kind"] == KIND_TRUCK for f in report["failed"])
+        truck_rec = store.get(KIND_TRUCK, plate_key("沪A12345"))
+        assert truck_rec and truck_rec.get("exists_external") is True
+        assert truck_rec.get("archive_id") is None
+        # 司机照常建档（truck_id 可空，建车失败不阻塞）
+        driver_rec = store.get(KIND_DRIVER, driver_key("王师傅", "沪A12345"))
+        assert driver_rec and driver_rec["archive_id"] == "aid-driver-0"
+        # 第二批：exists_external 拦下，不再发建车请求（计数仍 1）
+        await run_master_data_async([order], create_order=True)
+        truck_calls = [c for c in calls if KIND_TRUCK in c]
+        assert len(truck_calls) == 1
+
     async def test_duplicate_requires_marker_match(self, md_config, monkeypatch, tmp_path):
         """非「已存在」语义的 204（其他 msg）→ 维持 failed + 下批重试。"""
         from app.orders.bill.master_data.store import reload_store
