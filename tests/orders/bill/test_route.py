@@ -550,10 +550,7 @@ def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
     assert msgs == {_MISSING_BL_MSG}
     # details 契约（2026-09-04 用户拍板）：仅 missing_bl_no_count，无 missing_rows
     d0 = body["data"]["orders"][0]["create_result"]["error"]["details"]
-    assert d0 == {
-        "missing_bl_no_count": 1,
-        "upstream": {"code": "204", "msg": "添加失败", "data": []},
-    }
+    assert d0 == {"missing_bl_no_count": 1}
     assert "missing_rows" not in d0
     # 零下游调用：AddWork 0、建档族 0
     assert calls["addwork"] == 0

@@ -142,7 +142,6 @@ class TestBoxWhitelist:
         assert order.create_result["success"] is False
         assert order.create_result["error"]["code"] == "unknown_box_type"
         assert "40GOH" in order.create_result["error"]["message"]
-        assert order.create_result["error"]["details"]["upstream"]["code"] == "204"
         assert result.summary is None  # preview：summary 仍为 null（对齐账单）
 
     async def test_unknown_box_type_not_submitted_create(self, auth_bytes, monkeypatch):
@@ -175,7 +174,6 @@ class TestBoxMissing:
         details = order.create_result["error"]["details"]
         assert details["missing_fields"] == ["box_groups"]
         assert details["missing_reasons"]["box_groups"] == "原文未找到"
-        assert details["upstream"]["code"] == "204"
         assert result.summary is None  # preview：summary 仍为 null（对齐账单）
 
     async def test_box_missing_not_submitted_create(self, auth_bytes, monkeypatch):
@@ -231,7 +229,6 @@ class TestMultiBlNo:
         assert error["code"] == "manifest_multi_bl_no"
         assert "拆分文件" in error["message"]
         assert error["details"]["bl_nos"] == ["SITGBAQI005920", "SITGBAYP006017"]
-        assert error["details"]["upstream"]["code"] == "204"
         assert result.summary is None
 
     async def test_multi_bl_no_not_submitted_create(self, si_bytes, monkeypatch):

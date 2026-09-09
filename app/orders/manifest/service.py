@@ -62,9 +62,6 @@ def _mark_box_type_rejection(order) -> bool:
             "description": "箱型不在 TMS 支持清单中，请联系客服",
             "details": {
                 "unknown_box_types": unknown,
-                # 全场景业务码统一可达：本地拦截等价于该单添加失败，
-                # 对齐 TMS「新建全部失败 → 204」口径
-                "upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
         },
     }
@@ -92,9 +89,6 @@ def _mark_multi_bl_no_rejection(order, bl_nos: list[str]) -> bool:
             "description": "舱单文件包含多个提单号，无法录入，请拆分文件后重试",
             "details": {
                 "bl_nos": sorted(unique),
-                # 全场景业务码统一可达：本地拦截等价于该单添加失败，
-                # 对齐 TMS「新建全部失败 → 204」口径
-                "upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
         },
     }
@@ -122,9 +116,6 @@ def _mark_box_missing_rejection(order) -> bool:
             "details": {
                 "missing_fields": ["box_groups"],
                 "missing_reasons": missing,
-                # 全场景业务码统一可达：本地拦截等价于该单添加失败，
-                # 对齐 TMS「新建全部失败 → 204」口径
-                "upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
         },
     }
@@ -144,7 +135,6 @@ def _mark_not_ready(order) -> None:
             "details": {
                 "missing_fields": list(missing),
                 "missing_reasons": missing,
-                "upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
         },
     }

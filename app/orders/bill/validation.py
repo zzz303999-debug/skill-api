@@ -61,7 +61,6 @@ def reject_unknown_box_types(orders: list) -> bool:
                 "description": "箱型不在 TMS 支持清单中，请联系客服",
                 "details": {
                     "unknown_box_types": order_unknown or file_unknown,
-                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
                 },
             },
         }
@@ -103,9 +102,6 @@ def reject_missing_bl_no(orders: list) -> bool:
                 "description": MISSING_BL_NO_MSG,
                 "details": {
                     "missing_bl_no_count": len(missing_idx),
-                    # 全场景业务码统一可达（§3.7/既有规范）：本地拦截等价于该单
-                    # 添加失败，对齐 TMS「新建全部失败 → 204」口径
-                    "upstream": {"code": "204", "msg": "添加失败", "data": []},
                 },
             },
         }

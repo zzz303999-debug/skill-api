@@ -334,19 +334,15 @@ def _aggregate_stage(output, create_order: bool, sk: str):
 
 
 def _build_failed_details(created: list) -> list[dict]:
-    """失败单明细（summary.failed_details）：单号/错误码/消息 + upstream 透传（有才带）。"""
+    """失败单明细（summary.failed_details）：单号/错误码/消息。
+
+    本地拦截不再模拟上游回显（2026-09-09 B 案：前端只消费顶层 code/msg/data，
+    删除 error_upstream 透传与单级 details.upstream 模拟壳）。"""
     return [
         {
-            **{
-                "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-                "error_code": (o.create_result.get("error") or {}).get("code"),
-                "error_message": (o.create_result.get("error") or {}).get("message"),
-            },
-            **(
-                {"error_upstream": (o.create_result["error"].get("details") or {}).get("upstream")}
-                if (o.create_result.get("error") or {}).get("details", {}).get("upstream") is not None
-                else {}
-            ),
+            "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
+            "error_code": (o.create_result.get("error") or {}).get("code"),
+            "error_message": (o.create_result.get("error") or {}).get("message"),
         }
         for o in created
         if not o.create_result.get("success")

@@ -197,14 +197,11 @@ class TestRejectUnknownBoxTypes:
         bad = _canonical_order("OOLU10000002", "40GOH")
         rejected = reject_unknown_box_types([good, bad])
         assert rejected is True
-        # 非法单：报自己的箱型 + 上游业务码（对齐 TMS 204 失败口径）
+        # 非法单：报自己的箱型
         assert bad.create_result["success"] is False
         assert bad.create_result["error"]["code"] == "unknown_box_type"
         assert bad.create_result["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
         assert bad.create_result["error"]["details"]["unknown_box_types"] == ["40GOH"]
-        assert bad.create_result["error"]["details"]["upstream"] == {
-            "code": "204", "msg": "添加失败", "data": [],
-        }
         # 合法单：文件级拒绝，报全局清单
         assert good.create_result["success"] is False
         assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
@@ -245,7 +242,6 @@ class TestRejectUnknownBoxTypes:
         reject_unknown_box_types(orders)
         assert orders[2].create_result["error"]["message"] == "文件含非法箱型：40GOH、20GOH，请联系客服"
         assert orders[2].create_result["error"]["details"]["unknown_box_types"] == ["40GOH", "20GOH"]
-        assert orders[2].create_result["error"]["details"]["upstream"]["code"] == "204"
 
     async def test_already_marked_skipped_not_overwritten(self):
         """已标记 skipped 的单不动（历史成功单必然合法，不参与文件级拒绝）。"""
@@ -294,19 +290,17 @@ class TestBuildResultIntegration:
         assert result.summary["success"] == 0
         assert result.summary["failed"] == 2
         assert calls["addwork"] == 0  # 文件级拒绝：任何单都不提交
-        # failed_details 透传上游业务码（对齐 TMS 204 失败口径）
+        # failed_details：单号/错误码/消息（本地拦截不模拟上游回显）
         assert result.summary["failed_details"] == [
             {
                 "order_num": "OOLU12345678",
                 "error_code": "unknown_box_type",
                 "error_message": "文件含非法箱型：40GOH，请联系客服",
-                "error_upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
             {
                 "order_num": "OOLU12345679",
                 "error_code": "unknown_box_type",
                 "error_message": "系统没有此箱型：40GOH，请联系客服",
-                "error_upstream": {"code": "204", "msg": "添加失败", "data": []},
             },
         ]
         by_bl = {o.bl_no: o for o in result.canonical_orders}
