@@ -341,16 +341,53 @@ def _header_column_index(
     return names, sections
 
 
-def _parse_with_template(
-    view: _SheetView, match, engine: str, filename: str
-) -> ParseOutput:
-    """配置驱动解析（L1/L2 命中后）：表头定位/区块/列映射/行过滤/归一化全由
-    模板配置声明，代码对目标字段名零假设。
+@dataclass
+class RowParseLayout:
+    """模板配置展开后的行解析只读布局（P4-S2 收口 15+ 局部变量）。
 
-    输出分流（按模板 columns 目标字段集合判定）：
-    - 目标 ⊆ BillRow 字段（内置模板迁移语义）→ rows: list[BillRow]（原文保真，
-      费用进 fees；清洗/日期补年仍由归集层负责，与迁移前一致）；
-    - 标准字段（CanonicalOrder 字段名）→ canonical_rows: list[dict]（归一化后）。
+    unmatched_hits/pending_two_row_fees 为可变累计（行循环消费）；dynamic_fee_cols
+    由 _discover_dynamic_fee_cols 在布局定稿前填充。
+    """
+
+    header_row: int
+    is_billrow: bool
+    stop_on: list[str]
+    row_filter: str
+    seq_col: int | None
+    anchor_name: str
+    normalizers: dict
+    year_hint: tuple[int, int] | None
+    field_cols: dict[str, list[int]]
+    fee_cols: dict[int, str]
+    new_fee_cols: dict[int, tuple[str, str]]
+    anchor_cols: dict[int, tuple[str, str]]
+    channels: dict
+    default_section: str
+    fees_cfg: dict
+    dynamic_fee_cols: dict[int, str]
+    unmatched_raw: dict[int, str]
+    unmatched_hits: dict[int, int]
+    pending_two_row_fees: list[str]
+
+
+@dataclass
+class RowFees:
+    """单行费用/锚点抽取结果（P4-S2）：四收集器收口。"""
+
+    fee_items: list[dict]
+    anchors: dict[str, dict[str, float]]
+    fee_failures: list[dict]
+    fee_skipped: list[dict]
+
+
+def _layout_from_template(
+    view: _SheetView, match, filename: str
+) -> RowParseLayout:
+    """模板配置展开为行解析布局（P4-S2 自 _parse_with_template 准备段抽出）。
+
+    columns/fees 段 → 列号映射（field_cols/fee_cols/new_fee_cols/anchor_cols）、
+    行过滤参数、未识别列清单；动态费用收录候选（B1/B1'）同在此完成
+    （_discover_dynamic_fee_cols），行循环前定稿。
     """
     template = match.template
     header_row = match.header_row
@@ -405,8 +442,8 @@ def _parse_with_template(
         )
     }
     # 序号列（row_filter: seq_numeric 口径）：row_anchor 列，columns 有 seq 时优先
-    anchor = normalize_header(str(header_cfg.get("row_anchor") or "序号"))
-    seq_cols = [col for col, name in enumerate(names, start=1) if name == anchor]
+    anchor_name = normalize_header(str(header_cfg.get("row_anchor") or "序号"))
+    seq_cols = [col for col, name in enumerate(names, start=1) if name == anchor_name]
     if "seq" in field_cols:
         seq_cols = field_cols["seq"]
     seq_col = seq_cols[0] if seq_cols else None
@@ -416,62 +453,98 @@ def _parse_with_template(
     normalizers = template.get("normalizers", {}) or {}
     year_hint = resolve_year_hint(template, filename, view, header_row)
 
-    is_billrow = set(columns) <= _BILLROW_FIELDS
-    raw_rows: list[BillRow] = [] if is_billrow else []
-    canonical_rows: list[dict] = [] if not is_billrow else []
+    layout = RowParseLayout(
+        header_row=header_row,
+        is_billrow=set(columns) <= _BILLROW_FIELDS,
+        stop_on=stop_on,
+        row_filter=row_filter,
+        seq_col=seq_col,
+        anchor_name=anchor_name,
+        normalizers=normalizers,
+        year_hint=year_hint,
+        field_cols=field_cols,
+        fee_cols=fee_cols,
+        new_fee_cols=new_fee_cols,
+        anchor_cols=anchor_cols,
+        channels=channels,
+        default_section=next(iter(channels), ""),
+        fees_cfg=fees_cfg,
+        dynamic_fee_cols={},
+        unmatched_raw=unmatched_raw,
+        unmatched_hits={},
+        pending_two_row_fees=[],
+    )
+    # 动态费用收录候选（B1/B1'）在布局最后完成：可能并进 fee_cols（BillRow）
+    # 或 dynamic_fee_cols（canonical），须在行循环前定稿
+    _discover_dynamic_fee_cols(view, header_row, template, layout, sections)
+    layout.unmatched_hits = {col: 0 for col in layout.unmatched_raw}
+    return layout
 
-    # 未知列动态费用收录（2026-09-04 用户拍板：费用项不写死、账单新增费用列
-    # 无需先声明模板）：数据区含金额的未知列自动转费用列（列名去空白归一作
-    # 费用名），金额进费用、非数字原文保留，与声明费用列同口径；纯文本未知列
-    # 保持上报。
-    # B1'（2026-09-07 用户拍板）：两家族统一收录——此前仅 BillRow 语义模板生效，
-    # canonical 家族（AI 映射/L1）未知金额列被沉默吞掉（生产实证：L3 认出运费列
-    # 却只上报不解析，费用管理无建档）。canonical 收录列行级走 _fees，code 经
-    # 别名字典（命中→标准码；未命中→other+原名，建档由 fee_bootstrap B2 兑底）。
-    # 边界：仅单行表头（column_range 家族，sections 空）收录——two_row 区块表头
-    # 的费用区由区块结构严格界定（_discover_fee_columns two_row 分支），区块外
-    # 表尾列（抬头费/港杂费等杂项段）语义无保证，保持上报不收录（yahao golden
-    # 实证：区块外收录打破对账恒等）。
-    # 防误收：锚点特征（_is_anchor_column：合计/小计/已收/未收/已付/未付/利润，
-    # 与 _ANCHOR_KEYWORDS 同口径）、备注类列、命中 IGNORED_HEADERS 的列、
-    # row_anchor 序号列（junyu 新式样序号列值 1 被误收事故回归：序号是行键
-    # 非金额）、模板级 fees.ignore_headers（junyu 箱量列）均不收；命中
-    # IGNORED_HEADERS 的列已在 unmatched_raw 构造时排除，锚点/备注在此统一排除。
-    # 收录源扩展（小王费实证）：_ignored_cols（AI 降级 ignore 固化列）同样过
-    # 金额判据——否则 L3 白名单外费用列降级固化后依然被沉默吞掉。
-    _anchor_name = normalize_header(str(header_cfg.get("row_anchor") or "序号"))
-    _ignore_names = {
+
+def _discover_dynamic_fee_cols(
+    view: _SheetView, header_row: int, template: dict, layout: RowParseLayout, sections
+) -> None:
+    """未知列动态费用收录候选（B1/B1'，2026-09-07 用户拍板）。
+
+    数据区含金额的未知列自动转费用列（列名去空白归一作费用名），金额进费用、
+    非数字原文保留，与声明费用列同口径；纯文本未知列保持上报。
+    B1'：两家族统一收录——此前仅 BillRow 语义模板生效，canonical 家族（AI
+    映射/L1）未知金额列被沉默吞掉（生产实证：L3 认出运费列却只上报不解析，
+    费用管理无建档）。canonical 收录列行级走 _fees，code 经别名字典（命中→
+    标准码；未命中→other+原名，建档由 fee_bootstrap B2 兑底）。
+    边界：仅单行表头（column_range 家族，sections 空）收录——two_row 区块表头
+    的费用区由区块结构严格界定（_discover_fee_columns two_row 分支），区块外
+    表尾列（抬头费/港杂费等杂项段）语义无保证，保持上报不收录（yahao golden
+    实证：区块外收录打破对账恒等）。
+    防误收：锚点特征（_is_anchor_column：合计/小计/已收/未收/已付/未付/利润，
+    与 _ANCHOR_KEYWORDS 同口径）、备注类列、命中 IGNORED_HEADERS 的列、
+    row_anchor 序号列（junyu 新式样序号列值 1 被误收事故回归：序号是行键
+    非金额）、模板级 fees.ignore_headers（junyu 箱量列）均不收；命中
+    IGNORED_HEADERS 的列已在 unmatched_raw 构造时排除，锚点/备注在此统一排除。
+    收录源扩展（小王费实证）：_ignored_cols（AI 降级 ignore 固化列）同样过
+    金额判据——否则 L3 白名单外费用列降级固化后依然被沉默吞掉。
+    """
+    is_billrow = layout.is_billrow
+    fees_cfg = layout.fees_cfg
+    anchor_name = layout.anchor_name
+    unmatched_raw = layout.unmatched_raw
+    ignore_names = {
         normalize_header(str(n)) for n in (fees_cfg.get("ignore_headers") or [])
     }
+    # 已映射列（含费用/锚点列；动态收录前定稿）不重复入候选
+    mapped_cols_flat = (
+        {c for cols in layout.field_cols.values() for c in cols}
+        | set(layout.fee_cols)
+        | set(layout.new_fee_cols)
+        | set(layout.anchor_cols)
+    )
     candidates: dict[int, str] = dict(unmatched_raw)
-    for _col in ignored_cols:
+    for _col in set(template.get("_ignored_cols") or []):
         if _col in mapped_cols_flat or _col in candidates:
             continue
         _text = _header_text(view.merged_cell(header_row, _col))
         if _text:
             candidates[_col] = _text
-    dynamic_fee_cols: dict[int, str] = {}  # canonical 家族收录列（列号→费用名）
-    pending_two_row_fees: list[str] = []  # two_row 兑底上报（new_fee: 前缀）
     if candidates and not any(sections):
         for col, raw_text in list(candidates.items()):
             name = normalize_header(raw_text)
             if (
                 not name
-                or name == _anchor_name
+                or name == anchor_name
                 or is_anchor_column(name)
                 or is_note_column(name)
                 or is_non_fee_header(name)
                 or name in IGNORED_HEADERS
-                or name in _ignore_names
+                or name in ignore_names
             ):
                 continue
             for row in range(header_row + 1, view.nrows + 1):
                 raw = view.cell(row, col)
                 if raw is not None and _to_money(raw) is not None:
                     if is_billrow:
-                        fee_cols[col] = name
+                        layout.fee_cols[col] = name
                     else:
-                        dynamic_fee_cols[col] = name
+                        layout.dynamic_fee_cols[col] = name
                     unmatched_raw.pop(col, None)
                     break
     elif candidates:
@@ -483,47 +556,65 @@ def _parse_with_template(
             name = normalize_header(raw_text)
             if (
                 not name
-                or name == _anchor_name
+                or name == anchor_name
                 or is_anchor_column(name)
                 or is_note_column(name)
                 or is_non_fee_header(name)
                 or name in IGNORED_HEADERS
-                or name in _ignore_names
+                or name in ignore_names
             ):
                 continue
             for row in range(header_row + 1, view.nrows + 1):
                 raw = view.cell(row, col)
                 if raw is not None and _to_money(raw) is not None:
-                    pending_two_row_fees.append(name)
+                    layout.pending_two_row_fees.append(name)
                     break
-    unmatched_hits = {col: 0 for col in unmatched_raw}
 
-    for row in range(header_row + 1, view.nrows + 1):
+
+def _parse_with_template(
+    view: _SheetView, match, engine: str, filename: str
+) -> ParseOutput:
+    """配置驱动解析（L1/L2 命中后）：表头定位/区块/列映射/行过滤/归一化全由
+    模板配置声明，代码对目标字段名零假设。
+
+    输出分流：目标 ⊆ BillRow 字段（内置模板迁移语义）→ rows（原文保真，费用进
+    fees）；标准字段 → canonical_rows（归一化后）。明细见 _layout_from_template/
+    _collect_row_fees/_append_parsed_row（P4-S2 拆分）。
+    """
+    layout = _layout_from_template(view, match, filename)
+    raw_rows: list[BillRow] = [] if layout.is_billrow else []
+    canonical_rows: list[dict] = [] if not layout.is_billrow else []
+
+    for row in range(layout.header_row + 1, view.nrows + 1):
         # stop_on：任一列值含终止词 → 停止（合计/制单人页脚等）
-        if stop_on:
+        if layout.stop_on:
             row_texts = [
                 str(view.cell(row, col)).strip()
                 for col in range(1, view.ncols + 1)
                 if view.cell(row, col) is not None
             ]
-            if any(any(s in t for s in stop_on) for t in row_texts):
+            if any(any(s in t for s in layout.stop_on) for t in row_texts):
                 break
         # 未识别列计数（数据区非空才上报）
-        for col in unmatched_hits:
+        for col in layout.unmatched_hits:
             raw = view.cell(row, col)
             if raw is not None and str(raw).strip():
-                unmatched_hits[col] += 1
+                layout.unmatched_hits[col] += 1
         # row_filter: seq_numeric——序号列须为数值才是数据行；
         # BillRow 语义模板（内置迁移）不生效：尾部合计/箱量/大写行是归集对账锚点，
         # 须保留（与迁移前「全部非空行」一致，过滤发生在归集步骤）
-        if row_filter == "seq_numeric" and seq_col is not None and not is_billrow:
-            seq_raw = view.cell(row, seq_col)
+        if (
+            layout.row_filter == "seq_numeric"
+            and layout.seq_col is not None
+            and not layout.is_billrow
+        ):
+            seq_raw = view.cell(row, layout.seq_col)
             if seq_raw is None or not _SEQ_NUMERIC_RE.match(str(seq_raw).strip()):
                 continue
 
         values: dict[str, object] = {}
         fees_map: dict[str, float | str] = {}
-        for target_field, cols in field_cols.items():
+        for target_field, cols in layout.field_cols.items():
             for col in cols:
                 raw = view.cell(row, col)
                 if raw is None:
@@ -533,7 +624,7 @@ def _parse_with_template(
                     continue
                 # 多源列取最后一个非空（保持既有覆盖语义，空值不覆盖）
                 values[target_field] = text
-        for col, fee_name in fee_cols.items():
+        for col, fee_name in layout.fee_cols.items():
             raw = view.cell(row, col)
             if raw is None:
                 continue
@@ -541,82 +632,9 @@ def _parse_with_template(
                 money = _to_money(raw)
                 fees_map[fee_name] = money if money is not None else str(raw)
 
-        # 新 fees schema 行级费用抽取（T9）：费用列 → 行级费用项（随归集按键汇总）；
-        # 金额解析失败/空值/0 不生成记录，失败记 warning 进对账报告；锚点列值保留
-        fee_items: list[dict] = []
-        anchors: dict[str, dict[str, float]] = {}
-        fee_failures: list[dict] = []
-        fee_skipped: list[dict] = []
-        if new_fee_cols:
-            # column_range 家族单行表头无区块行，section 默认取唯一启用区块
-            # （保证「应收.费目」复合键映射与通道归属正确）
-            default_section = next(iter(channels), "")
-            for col, (section, name) in new_fee_cols.items():
-                section = section or default_section
-                raw = view.cell(row, col)
-                if raw is None or not str(raw).strip():
-                    continue
-                money = _to_money(raw)
-                if money is None:
-                    fee_failures.append({"section": section, "name": name, "raw": str(raw)})
-                    continue
-                if money == 0:
-                    continue  # 空值与 0 均不生成费用记录（账单侧合计仍按列值参与对账）
-                meta = canonicalize_fee(section, name, fees_cfg)
-                if not meta["code"]:
-                    fee_skipped.append({"section": section, "name": name, "money": money})
-                    continue
-                # T27a 负向扣减项：negative=true → 金额取负录入（两位小数字符串如 "-50.00"）；
-                # 账单语义：应付合计 = Σ正项 − 扣除费列值（列值本身带符号：+486 扣减、-25 加回），
-                # 故取 `-money`（相反数）而非 -abs：负值列取负后为 +（加回），恒等式自然成立；
-                # negative_policy=skip_report 已在 canonicalize_fee 降级 import=False（不录入仅对账）
-                if meta.get("negative"):
-                    money = -money
-                fee_items.append(
-                    {
-                        "section": section,
-                        "name": name,
-                        "channel": channels.get(section) or "shou",
-                        "code": meta["code"],
-                        "import": meta["import"],
-                        "reconcile": meta["reconcile"],
-                        "negative": bool(meta.get("negative")),
-                        "money": money,
-                    }
-                )
-        # B1'：canonical 家族动态收录列的行级抽取（金额→_fees；code 走别名字典，
-        # 未命中归 other+原名——归集侧 _merge_fee_note 合并，建档由 B2 兑底）
-        if dynamic_fee_cols:
-            for col, name in dynamic_fee_cols.items():
-                raw = view.cell(row, col)
-                if raw is None or not str(raw).strip():
-                    continue
-                money = _to_money(raw)
-                if money is None or money == 0:
-                    continue  # 空值/0 不生成记录（与新 fees schema 同口径）
-                code, _ = canonicalize_fee_name(name)
-                fee_items.append(
-                    {
-                        "section": "",
-                        "name": name,
-                        "channel": "shou",
-                        "code": code,
-                        "import": True,
-                        "reconcile": True,
-                        "negative": False,
-                        "money": money,
-                    }
-                )
-        for col, (section, name) in anchor_cols.items():
-            raw = view.cell(row, col)
-            if raw is None or not str(raw).strip():
-                continue
-            money = _to_money(raw)
-            if money is None:
-                continue
-            anchors.setdefault(section, {})[name] = money
-        if not values and not fees_map and not fee_items:
-            if is_billrow:
+        fees = _collect_row_fees(view, row, layout)
+        if not values and not fees_map and not fees.fee_items:
+            if layout.is_billrow:
                 # 与迁移前 read_data_rows 一致：仅未映射列有值的行也保留（字段为空）
                 has_any = any(
                     view.cell(row, col) is not None and str(view.cell(row, col)).strip()
@@ -627,48 +645,24 @@ def _parse_with_template(
             else:
                 continue
 
-        if is_billrow:
-            kwargs = dict(values)
-            if fees_map:
-                kwargs["fees"] = fees_map
-            raw_rows.append(BillRow(**kwargs))
-        else:
-            normalized: dict[str, object] = {}
-            for target_field, value in values.items():
-                func_name = normalizers.get(target_field)
-                if func_name:
-                    value = _apply_normalizer(
-                        target_field, func_name, value, year_hint
-                    )
-                if value is not None and value != "":
-                    normalized[target_field] = value
-            # 行级费用私有键（归集侧按 group_key 聚合；下划线前缀不进响应）
-            if fee_items:
-                normalized["_fees"] = fee_items
-            if anchors:
-                normalized["_anchors"] = anchors
-            if fee_failures:
-                normalized["_fee_failures"] = fee_failures
-            if fee_skipped:
-                normalized["_fee_skipped"] = fee_skipped
-            canonical_rows.append(normalized)
+        _append_parsed_row(values, fees_map, fees, layout, raw_rows, canonical_rows)
 
     unmatched = [
-        unmatched_raw[col]
+        layout.unmatched_raw[col]
         for col in range(1, view.ncols + 1)
-        if col in unmatched_hits and unmatched_hits[col] > 0
+        if col in layout.unmatched_hits and layout.unmatched_hits[col] > 0
     ]
     # two_row 兑底上报（2026-09-07 审查 W3）：区块外金额列不收录但不沉默
-    if pending_two_row_fees:
+    if layout.pending_two_row_fees:
         unmatched = [
             *unmatched,
-            *(f"new_fee:{name}" for name in pending_two_row_fees),
+            *(f"new_fee:{name}" for name in layout.pending_two_row_fees),
         ]
-    period = extract_bill_period(view, header_row)
+    period = extract_bill_period(view, layout.header_row)
     template_meta = {
         "fingerprint": match.fingerprint,
-        "source": "builtin" if is_billrow else "template",
-        "name": template.get("name", match.template_id),
+        "source": "builtin" if layout.is_billrow else "template",
+        "name": match.template.get("name", match.template_id),
     }
     return ParseOutput(
         rows=raw_rows,
@@ -677,8 +671,132 @@ def _parse_with_template(
         unmatched_headers=unmatched,
         template=template_meta,
         template_match=match,
-        canonical_rows=canonical_rows if not is_billrow else None,
+        canonical_rows=canonical_rows if not layout.is_billrow else None,
     )
+
+
+def _collect_row_fees(
+    view: _SheetView, row: int, layout: RowParseLayout
+) -> RowFees:
+    """单行费用/锚点抽取（P4-S2 自 _parse_with_template 主循环抽出）。
+
+    新 fees schema 费用列 → 行级费用项（随归集按键汇总）：金额解析失败/空值/0
+    不生成记录，失败记 warning 进对账报告；锚点列值保留；B1' 动态收录列同口径。
+    """
+    fee_items: list[dict] = []
+    anchors: dict[str, dict[str, float]] = {}
+    fee_failures: list[dict] = []
+    fee_skipped: list[dict] = []
+    if layout.new_fee_cols:
+        # column_range 家族单行表头无区块行，section 默认取唯一启用区块
+        # （保证「应收.费目」复合键映射与通道归属正确）
+        for col, (section, name) in layout.new_fee_cols.items():
+            section = section or layout.default_section
+            raw = view.cell(row, col)
+            if raw is None or not str(raw).strip():
+                continue
+            money = _to_money(raw)
+            if money is None:
+                fee_failures.append({"section": section, "name": name, "raw": str(raw)})
+                continue
+            if money == 0:
+                continue  # 空值与 0 均不生成费用记录（账单侧合计仍按列值参与对账）
+            meta = canonicalize_fee(section, name, layout.fees_cfg)
+            if not meta["code"]:
+                fee_skipped.append({"section": section, "name": name, "money": money})
+                continue
+            # T27a 负向扣减项：negative=true → 金额取负录入（两位小数字符串如 "-50.00"）；
+            # 账单语义：应付合计 = Σ正项 − 扣除费列值（列值本身带符号：+486 扣减、-25 加回），
+            # 故取 `-money`（相反数）而非 -abs：负值列取负后为 +（加回），恒等式自然成立；
+            # negative_policy=skip_report 已在 canonicalize_fee 降级 import=False（不录入仅对账）
+            if meta.get("negative"):
+                money = -money
+            fee_items.append(
+                {
+                    "section": section,
+                    "name": name,
+                    "channel": layout.channels.get(section) or "shou",
+                    "code": meta["code"],
+                    "import": meta["import"],
+                    "reconcile": meta["reconcile"],
+                    "negative": bool(meta.get("negative")),
+                    "money": money,
+                }
+            )
+    # B1'：canonical 家族动态收录列的行级抽取（金额→_fees；code 走别名字典，
+    # 未命中归 other+原名——归集侧 _merge_fee_note 合并，建档由 B2 兑底）
+    if layout.dynamic_fee_cols:
+        for col, name in layout.dynamic_fee_cols.items():
+            raw = view.cell(row, col)
+            if raw is None or not str(raw).strip():
+                continue
+            money = _to_money(raw)
+            if money is None or money == 0:
+                continue  # 空值/0 不生成记录（与新 fees schema 同口径）
+            code, _ = canonicalize_fee_name(name)
+            fee_items.append(
+                {
+                    "section": "",
+                    "name": name,
+                    "channel": "shou",
+                    "code": code,
+                    "import": True,
+                    "reconcile": True,
+                    "negative": False,
+                    "money": money,
+                }
+            )
+    for col, (section, name) in layout.anchor_cols.items():
+        raw = view.cell(row, col)
+        if raw is None or not str(raw).strip():
+            continue
+        money = _to_money(raw)
+        if money is None:
+            continue
+        anchors.setdefault(section, {})[name] = money
+    return RowFees(
+        fee_items=fee_items,
+        anchors=anchors,
+        fee_failures=fee_failures,
+        fee_skipped=fee_skipped,
+    )
+
+
+def _append_parsed_row(
+    values: dict[str, object],
+    fees_map: dict[str, float | str],
+    fees: RowFees,
+    layout: RowParseLayout,
+    raw_rows: list,
+    canonical_rows: list,
+) -> None:
+    """行结果落桶（P4-S2 自 _parse_with_template 主循环抽出）：BillRow 直构 /
+    canonical 归一化 + 行级私有键（_fees/_anchors/_fee_failures/_fee_skipped）。"""
+    if layout.is_billrow:
+        kwargs = dict(values)
+        if fees_map:
+            kwargs["fees"] = fees_map
+        raw_rows.append(BillRow(**kwargs))
+        return
+    normalized: dict[str, object] = {}
+    for target_field, value in values.items():
+        func_name = layout.normalizers.get(target_field)
+        if func_name:
+            value = _apply_normalizer(
+                target_field, func_name, value, layout.year_hint
+            )
+        if value is not None and value != "":
+            normalized[target_field] = value
+    # 行级费用私有键（归集侧按 group_key 聚合；下划线前缀不进响应）
+    if fees.fee_items:
+        normalized["_fees"] = fees.fee_items
+    if fees.anchors:
+        normalized["_anchors"] = fees.anchors
+    if fees.fee_failures:
+        normalized["_fee_failures"] = fees.fee_failures
+    if fees.fee_skipped:
+        normalized["_fee_skipped"] = fees.fee_skipped
+    canonical_rows.append(normalized)
 
 
 def _match_template_and_parse(

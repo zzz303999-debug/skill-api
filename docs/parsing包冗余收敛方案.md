@@ -1,6 +1,6 @@
-# parsing 包冗余收敛方案（P1+P2 纯重构，P3 待拍板，P4 另开）
+# parsing 包冗余收敛方案（P1-P3 已实施；P4 S1/S2 已实施）
 
-> 状态：**待确认**（2026-09-09 首版）
+> 状态：P1/P2（0699199）、P3 A 案（2aec0bb）；P4-S1（66184ab）与 P4-S2 已实施
 > 范围：`app/orders/bill/parsing/`（columns / template_store / legacy_template /
 > ai_header / normalizers）+ `app/orders/bill/aggregation/aggregator.py`（仅正则/清洗收口）
 > 性质：P1/P2 结构性收敛，**行为零变更**（输出/采纳判定/指纹逐字节不变）；
@@ -100,12 +100,74 @@ parser._to_money（L136，21 行复杂版）才是真解析口径（T9：合并�
 **候选 B**：保持双版，仅改 ai_header docstring 去掉"同口径"误导（纯文档）。
 **候选 C**：本轮不动，P4 拆 parser 时顺带收口。
 
-### P4 · parser.py 880 行拆分（另开，不入本轮）
+### P4 · parser.py 880 行拆分（S1/S2 已实施 2026-09-09）
 
-`_parse_with_template` 338 行（L400-737，调用 25 个符号）为全仓最大单体函数；
-`_match_template_and_parse` / `read_data_rows` 等周边也随行。拆法候选：
-横向（模板行构造段抽 `_RowBuilder` 类）或纵向（按模板/AI/精确三分文件）——
-工程量大、行为零变更验证成本高，建议 P1-P3 稳定后仿 service.py P1-P4 模式另出文档。
+**现状（AST 实证）**：parser.py 879 行，构成：
+
+| 段 | 行段 | 内容 |
+|---|---|---|
+| ParseOutput | 63-88 | 解析结果模型（公共面，bill/__init__ 与 service 引用） |
+| 表头/行级设施 | 90-397 | 12 函数 ≈308 行（_to_money/find_header_row/read_data_rows/结算区间 4 函数/…） |
+| `_parse_with_template` | 400-737 | **338 行全仓最大单体**（准备段 65 / 动态收录 57 / 主循环 154 / 收尾 25） |
+| 编排 | 740-851 | _match_template_and_parse/_parse_with_ai_result/_parse_exact/_parse_sheet ≈111 行 |
+
+**目标**：结算区间纵向拆出 + `_parse_with_template` 无 >100 行函数；公共面符号
+（ParseOutput）留 parser.py 不动。
+
+#### P4-S1 · 结算区间簇纵向拆出 → `parsing/period.py`（纯搬移）
+
+迁 `extract_bill_period` / `_format_period_date` / `_settlement_text` /
+`_resolve_year_hint` + `_PERIOD_DATE_RE`（4 函数 ≈48 行）；**零外部引用已实证**
+（app/tests 均无直调）→ 仅 parser.py 内部 import 调整（`from .period import
+...`），调用点 4 处不变名。风险：低。
+
+#### P4-S2 · `_parse_with_template` 段落子函数化（同文件，行为零变更）
+
+按实证段落边界抽 3 个私有函数，消除 338 行单体：
+
+1. `_layout_from_template(template, match, view, filename) -> RowParseLayout`：
+   准备段 L411-477 + 动态收录候选段 L498-554（~120 行）→ dataclass
+   `RowParseLayout` 收口 15+ 展开变量（field_cols/fee_cols/new_fee_cols/
+   anchor_cols/channels/ignored_cols/candidates/dynamic_fee_cols/unmatched_raw/
+   seq_col/year_hint/is_billrow/business_end…，仿 master_data `_ArchiveSession`
+   收口先例）；
+2. `_collect_row_fees(view, row, layout) -> RowFees`：主循环内费用三抽 + 锚点段
+   L606-673（~68 行）→ dataclass `RowFees`（fee_items/anchors/fee_failures/
+   fee_skipped 四收集器收口）；
+3. 主循环 L557-710 保留为单循环（行过滤/字段收集/落行双路），行体降到 ~80 行；
+   收尾 L712-737 留 `_parse_with_template` 主体（~30 行 + 循环）。
+
+净效果：`_parse_with_template` 338 → 102 行；新增 2 个 dataclass + 4 函数；
+parser.py 行数持平微增（dataclass/函数头成本，纵向收益在 S1）。
+
+#### P4-S3 · read_data_rows 旧链路簇纵向拆出（可选，本轮不做）
+
+`read_data_rows`/`_dynamic_fee_cols`/`_header_columns`/`_column_lookup` 等与模板
+链路 helper（_to_money/_header_text/find_header_row）高度交织，拆分需跨模块
+双向引用梳理 + 测试 import 改指（test_fee_dynamic/test_fees 直调）——收益
+（-160 行）低于梳理成本，建议 S1+S2 落地后视 parser 行数再开。
+
+#### P4 明确不动
+
+- 编排三函数（_match_template_and_parse/_parse_with_ai_result/_parse_exact）边界
+- 各 helper 归属（共享面大，移动收益低）
+- ParseOutput 公共面（bill/__init__ 与 service 引用，不迁）
+
+#### P4 验证纪律
+
+S1/S2 独立提交；每步：bill 域 + 全量 pytest（golden 家族样本守护解析输出逐
+字节不变）+ ruff + dep_check 全绿。
+
+#### P4 实施记录（2026-09-09）
+
+- **S1（66184ab）**：结算区间簇 → period.py（extract_bill_period /
+  resolve_year_hint 公开化 + 簇内私有 helper），parser 879→823；
+- **S2**：`RowParseLayout`/`RowFees` dataclass 收口 + `_layout_from_template`
+  （99 行）/`_discover_dynamic_fee_cols`（88 行，B1/B1' 动态收录候选原样随迁，
+  含 mapped_cols_flat 判据逐字保持）/`_collect_row_fees`（85 行）/
+  `_append_parsed_row`（35 行）——**338 行单体消除，最大函数 102 行**；
+- 门禁：bill 域 554 / 全量 1188 passed、ruff、dep_check 全绿；
+- 后续：S3（read_data_rows 簇，可选）视需要另开。
 
 ---
 
@@ -118,8 +180,7 @@ parser._to_money（L136，21 行复杂版）才是真解析口径（T9：合并�
 
 ## §3 建议执行顺序
 
-1. **P1 + P2**（纯重构，一次提交或分两次——文档审定后执行）
-2. **P3 拍板**（A/B/C 三选一；A 案独立提交 + 测试适配）
-3. P4 另开会话
-
-确认后从 P1 开始；P3 请一并给 A/B/C 意向。
+1. ✅ **P1 + P2**（0699199）
+2. ✅ **P3 A 案**（2aec0bb）
+3. **P4 待确认**：S1（period 拆出）→ S2（_parse_with_template 子函数化）→
+   S3（read_data_rows 簇，可选后置）——确认后按 S1→S2 执行，每步独立提交
