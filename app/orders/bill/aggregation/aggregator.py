@@ -1,14 +1,8 @@
-"""竞品账单「一行一票」旧链路：每条数据行独立为 BillOrder（2026-08-31 业务拍板）。
+"""竞品账单「一行一票」旧链路（2026-08-31 业务拍板）：每条数据行独立为 BillOrder。
 
-对齐《竞品账单导入接口文档》一行一票口径。只做归集，不组装响应：
-- 尾部非数据行（seq 非数字）过滤，顺手收集对账锚点（合计行/合计大写行/总箱型箱量行）
-- 提单号清洗（去空格/连字符/浮点尾巴）与合法性校验
-- 每行自成一组，不再按提单号合并同号多行（TMS 允许同提单号多条订单）
-- box 同型累加（行内多箱型）、driver 取本行、费用本行金额、c_note 本行拼接、必填缺失标记
-- reconciliation：用账单自带锚点校验归集结果（只报告不拦截）；费用双锚点
-
-标准字段链路（dict → CanonicalOrder）已拆至 canonical_aggregator.py；中文
-大写金额解析已拆至 cn_amount.py；两通道清洗口径经本模块公开函数共享。
+只做归集，不组装响应：行序直转 + 账单锚点对账（合计行/合计大写/总箱型箱量，
+只报告不拦截，见 _collect_anchors/_build_reconciliation）。标准字段链路已拆至
+canonical_aggregator.py；清洗口径经本模块公开函数共享（两通道一致）。
 """
 
 from __future__ import annotations
@@ -68,15 +62,12 @@ def _collect_anchors(
     dict[str, int] | None,
     float | None,
 ]:
-    """过滤数据行并顺手收集对账锚点（不额外遍历）。
+    """过滤数据行并顺手收集对账锚点（不额外遍历；同类型锚点只取首个）。
 
-    返回 (数据行, 费用总额锚点, 箱型数量锚点, 合计大写金额锚点)：
-    - seq 为「合计:」开头的行 → 各费用列数值即账单口径费用总额（fees 已按列名入字典）
-    - seq 含「总箱型箱量」的行 → 从整行所有字段原文解析 箱型×数量（合并填充后
-      其他列也可能有文本）；正则含 45 尺等真实行业箱型
-    - 整行文本含「合计大写」的行 → 提取中文大写金额段解析为费用总额第二锚点
-      （导出时写死不经公式，不受 SUM 公式缓存旧值影响）
-    - 「制单人」等其余尾部行继续丢弃；同类型锚点只取首个
+    返回 (数据行, 费用总额锚点, 箱型数量锚点, 合计大写金额锚点)：seq 以
+    「合计:」开头的行取各费用列总额；含「总箱型箱量」的行从整行原文解析
+    箱型×数量；整行文本含「合计大写」的行解析大写金额（导出写死不经公式，
+    第二锚点防 SUM 公式缓存旧值）；其余尾部行丢弃。
     """
     data_rows: list[BillRow] = []
     fee_total: dict[str, float] | None = None
@@ -254,9 +245,7 @@ def _strip_float_tail(text: str) -> str:
 
 
 def clean_plate_no(value) -> str | None:
-    """车牌清洗：Excel 数字单元格浮点尾巴（9486.0 → 9486），其余原样。
-
-    公开导出：canonical_aggregator 复用（两通道同口径）。"""
+    """车牌清洗：去浮点尾巴（9486.0 → 9486），其余原样（公开导出，两通道同口径）。"""
     if value is None:
         return None
     text = str(value).strip()
@@ -266,9 +255,7 @@ def clean_plate_no(value) -> str | None:
 
 
 def clean_group_key(value) -> str | None:
-    """归集键清洗：去浮点尾巴（提单号/业务编号被 Excel 存成数字）。
-
-    公开导出：canonical_aggregator 复用（两通道同口径）。"""
+    """归集键清洗：去浮点尾巴（提单号/业务编号被 Excel 存成数字）（公开导出，两通道同口径）。"""
     if value is None:
         return None
     text = str(value).strip()
@@ -328,11 +315,10 @@ def _fill_year(md: str, period: BillPeriod) -> str | None:
 
 
 def _fee_entries(row: BillRow) -> tuple[list[dict], float]:
-    """行级费用条目：按行 fees 键序（模板声明序/文件物理列序）遍历，金额为数字才建条目；合计入 get_ys_zj。
+    """行级费用条目：按行 fees 键序遍历，金额为数字才建条目；合计入 get_ys_zj。
 
-    2026-09-04 费用动态化：不再按代码常量遍历——费用项以模板声明为源
-    （parser 侧未知列动态收录后直接进 fees），单行键序即列发现序；
-    同名费用跨行累加由一行一票（每行独立成单）消解。
+    费用项以模板声明为源（2026-09-04 动态化，不再按代码常量遍历）；同名
+    费用跨行累加由一行一票（每行独立成单）消解。
     """
     entries: list[dict] = []
     total = 0.0
@@ -345,12 +331,11 @@ def _fee_entries(row: BillRow) -> tuple[list[dict], float]:
 
 
 def _build_c_note(row: BillRow) -> str | None:
-    """c_note 拼接（§5.1 顺序）：客户编号→业务类型→箱号→车队→备注→应付备注。
+    """c_note 拼接（§5.1 顺序）：客户编号→业务类型→箱号→车队→备注→应付备注，
+    各段非空才拼、段间 "；" 分隔；备注/应付备注直拼无前缀。
 
-    各段非空才拼，段间 "；" 分隔，空段跳过；备注/应付备注直拼无前缀。
-    一行一票后单行至多一个车牌/一个日期，历史上的「车牌（仅多车牌）/
-    其他做箱日期」段不可能出现，已随多行合并逻辑移除（多车牌防丢失口径
-    2026-08-26 由去重键提单号+箱号承接）。
+    一行一票后单行至多一车牌/一日期，历史「多车牌并入备注」段已随多行合并
+    移除（防丢失口径 2026-08-26 由去重键提单号+箱号承接）。
     """
     segments: list[str] = []
     if v := _nonempty(row.c_sn):
@@ -412,18 +397,15 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
         missing_fields.append(MISSING_BOX)
         missing_reasons[MISSING_BOX] = REASON_NOT_FOUND
 
-    # order_data：必填项缺失显式置 None/[]，不填空串/0；非必填空值省略键
-    # 注意：data 恒为 1 条货物明细（2026-08-26 实测修正：N 条相同 b_order_num 导致
-    # TMS 按明细重复计入费用总额；柜级信息由 box[]/driver[0] 承载）
+    # order_data：必填缺失显式置 None/[]，不填空串/0；非必填空值省略键；
+    # data 恒为 1 条货物明细（2026-08-26 实测修正，原因见 data 键注释）
     order_data: dict = {
         "order_num1": bl_no,
         "type": 1,
         "c_title": c_title,
-        # data 收敛为 1 条货物明细（2026-08-26 实测修正）：TMS 按 data 条数展开
-        # 订单明细并把费用挂到每条明细——N 条相同 b_order_num 导致费用总额
-        # （如运费 6450）被每条重复计入；对齐标准通道 data[0] 货物明细语义
-        # （payload.py 只发 data[0]，TMS 实测可下单）。柜级差异信息（箱型/车牌）
-        # 分别由 box[] 聚合与 driver[0] 承载，data 无需逐行展开。
+        # data 收敛 1 条（2026-08-26 实测修正）：TMS 按 data 条数展开明细并把
+        # 费用重复计入（N 条同 b_order_num → 费用总额翻倍）；对齐标准通道
+        # data[0] 语义，柜级信息由 box[]/driver[0] 承载。
         "data": [{"b_order_num": bl_no}],
         "box": box_entries,
         "driver": [{"pay_yf_zj": 0.0}],
