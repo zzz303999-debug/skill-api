@@ -31,7 +31,7 @@ from app.core.errors import ServiceBusyError
 from app.core.http_client import post_form_async, unpack_json
 from app.core.logging_conf import get_logger
 
-from ..schema import BillOrder
+from ..schema import BillOrder, CreateResult, OrderError
 from .imported_registry import (
     alock_for,
     get_imported_registry,
@@ -141,8 +141,6 @@ _SHOU_KEYS: tuple[str, ...] = (
 # audit_status/b_lock 等状态类键
 # —— 实现上通过固定键集天然排除，无需额外过滤
 
-_ERROR_DESCRIPTION = "订单系统拒绝了请求或不可达，请稍后重试"
-
 
 def _put_value(flat: dict[str, str], key: str, value: Any) -> None:
     """null → 空字符串，其余 str()（展平键值统一字符串化）。"""
@@ -216,18 +214,15 @@ def flatten_order(order_data: dict[str, Any]) -> dict[str, str]:
     return flat
 
 
-def _error_result(message: str, *, details: dict[str, Any]) -> dict[str, Any]:
+def _error_result(message: str, *, details: dict[str, Any]) -> CreateResult:
     """单失败 create_result（不抛异常，调用方按单处理，不中断整批）。"""
-    return {
-        "success": False,
-        "sn": None,
-        "error": {
-            "code": "order_upstream_error",
-            "message": message,
-            "description": _ERROR_DESCRIPTION,
-            "details": details,
-        },
-    }
+    return CreateResult(
+        success=False,
+        sn=None,
+        error=OrderError(
+            code="order_upstream_error", message=message, details=details
+        ),
+    )
 
 
 def build_add_work_form(order_data: dict[str, Any]) -> dict[str, str]:
@@ -243,7 +238,7 @@ def build_add_work_form(order_data: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, Any]:
+def _parse_create_response(response: httpx.Response, *, step: str) -> CreateResult:
     """下游下单响应 → create_result（add_work 响应口径）。
 
     code "200"（字符串/数字皆可）→ 成功取 data[0].sn（缺 sn 仍成功，sn=None）；
@@ -288,10 +283,10 @@ def _parse_create_response(response: httpx.Response, *, step: str) -> dict[str, 
     if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
         sn = data_list[0].get("sn")
     log.info("jxt_order_ok", extra={"step": step, "sn": sn})
-    result: dict[str, Any] = {"success": True, "sn": sn, "error": None}
     if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
-        result["upstream"] = data_list[0]  # 原始回显（对齐 /orders 的 upstream.data[0]）
-    return result
+        # 原始回显（对齐 /orders 的 upstream.data[0]）
+        return CreateResult(success=True, sn=sn, upstream=data_list[0])
+    return CreateResult(success=True, sn=sn)
 
 def _register_imported(
     bl_no: str,
@@ -322,11 +317,11 @@ def _register_imported(
         )
 
 
-def _skipped_result(sn: str | None) -> dict[str, Any]:
+def _skipped_result(sn: str | None) -> CreateResult:
     """去重命中（已成功创建过）的 create_result：success=True + skipped 标记。"""
-    return {"success": True, "skipped": True, "sn": sn, "error": None}
+    return CreateResult(success=True, skipped=True, sn=sn)
 
-def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
+def _parse_canonical_response(response: httpx.Response) -> CreateResult:
     """TMS 通道响应判定（《逆推规范》§3）：code 为字符串 "200" → 成功，
     回取 data[0].sn（TMS 业务编号）与 data[0].o_id；其余 → error 三元组。
     网络/HTTP 异常由调用方捕获；判定失败不抛异常（按单处理）。
@@ -373,13 +368,10 @@ def _parse_canonical_response(response: httpx.Response) -> dict[str, Any]:
         sn = data_list[0].get("sn")
         o_id = data_list[0].get("o_id")
     log.info("jxt_canonical_order_ok", extra={"sn": sn, "o_id": o_id})
-    result: dict[str, Any] = {"success": True, "sn": sn, "error": None}
-    if o_id is not None:
-        result["o_id"] = o_id
     if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
         # 原始回显（对齐 /orders 的 upstream.data[0]：sns/o_id/c_title 等回写字段）
-        result["upstream"] = data_list[0]
-    return result
+        return CreateResult(success=True, sn=sn, o_id=o_id, upstream=data_list[0])
+    return CreateResult(success=True, sn=sn, o_id=o_id)
 
 # ---- 异步版本（网络段走 post_form_async；解析/登记复用同步纯函数，Phase 2 新增）----
 
@@ -441,20 +433,15 @@ async def submit_canonical_async(sk: str, order) -> dict[str, Any]:
 # ---- 异步编排：并发下单（同键串行原子、异键有界并行；Phase 3 新增）----
 
 
-def _missing_bl_result() -> dict[str, Any]:
+def _missing_bl_result() -> CreateResult:
     """提单号缺失的兑底 create_result（与 service 层预判同结构；防御直接调用
     create_orders_async 的第二入口，不提交下游）。"""
-    return {
-        "success": False,
-        "skipped": False,
-        "sn": None,
-        "error": {
-            "code": "missing_bl_no",
-            "message": "提单号缺失，未录入",
-            "description": "提单号为必填项，该行未录入；请补全提单号后重新导入",
-            "details": {},
-        },
-    }
+    return CreateResult(
+        success=False,
+        skipped=False,
+        sn=None,
+        error=OrderError(code="missing_bl_no", message="提单号缺失，未录入"),
+    )
 
 
 async def _create_one_async(
@@ -496,14 +483,14 @@ async def _create_one_async(
             return
         async with semaphore:
             order.create_result = await submit(sk, order)
-        if order.create_result.get("success"):
+        if order.create_result.success:
             # 登记含磁盘原子写（小文件毫秒级）→ to_thread 避免阻塞事件循环；
             # 仍在键锁内，保持查重→提交→登记原子性
             await asyncio.to_thread(
                 _register_imported,
                 bl,
                 owner,
-                order.create_result.get("sn"),
+                order.create_result.sn,
                 source_sha256,
                 container_no=box,
                 fallback=order.row_seq,

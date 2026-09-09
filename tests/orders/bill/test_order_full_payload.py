@@ -180,14 +180,14 @@ class TestDedupWithFeeOrders:
         )
         first = _fee_order()
         await create_canonical_orders_async([first], "sk")
-        assert first.create_result["success"] is True
-        assert first.create_result["sn"] == "EX1"
+        assert first.create_result.success is True
+        assert first.create_result.sn == "EX1"
         assert calls["addwork"] == 1
 
         second = _fee_order()  # 同提单号不同对象
         await create_canonical_orders_async([second], "sk")
-        assert second.create_result["skipped"] is True
-        assert second.create_result["sn"] == "EX1"  # 回显首次创建 sn
+        assert second.create_result.skipped is True
+        assert second.create_result.sn == "EX1"  # 回显首次创建 sn
         assert calls["addwork"] == 1  # 不重复下单
 
     async def test_failed_not_registered_retry_submits(self, monkeypatch):
@@ -203,15 +203,15 @@ class TestDedupWithFeeOrders:
         )
         first = _fee_order()
         await create_canonical_orders_async([first], "sk")
-        assert first.create_result["success"] is False
-        assert first.create_result.get("skipped") is None  # 失败非 skipped
+        assert first.create_result.success is False
+        assert first.create_result.skipped is False  # 失败非 skipped（补全缺省键，2026-09-09 R5）
         assert calls["addwork"] == 1
 
         retry = _fee_order()
         await create_canonical_orders_async([retry], "sk")
-        assert retry.create_result["success"] is True
-        assert retry.create_result.get("skipped") is None  # 未被误拦
-        assert retry.create_result["sn"] == "EX2"
+        assert retry.create_result.success is True
+        assert retry.create_result.skipped is False  # 未被误拦（补全缺省键，2026-09-09 R5）
+        assert retry.create_result.sn == "EX2"
         assert calls["addwork"] == 2  # 失败 1 次 + 修正后 1 次
 
     async def test_preview_touches_no_registry(self, monkeypatch):

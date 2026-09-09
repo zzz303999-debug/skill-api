@@ -198,14 +198,14 @@ class TestRejectUnknownBoxTypes:
         rejected = reject_unknown_box_types([good, bad])
         assert rejected is True
         # 非法单：报自己的箱型
-        assert bad.create_result["success"] is False
-        assert bad.create_result["error"]["code"] == "unknown_box_type"
-        assert bad.create_result["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
-        assert bad.create_result["error"]["details"]["unknown_box_types"] == ["40GOH"]
+        assert bad.create_result.success is False
+        assert bad.create_result.error.code == "unknown_box_type"
+        assert bad.create_result.error.message == "系统没有此箱型：40GOH，请联系客服"
+        assert bad.create_result.error.details["unknown_box_types"] == ["40GOH"]
         # 合法单：文件级拒绝，报全局清单
-        assert good.create_result["success"] is False
-        assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
-        assert good.create_result["error"]["details"]["unknown_box_types"] == ["40GOH"]
+        assert good.create_result.success is False
+        assert good.create_result.error.message == "文件含非法箱型：40GOH，请联系客服"
+        assert good.create_result.error.details["unknown_box_types"] == ["40GOH"]
 
     async def test_all_known_pass(self):
         """全部箱型在白名单 → 不拒（create_result 保持 None 待提交）。"""
@@ -219,8 +219,8 @@ class TestRejectUnknownBoxTypes:
         legacy = BillOrder(order_num1="OOLU10000005", order_data={"box": [{"b_type": "40GOH"}]})
         good = _canonical_order("OOLU10000006", "40HQ")
         reject_unknown_box_types([legacy, good])
-        assert legacy.create_result["error"]["code"] == "unknown_box_type"
-        assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
+        assert legacy.create_result.error.code == "unknown_box_type"
+        assert good.create_result.error.message == "文件含非法箱型：40GOH，请联系客服"
 
     async def test_non_standard_expression_does_not_trigger(self):
         """非标表述（大冷）不触发文件级拒绝（既有规则放行）。"""
@@ -240,8 +240,8 @@ class TestRejectUnknownBoxTypes:
             _canonical_order("OOLU10000011", "40HQ"),
         ]
         reject_unknown_box_types(orders)
-        assert orders[2].create_result["error"]["message"] == "文件含非法箱型：40GOH、20GOH，请联系客服"
-        assert orders[2].create_result["error"]["details"]["unknown_box_types"] == ["40GOH", "20GOH"]
+        assert orders[2].create_result.error.message == "文件含非法箱型：40GOH、20GOH，请联系客服"
+        assert orders[2].create_result.error.details["unknown_box_types"] == ["40GOH", "20GOH"]
 
     async def test_already_marked_skipped_not_overwritten(self):
         """已标记 skipped 的单不动（历史成功单必然合法，不参与文件级拒绝）。"""
@@ -249,8 +249,8 @@ class TestRejectUnknownBoxTypes:
         skipped.create_result = {"success": True, "skipped": True, "sn": "EX1", "error": None}
         bad = _canonical_order("OOLU10000013", "40GOH")
         reject_unknown_box_types([skipped, bad])
-        assert skipped.create_result["skipped"] is True
-        assert bad.create_result["error"]["code"] == "unknown_box_type"
+        assert skipped.create_result.skipped is True
+        assert bad.create_result.error.code == "unknown_box_type"
 
 
 class TestBuildResultIntegration:
@@ -294,24 +294,24 @@ class TestBuildResultIntegration:
         assert result.summary["failed_details"] == [
             {
                 "order_num": "OOLU12345678",
-                "error_code": "unknown_box_type",
-                "error_message": "文件含非法箱型：40GOH，请联系客服",
+                "code": "unknown_box_type",
+                "message": "文件含非法箱型：40GOH，请联系客服",
             },
             {
                 "order_num": "OOLU12345679",
-                "error_code": "unknown_box_type",
-                "error_message": "系统没有此箱型：40GOH，请联系客服",
+                "code": "unknown_box_type",
+                "message": "系统没有此箱型：40GOH，请联系客服",
             },
         ]
         by_bl = {o.bl_no: o for o in result.canonical_orders}
         rejected = by_bl["OOLU12345679"].create_result
-        assert rejected["success"] is False
-        assert rejected["error"]["code"] == "unknown_box_type"
-        assert rejected["error"]["message"] == "系统没有此箱型：40GOH，请联系客服"
+        assert rejected.success is False
+        assert rejected.error.code == "unknown_box_type"
+        assert rejected.error.message == "系统没有此箱型：40GOH，请联系客服"
         # 合法单同样被文件级拒绝
         good = by_bl["OOLU12345678"].create_result
-        assert good["success"] is False
-        assert good["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
+        assert good.success is False
+        assert good.error.message == "文件含非法箱型：40GOH，请联系客服"
 
     async def test_clean_file_submits_all(self, monkeypatch):
         """全白名单箱型 → 全部提交（文件级校验不误伤）。"""
@@ -361,8 +361,8 @@ class TestBuildResultIntegration:
         assert result.summary is None  # preview 契约不变
         assert calls["addwork"] == 0
         by_bl = {o.bl_no: o for o in result.canonical_orders}
-        assert by_bl["OOLU12345683"].create_result["error"]["code"] == "unknown_box_type"
-        assert by_bl["OOLU12345684"].create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
+        assert by_bl["OOLU12345683"].create_result.error.code == "unknown_box_type"
+        assert by_bl["OOLU12345684"].create_result.error.message == "文件含非法箱型：40GOH，请联系客服"
 
     async def test_preview_clean_keeps_null(self, monkeypatch):
         """preview 全合法箱型 → create_result 保持 null（既有契约不变）。"""

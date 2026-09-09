@@ -236,12 +236,9 @@ async def test_add_work_async_success_with_sn(monkeypatch):
 
     monkeypatch.setattr(bill_client, "post_form_async", fake_post)
     result = await bill_client.add_work_async("sk-token", {"b_order_num": "B123"})
-    assert result == {
-        "success": True,
-        "sn": "EX26080042",
-        "error": None,
-        "upstream": {"sn": "EX26080042"},
-    }
+    assert result.success is True and result.skipped is False and result.error is None
+    assert result.sn == "EX26080042"
+    assert result.upstream == {"sn": "EX26080042"}
 
 
 async def test_add_work_async_network_error_returns_error_result(monkeypatch):
@@ -251,9 +248,8 @@ async def test_add_work_async_network_error_returns_error_result(monkeypatch):
     monkeypatch.setattr(bill_client, "post_form_async", fake_post)
     result = await bill_client.add_work_async("sk-token", {})
     # 与同步版一致：网络错误 → 按单 error 结构（不抛断整批）
-    assert result["success"] is False
-    assert result["sn"] is None
-    assert "AddWork network error" in result["error"]["message"]
+    assert result.success is False and result.sn is None
+    assert "AddWork network error" in result.error.message
 
 
 async def test_submit_canonical_async_success(monkeypatch):
@@ -274,9 +270,9 @@ async def test_submit_canonical_async_success(monkeypatch):
         lambda order: ({"a": "{}"}, []),
     )
     result = await bill_client.submit_canonical_async("sk-token", _Order())
-    assert result["success"] is True
-    assert result["sn"] == "EX1"
-    assert result["o_id"] == 9
+    assert result.success is True
+    assert result.sn == "EX1"
+    assert result.o_id == 9
 
 
 async def test_submit_manifest_async_success(monkeypatch):

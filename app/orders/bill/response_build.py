@@ -29,15 +29,16 @@ def build_failed_details(created: list) -> list[dict]:
     """失败单明细（summary.failed_details）：单号/错误码/消息。
 
     本地拦截不再模拟上游回显（2026-09-09 B 案：前端只消费顶层 code/msg/data，
-    删除 error_upstream 透传与单级 details.upstream 模拟壳）。"""
+    删除 error_upstream 透传与单级 details.upstream 模拟壳）。
+    error 为模型（OrderError），键名与单级 error 对齐（R4 收敛）。"""
     return [
         {
             "order_num": getattr(o, "bl_no", None) or getattr(o, "order_num1", None),
-            "error_code": (o.create_result.get("error") or {}).get("code"),
-            "error_message": (o.create_result.get("error") or {}).get("message"),
+            "code": o.create_result.error.code,
+            "message": o.create_result.error.message,
         }
         for o in created
-        if not o.create_result.get("success")
+        if not o.create_result.success and o.create_result.error is not None
     ]
 
 
@@ -45,16 +46,16 @@ def build_summary(total: int, created: list) -> dict:
     """create 结果统计（六字段 + failed_details）；created = 有 create_result 的单。"""
     return {
         "total": total,
-        "success": sum(1 for o in created if o.create_result.get("success")),
-        "failed": sum(1 for o in created if not o.create_result.get("success")),
-        "skipped": sum(1 for o in created if o.create_result.get("skipped")),
+        "success": sum(1 for o in created if o.create_result.success),
+        "failed": sum(1 for o in created if not o.create_result.success),
+        "skipped": sum(1 for o in created if o.create_result.skipped),
         "created": sum(
             1
             for o in created
-            if o.create_result.get("success") and not o.create_result.get("skipped")
+            if o.create_result.success and not o.create_result.skipped
         ),
         "success_sns": [
-            o.create_result.get("sn") for o in created if o.create_result.get("success")
+            o.create_result.sn for o in created if o.create_result.success
         ],
         "failed_details": build_failed_details(created),
     }
@@ -69,12 +70,12 @@ def build_upstream(created: list) -> dict | None:
     if not created:
         return None
     upstream_data = [
-        o.create_result.get("upstream")
+        o.create_result.upstream
         for o in created
-        if o.create_result.get("success") and o.create_result.get("upstream")
+        if o.create_result.success and o.create_result.upstream
     ]
     created_ok = any(
-        o.create_result.get("success") and not o.create_result.get("skipped")
+        o.create_result.success and not o.create_result.skipped
         for o in created
     )
     if not created_ok:

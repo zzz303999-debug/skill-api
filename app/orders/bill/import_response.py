@@ -77,10 +77,10 @@ def bill_import_outcome(
             return BillImportOutcome(code="200", msg="添加成功")
         failed_msg = next(
             (
-                d.get("error_message")
+                d.get("message")
                 for code in _MSG_CODES
                 for d in (summary.get("failed_details") or [])
-                if d.get("error_code") == code
+                if d.get("code") == code
             ),
             None,
         )
@@ -89,10 +89,11 @@ def bill_import_outcome(
     # msg 给具体原因，其余成功文案
     msg = next(
         (
-            (o.create_result or {}).get("error", {}).get("message")
+            o.create_result.error.message
             for o in (*result.orders, *result.canonical_orders)
-            if (o.create_result or {}).get("error")
-            and (o.create_result or {}).get("error", {}).get("code") in _MSG_CODES
+            if o.create_result
+            and o.create_result.error
+            and o.create_result.error.code in _MSG_CODES
         ),
         None,
     )

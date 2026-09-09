@@ -196,13 +196,9 @@ class TestSubmitCanonical:
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         order = _sample_order()
         result = await client_module.submit_canonical_async("sk-token", order)
-        assert result == {
-            "success": True,
-            "sn": "EX26080355",
-            "o_id": "21034692",
-            "error": None,
-            "upstream": {"sn": "EX26080355", "o_id": "21034692"},  # 原始回显原样保留
-        }
+        assert result.success is True and result.skipped is False and result.error is None
+        assert result.sn == "EX26080355" and result.o_id == "21034692"
+        assert result.upstream == {"sn": "EX26080355", "o_id": "21034692"}  # 原始回显原样保留
         # form-data 提交：create_order=true + 提单号 + 鉴权头
         assert captured["data"]["create_order"] == "true"
         assert captured["data"]["data[0][b_order_num]"] == "OOLU4044379500"
@@ -216,7 +212,8 @@ class TestSubmitCanonical:
 
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         result = await client_module.submit_canonical_async("sk", _sample_order())
-        assert result["success"] is True and result["sn"] == "EX1"
+        assert result.success is True and result.skipped is False
+        assert result.sn == "EX1" and result.error is None
 
     async def test_rejected_code_not_200(self, monkeypatch):
         """code 非 "200" → 该单 error（不抛异常，调用方按单处理）。"""
@@ -226,9 +223,9 @@ class TestSubmitCanonical:
 
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         result = await client_module.submit_canonical_async("sk", _sample_order())
-        assert result["success"] is False
-        assert result["error"]["code"] == "order_upstream_error"
-        assert result["error"]["details"]["upstream_message"] == "箱型不存在"
+        assert result.success is False
+        assert result.error.code == "order_upstream_error"
+        assert result.error.details["upstream_message"] == "箱型不存在"
 
     async def test_create_canonical_orders_sk_passthrough(self, monkeypatch):
         """sk 由调用方透传 + 逐单提交；单失败隔离不中断（2026-08-19 起无凭证链路）。"""
@@ -252,6 +249,6 @@ class TestSubmitCanonical:
         await create_canonical_orders_async(orders, "tk-caller")
         assert sum(1 for u in posts if "CreateOrder" in u or "AddWork" in u) == 3
         assert sk_seen and all(s == "tk-caller" for s in sk_seen)  # sk 原样透传
-        assert orders[0].create_result["success"] and orders[0].create_result["sn"] == "EX1"
-        assert orders[1].create_result["success"] is False  # 单失败隔离
-        assert orders[2].create_result["sn"] == "EX3"  # 后续单不受影响
+        assert orders[0].create_result.success and orders[0].create_result.sn == "EX1"
+        assert orders[1].create_result.success is False  # 单失败隔离
+        assert orders[2].create_result.sn == "EX3"  # 后续单不受影响

@@ -89,8 +89,8 @@ class TestDedupConflict:
             failed_details=[
                 {
                     "order_num": None,
-                    "error_code": "unknown_box_type",
-                    "error_message": _BOX_MSG,
+                    "code": "unknown_box_type",
+                    "message": _BOX_MSG,
                 }
             ],
         )
@@ -118,13 +118,13 @@ class TestAllFailedMsg:
             failed_details=[
                 {
                     "order_num": None,
-                    "error_code": "missing_bl_no",
-                    "error_message": _MISSING_MSG,
+                    "code": "missing_bl_no",
+                    "message": _MISSING_MSG,
                 },
                 {
                     "order_num": None,
-                    "error_code": "unknown_box_type",
-                    "error_message": _BOX_MSG,
+                    "code": "unknown_box_type",
+                    "message": _BOX_MSG,
                 },
             ],
         )
@@ -138,8 +138,8 @@ class TestAllFailedMsg:
             failed_details=[
                 {
                     "order_num": None,
-                    "error_code": "missing_bl_no",
-                    "error_message": _MISSING_MSG,
+                    "code": "missing_bl_no",
+                    "message": _MISSING_MSG,
                 }
             ],
         )
@@ -154,8 +154,8 @@ class TestAllFailedMsg:
             failed_details=[
                 {
                     "order_num": "BL1",
-                    "error_code": "order_upstream_error",
-                    "error_message": "AddWork rejected the order: 添加失败",
+                    "code": "order_upstream_error",
+                    "message": "AddWork rejected the order: 添加失败",
                 }
             ],
         )

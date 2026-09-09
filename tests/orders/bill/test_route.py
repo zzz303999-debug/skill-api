@@ -222,8 +222,8 @@ class TestCreateMode:
             "failed_details": [
                 {
                     "order_num": data["orders"][0]["order_num1"],
-                    "error_code": "order_upstream_error",
-                    "error_message": "AddWork rejected the order: 添加失败",
+                    "code": "order_upstream_error",
+                    "message": "AddWork rejected the order: 添加失败",
                 }
             ],
         }
@@ -283,8 +283,8 @@ class TestCreateMode:
             "failed_details": [
                 {
                     "order_num": "OOLU12345678",
-                    "error_code": "unknown_box_type",
-                    "error_message": "文件含非法箱型：40GOH，请联系客服",
+                    "code": "unknown_box_type",
+                    "message": "文件含非法箱型：40GOH，请联系客服",
                 }
             ],
         }
@@ -332,13 +332,13 @@ class TestCreateMode:
             "failed_details": [
                 {
                     "order_num": None,
-                    "error_code": "missing_bl_no",
-                    "error_message": _MISSING_BL_MSG,
+                    "code": "missing_bl_no",
+                    "message": _MISSING_BL_MSG,
                 },
                 {
                     "order_num": None,
-                    "error_code": "missing_bl_no",
-                    "error_message": _MISSING_BL_MSG,
+                    "code": "missing_bl_no",
+                    "message": _MISSING_BL_MSG,
                 },
             ],
         }
@@ -384,13 +384,13 @@ class TestCreateMode:
             "failed_details": [
                 {
                     "order_num": None,
-                    "error_code": "missing_bl_no",
-                    "error_message": _MISSING_BL_MSG,
+                    "code": "missing_bl_no",
+                    "message": _MISSING_BL_MSG,
                 },
                 {
                     "order_num": "OOLU40GOH002",
-                    "error_code": "unknown_box_type",
-                    "error_message": "系统没有此箱型：40GOH，请联系客服",
+                    "code": "unknown_box_type",
+                    "message": "系统没有此箱型：40GOH，请联系客服",
                 },
             ],
         }
@@ -546,7 +546,7 @@ def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
     assert body["msg"] == _MISSING_BL_MSG
     summary = body["data"]["summary"]
     assert summary["created"] == 0 and summary["failed"] == 2
-    msgs = {d["error_message"] for d in summary["failed_details"]}
+    msgs = {d["message"] for d in summary["failed_details"]}
     assert msgs == {_MISSING_BL_MSG}
     # details 契约（2026-09-04 用户拍板）：仅 missing_bl_no_count，无 missing_rows
     d0 = body["data"]["orders"][0]["create_result"]["error"]["details"]
@@ -1076,8 +1076,8 @@ class TestDedupConflict:
             "failed_details": [
                 {
                     "order_num": "OOLU11111111",
-                    "error_code": "unknown_box_type",
-                    "error_message": "文件含非法箱型：40GOH，请联系客服",
+                    "code": "unknown_box_type",
+                    "message": "文件含非法箱型：40GOH，请联系客服",
                 }
             ],
         }

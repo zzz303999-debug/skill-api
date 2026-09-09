@@ -177,7 +177,7 @@ class TestCreateMode:
             "data": [{"sn": "EX26080042"}] * REAL_ORDER_COUNT,
         }
         assert all(
-            o.create_result and o.create_result["success"] and o.create_result["sn"] == "EX26080042"
+            o.create_result and o.create_result.success and o.create_result.sn == "EX26080042"
             for o in result.orders
         )
 
@@ -245,10 +245,10 @@ class TestCreateMode:
             "msg": "添加成功",
             "data": [{"sn": "EX1", "o_id": "2101"}],
         }
-        assert result.canonical_orders[0].create_result["success"] is True
-        assert result.canonical_orders[0].create_result["sn"] == "EX1"
-        assert result.canonical_orders[0].create_result["o_id"] == "2101"
-        assert result.canonical_orders[0].create_result["upstream"] == {"sn": "EX1", "o_id": "2101"}
+        assert result.canonical_orders[0].create_result.success is True
+        assert result.canonical_orders[0].create_result.sn == "EX1"
+        assert result.canonical_orders[0].create_result.o_id == "2101"
+        assert result.canonical_orders[0].create_result.upstream == {"sn": "EX1", "o_id": "2101"}
         assert sum(1 for u in posts if "AddWork" in u) == 1  # TMS 直连走 AddWork 端点
         # 客户字段：c_title=客户名称（旧链路实证，表单键断言见 test_payload）；
         # 军羽无联系人列 → customer_contact 空
@@ -318,7 +318,7 @@ class TestCreateMode:
             "failed_details": [],
         }
         assert calls["addwork"] == 2  # 不重复下单
-        assert all(o.create_result.get("skipped") for o in second.canonical_orders)
+        assert all(o.create_result.skipped for o in second.canonical_orders)
         # 全部 skipped（无新建动作）→ upstream 保持 None（与「无单可创建」同语义，
         # 路由层转 409；不得误报 204 添加失败）
         assert second.upstream is None
@@ -340,7 +340,7 @@ class TestCreateMode:
         assert other.summary["skipped"] == 0
         assert other.summary["created"] == 2
         assert calls["addwork"] == 4  # 异 sk 各自真实下单
-        assert all(not o.create_result.get("skipped") for o in other.canonical_orders)
+        assert all(not o.create_result.skipped for o in other.canonical_orders)
 
     async def test_dedup_failed_not_registered_retry_creates(self, monkeypatch):
         """失败单不登记：重导时失败单正常创建（修正后重导不被误拦）。"""
@@ -451,7 +451,7 @@ class TestCreateMode:
         }
         # 透传进 create_result 的原始回显同样已清洗（route 层序列化不再 500）
         assert all(
-            o.create_result["upstream"]["fee"] is None for o in result.canonical_orders
+            o.create_result.upstream["fee"] is None for o in result.canonical_orders
         )
 
     async def test_preview_never_touches_imported_registry(self, monkeypatch):

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from .schema import CreateResult, OrderError
+
 MISSING_BL_NO_MSG = "提单号为必填项；文件存在提单号缺失行时整批不录入，请补全提单号后重新导入"
 
 
@@ -48,22 +50,19 @@ def reject_unknown_box_types(orders: list) -> bool:
         if order.create_result is not None:
             continue
         order_unknown = per_order.get(idx, [])
-        order.create_result = {
-            "success": False,
-            "sn": None,
-            "error": {
-                "code": "unknown_box_type",
-                "message": (
+        order.create_result = CreateResult(
+            success=False,
+            sn=None,
+            error=OrderError(
+                code="unknown_box_type",
+                message=(
                     f"系统没有此箱型：{'、'.join(order_unknown)}，请联系客服"
                     if order_unknown
                     else f"文件含非法箱型：{'、'.join(file_unknown)}，请联系客服"
                 ),
-                "description": "箱型不在 TMS 支持清单中，请联系客服",
-                "details": {
-                    "unknown_box_types": order_unknown or file_unknown,
-                },
-            },
-        }
+                details={"unknown_box_types": order_unknown or file_unknown},
+            ),
+        )
     return True
 
 
@@ -92,17 +91,14 @@ def reject_missing_bl_no(orders: list) -> bool:
     for order in orders:
         if order.create_result is not None:
             continue
-        order.create_result = {
-            "success": False,
-            "skipped": False,
-            "sn": None,
-            "error": {
-                "code": "missing_bl_no",
-                "message": MISSING_BL_NO_MSG,
-                "description": MISSING_BL_NO_MSG,
-                "details": {
-                    "missing_bl_no_count": len(missing_idx),
-                },
-            },
-        }
+        order.create_result = CreateResult(
+            success=False,
+            skipped=False,
+            sn=None,
+            error=OrderError(
+                code="missing_bl_no",
+                message=MISSING_BL_NO_MSG,
+                details={"missing_bl_no_count": len(missing_idx)},
+            ),
+        )
     return True

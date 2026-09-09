@@ -371,7 +371,8 @@ class TestAddWork:
         # 顶层展平字段：与 b 的 JSON 同内容、逐键存在
         top = {k: v for k, v in captured["data"].items() if k not in ("a", "b", "c")}
         assert top == EXPECTED_FLAT
-        assert result == {"success": True, "sn": "EX26080042", "error": None, "upstream": {"sn": "EX26080042"}}
+        assert result.success is True and result.skipped is False and result.error is None
+        assert result.sn == "EX26080042" and result.upstream == {"sn": "EX26080042"}
 
     async def test_success_sn_missing_ok(self, urls, monkeypatch):
         """code 200 但 data[0] 无 sn → 仍成功，sn=None。"""
@@ -382,7 +383,10 @@ class TestAddWork:
             )
 
         monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
-        assert await add_work_async("sk", ORDER_DATA) == {"success": True, "sn": None, "error": None, "upstream": {"o_id": 1}}
+        result = await add_work_async("sk", ORDER_DATA)
+        assert result.success is True and result.skipped is False
+        assert result.sn is None and result.o_id is None and result.error is None
+        assert result.upstream == {"o_id": 1}
 
     async def test_rejected_204(self, urls, monkeypatch):
         """code '204'（字符串）→ 失败 error，含 upstream 三元组。"""
@@ -392,14 +396,14 @@ class TestAddWork:
 
         monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
         result = await add_work_async("sk", ORDER_DATA)
-        assert result["success"] is False and result["sn"] is None
-        error = result["error"]
-        assert error["code"] == "order_upstream_error"
-        assert error["description"] == "订单系统拒绝了请求或不可达，请稍后重试"
-        assert error["details"]["upstream_code"] == "204"
-        assert error["details"]["upstream_message"] == "添加失败"
+        assert result.success is False and result.skipped is False
+        assert result.sn is None and result.o_id is None and result.upstream is None
+        error = result.error
+        assert error.code == "order_upstream_error"
+        assert error.details["upstream_code"] == "204"
+        assert error.details["upstream_message"] == "添加失败"
         # upstream_response 为结构化对象（嵌套 JSON 已展开）
-        assert error["details"]["upstream_response"] == {"code": "204", "msg": "添加失败"}
+        assert error.details["upstream_response"] == {"code": "204", "msg": "添加失败"}
 
     async def test_http_error_and_non_json(self, urls, monkeypatch):
 
@@ -408,7 +412,7 @@ class TestAddWork:
 
         monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
         result = await add_work_async("sk", ORDER_DATA)
-        assert result["success"] is False and result["error"]["details"]["status_code"] == 500
+        assert result.success is False and result.error.details["status_code"] == 500
 
         class NonJson:
             status_code = 200
@@ -423,8 +427,8 @@ class TestAddWork:
 
         monkeypatch.setattr(http_client_module, "_post_async", _fake_post)
         result = await add_work_async("sk", ORDER_DATA)
-        assert result["success"] is False
-        assert "non-JSON" in result["error"]["message"]
+        assert result.success is False
+        assert "non-JSON" in result.error.message
 
     async def test_timeout_no_retry_single_call(self, urls, monkeypatch):
         """超时 → 该单 error（含异常摘要）；AddWork 调用次数 == 1（不自动重试）。"""
@@ -436,8 +440,8 @@ class TestAddWork:
 
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         result = await add_work_async("sk", ORDER_DATA)
-        assert result["success"] is False
-        assert result["error"]["details"]["error_type"] == "TimeoutException"
+        assert result.success is False
+        assert result.error.details["error_type"] == "TimeoutException"
         assert calls["n"] == 1
 
 
@@ -468,8 +472,14 @@ class TestCreateOrders:
         orders = [make_order(), make_order({**ORDER_DATA, "order_num1": "OOLU4044379501"})]
         await create_orders_async(orders, "sk-1")
         assert calls["addwork"] == 2
-        assert orders[0].create_result == {"success": True, "sn": "EX26080001", "error": None, "upstream": {"sn": "EX26080001"}}
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
+        assert orders[0].create_result.success is True
+        assert orders[0].create_result.skipped is False and orders[0].create_result.error is None
+        assert orders[0].create_result.sn == "EX26080001"
+        assert orders[0].create_result.upstream == {"sn": "EX26080001"}
+        assert orders[1].create_result.success is True
+        assert orders[1].create_result.skipped is False and orders[1].create_result.error is None
+        assert orders[1].create_result.sn == "EX26080002"
+        assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
     async def test_sk_passthrough_to_addwork(self, urls, monkeypatch):
         """sk 原样透传：AddWork 请求头 sk == 调用方传入值（2026-08-19 起）。"""
@@ -495,9 +505,12 @@ class TestCreateOrders:
         orders = [make_order(), make_order()]
         await create_orders_async(orders, "sk")
         assert calls["addwork"] == 2
-        assert orders[0].create_result["success"] is False
-        assert orders[0].create_result["error"]["details"]["upstream_code"] == "204"
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
+        assert orders[0].create_result.success is False
+        assert orders[0].create_result.error.details["upstream_code"] == "204"
+        assert orders[1].create_result.success is True
+        assert orders[1].create_result.skipped is False and orders[1].create_result.error is None
+        assert orders[1].create_result.sn == "EX26080002"
+        assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
     async def test_timeout_one_order_continues_next(self, urls, monkeypatch):
         """第一单超时 → error 不中断；第二单照常提交；各调用一次（不重试）。"""
@@ -513,9 +526,12 @@ class TestCreateOrders:
         orders = [make_order(), make_order()]
         await create_orders_async(orders, "sk")
         assert calls["n"] == 2  # 每单一发，超时不重试
-        assert orders[0].create_result["success"] is False
-        assert orders[0].create_result["error"]["details"]["error_type"] == "TimeoutException"
-        assert orders[1].create_result == {"success": True, "sn": "EX26080002", "error": None, "upstream": {"sn": "EX26080002"}}
+        assert orders[0].create_result.success is False
+        assert orders[0].create_result.error.details["error_type"] == "TimeoutException"
+        assert orders[1].create_result.success is True
+        assert orders[1].create_result.skipped is False and orders[1].create_result.error is None
+        assert orders[1].create_result.sn == "EX26080002"
+        assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
     async def test_missing_bl_no_blocked(self, urls, monkeypatch):
         """提单号缺失 → missing_bl_no 拦截不提交（2026-09-01 拍板，client 层防御）。"""
@@ -539,8 +555,8 @@ class TestCreateOrders:
         order.missing_fields = ["order_num1", "box"]
         await create_orders_async([order], "sk")
         assert calls["addwork"] == 0  # 不触达下游
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "missing_bl_no"
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "missing_bl_no"
 
     async def test_missing_fields_still_submitted(self, urls, monkeypatch):
         """提单号在但其它字段缺失（missing_fields=["box"]）→ 照常提交（不变）。"""
@@ -564,7 +580,7 @@ class TestCreateOrders:
         order.missing_fields = ["box"]
         await create_orders_async([order], "sk")
         assert calls["addwork"] == 1
-        assert order.create_result["success"] is True
+        assert order.create_result.success is True
 
     async def test_empty_orders_no_downstream_calls(self, urls, monkeypatch):
         """空订单列表：不调下游（sk 无需使用）。"""
@@ -588,18 +604,16 @@ class TestCreateOrders:
         )
         first = [make_order()]
         await create_orders_async(first, "sk")
-        assert first[0].create_result["success"] is True
+        assert first[0].create_result.success is True
         assert calls["addwork"] == 1
         # 再次上传同一文件（同提单号）：跳过且 sn 回显首次创建
         second = [make_order()]
         await create_orders_async(second, "sk")
         assert calls["addwork"] == 1
-        assert second[0].create_result == {
-            "success": True,
-            "skipped": True,
-            "sn": "EX26080001",
-            "error": None,
-        }
+        assert second[0].create_result.success is True
+        assert second[0].create_result.skipped is True
+        assert second[0].create_result.sn == "EX26080001"
+        assert second[0].create_result.error is None
 
     async def test_dedup_different_sk_submits_again(self, urls, monkeypatch):
         """异 sk（不同操作员）重导同一提单号 → 不命中注册表，照常提交（2026-08-31 起）。"""
@@ -612,12 +626,12 @@ class TestCreateOrders:
         )
         first = [make_order()]
         await create_orders_async(first, "sk-a")
-        assert first[0].create_result["success"] is True
+        assert first[0].create_result.success is True
         second = [make_order()]
         await create_orders_async(second, "sk-b")
         assert calls["addwork"] == 2
-        assert second[0].create_result["success"] is True
-        assert second[0].create_result.get("skipped") is None  # 真实新建，非 skipped
+        assert second[0].create_result.success is True
+        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，2026-09-09 R5）
 
     async def test_dedup_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """失败单不登记：修正后重导照常再次提交（不被误拦）。"""
@@ -630,11 +644,11 @@ class TestCreateOrders:
         )
         first = [make_order()]
         await create_orders_async(first, "sk")
-        assert first[0].create_result["success"] is False
+        assert first[0].create_result.success is False
         assert calls["addwork"] == 1
         second = [make_order()]
         await create_orders_async(second, "sk")
-        assert second[0].create_result["success"] is True
+        assert second[0].create_result.success is True
         assert calls["addwork"] == 2  # 失败单重导不受去重影响
 
     async def test_dedup_no_bl_not_registered(self, urls, monkeypatch):
@@ -653,8 +667,8 @@ class TestCreateOrders:
             }
         )
         await create_orders_async([order], "sk")
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "missing_bl_no"
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "missing_bl_no"
         assert calls["addwork"] == 0
         assert client_module.get_imported_registry().snapshot() == {}
 
@@ -679,7 +693,7 @@ class TestCreateOrders:
         monkeypatch.setattr(registry, "register", _fail)
         order = make_order()
         await create_orders_async([order], "sk")
-        assert order.create_result["success"] is True
+        assert order.create_result.success is True
         assert calls["addwork"] == 1
 
     async def test_dedup_concurrent_same_bl_single_submit(self, urls, monkeypatch):
@@ -714,8 +728,8 @@ class TestCreateOrders:
         box2 = await t2
         assert calls["addwork"] == 1  # 若无锁，第二请求会再次提交
         results = [o.create_result for box in (box1, box2) for o in box]
-        assert sum(1 for r in results if r["success"]) == 2  # 1 新建 + 1 skipped
-        assert sum(1 for r in results if r.get("skipped")) == 1
+        assert sum(1 for r in results if r.success) == 2  # 1 新建 + 1 skipped
+        assert sum(1 for r in results if r.skipped) == 1
 
 
 class TestCreateCanonicalOrdersDedup:
@@ -744,17 +758,15 @@ class TestCreateCanonicalOrdersDedup:
         )
         first = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(first, "sk")
-        assert first[0].create_result["success"] is True
+        assert first[0].create_result.success is True
         assert calls["submit"] == 1
         second = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(second, "sk")
         assert calls["submit"] == 1
-        assert second[0].create_result == {
-            "success": True,
-            "skipped": True,
-            "sn": "EX1",
-            "error": None,
-        }
+        assert second[0].create_result.success is True
+        assert second[0].create_result.skipped is True
+        assert second[0].create_result.sn == "EX1"
+        assert second[0].create_result.error is None
 
     async def test_different_sk_same_bl_submits_again(self, urls, monkeypatch):
         """TMS 通道：异 sk 重导同一提单号 → 照常提交、各自登记（2026-08-31 起）。"""
@@ -767,12 +779,12 @@ class TestCreateCanonicalOrdersDedup:
         )
         first = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(first, "sk-a")
-        assert first[0].create_result["success"] is True
+        assert first[0].create_result.success is True
         second = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(second, "sk-b")
         assert calls["submit"] == 2
-        assert second[0].create_result["success"] is True
-        assert second[0].create_result.get("skipped") is None  # 真实新建，非 skipped
+        assert second[0].create_result.success is True
+        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，2026-09-09 R5）
 
     async def test_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """TMS 通道：失败单不登记，重导照常提交。"""
@@ -785,11 +797,11 @@ class TestCreateCanonicalOrdersDedup:
         )
         first = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(first, "sk")
-        assert first[0].create_result["success"] is False
+        assert first[0].create_result.success is False
         assert calls["submit"] == 1
         second = [self._make_canonical("OOLU12345678")]
         await create_canonical_orders_async(second, "sk")
-        assert second[0].create_result["success"] is True
+        assert second[0].create_result.success is True
         assert calls["submit"] == 2
 
     async def test_no_bl_submitted_not_registered(self, urls, monkeypatch):
@@ -799,8 +811,8 @@ class TestCreateCanonicalOrdersDedup:
         )
         order = CanonicalOrder(bl_no=None, box_groups=[BoxGroup(b_type="40HQ", box_num=1)])
         await create_canonical_orders_async([order], "sk")
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "missing_bl_no"
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "missing_bl_no"
         assert calls["submit"] == 0
         assert client_module.get_imported_registry().snapshot() == {}
 

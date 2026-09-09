@@ -83,6 +83,40 @@ REASON_NOT_FOUND = "原文未找到"
 REASON_INVALID_FORMAT = "格式不合法"
 
 
+class OrderError(BaseModel):
+    """单条订单创建失败详情（create_result.error，R4/R5 2026-09-09 模型化）。
+
+    固定三字段，无 description（本地零消费的冗余双轨已删除，message 为唯一
+    可读文案）：code 机器可读（unknown_box_type/missing_bl_no/order_upstream_
+    error）；message 单条失败说明；details 结构化补充，无补充为 {}。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    code: str = Field(description="机器可读错误码")
+    message: str = Field(description="单条失败说明（可读文案/上游原文）")
+    details: dict[str, Any] = Field(default_factory=dict, description="结构化补充（上游回显/清单等），无补充为 {}")
+
+
+class CreateResult(BaseModel):
+    """单条订单创建结果（create_result，R5 2026-09-09 模型化，对齐接口文档 §3.2.1）。
+
+    固定六键，缺省键恒输出不省略（skipped 默认 False、o_id/upstream/error 默认
+    null）：success 成功（含去重 skipped）；skipped 去重跳过；sn 下游订单号；
+    o_id TMS 通道业务编号（canonical 成功回显）；upstream 下游成功回显原样
+    保留（溯源）；error 失败详情（成功/跳过为 null）。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool = Field(description="是否成功（skipped 去重命中亦算成功）")
+    skipped: bool = Field(default=False, description="是否去重跳过（同 sk 已创建成功过该键）")
+    sn: str | None = Field(None, description="下游订单号；失败为 null")
+    o_id: str | int | None = Field(None, description="TMS 通道业务编号；仅 canonical 成功且有回显时非 null")
+    upstream: dict[str, Any] | None = Field(None, description="下游成功回显原样保留（溯源用）；无回显为 null")
+    error: OrderError | None = Field(None, description="失败详情；成功/跳过为 null")
+
+
 class BillPeriod(BaseModel):
     """账单结算区间（抬头「结算日期」），用于日期补年份推断。"""
 
@@ -135,7 +169,7 @@ class BillRow(BaseModel):
 class BillOrder(BaseModel):
     """一行一票（每条账单行独立一单）的解析结果。"""
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", validate_assignment=True)
 
     order_num1: str | None = Field(None, description="提单号（订单号）；缺失/非法时为 null")
     c_title: str | None = Field(None, description="客户名称；缺失时为 null")
@@ -155,9 +189,9 @@ class BillOrder(BaseModel):
         None,
         description="下单接口请求体数据（嵌套结构）；必填项未提取到时对应字段为 null",
     )
-    create_result: dict[str, Any] | None = Field(
+    create_result: CreateResult | None = Field(
         None,
-        description="创建结果 {success, sn, error}，由创建步骤填充；preview 模式为 null",
+        description="创建结果（模型见 CreateResult，对齐接口文档 §3.2.1）；由创建步骤填充；preview 模式为 null",
     )
 
 
@@ -285,7 +319,7 @@ class CanonicalOrder(BaseModel):
     用本模型构造 form-data（payload.py）。必填缺失行标红进 missing_fields，不阻塞。
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", validate_assignment=True)
 
     # ---- 核心字段（≥6 家族覆盖）----
     bl_no: str | None = Field(None, description="提单号（必填）")
@@ -349,8 +383,8 @@ class CanonicalOrder(BaseModel):
     )
     source_template: str = Field(default="", description="命中的 template_id")
     row_count: int = Field(default=0, description="归集原始行数")
-    create_result: dict[str, Any] | None = Field(
-        None, description="TMS 下单结果 {success, sn, o_id, error}；preview 模式为 null"
+    create_result: CreateResult | None = Field(
+        None, description="TMS 下单结果（模型见 CreateResult）；preview 模式为 null"
     )
     # 私有：payload 层费用通道默认值（模板 fees.fee_defaults 烘焙，不进响应）
     _fee_defaults: dict[str, str] = PrivateAttr(default_factory=dict)
