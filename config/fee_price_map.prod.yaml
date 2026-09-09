@@ -1,34 +1,88 @@
-# 标准费目码 → TMS 费目/price_id 映射表（生产环境）
-# 结构同 test 环境；生产价格表到位后整表补 price_id，tms_name 以生产价格表为准（名称可能不同）。
+# 标准费目码 → TMS 费目映射表（生产环境）
+# 条目级只保留业务定义（tms_name/import，全局共享无归属语义）；price_id 是
+# 归属敏感的 TMS 档案主键，按账号配在 owner_price_ids 段（2026-09-08 用户拍板：
+# 费目全链按 sk 隔离，废除全局显式 id——订单费用只挂自己账号名下的档案）。
 # 缺本文件/加载失败 → 启动 fail fast（不允许裸跑）；补值只改 YAML，零代码。
-# 2026-08-31 起 5 个实证 id 自 test 表同步（同一 TMS，price_id 全局唯一跨通道通用）：
-# 不补则这 5 项主力费目因自举从未建档（yaml 优先命中）在 registry 无兜底 → 录不进。
-freight:     { tms_name: 运费,     price_id: 820 }     # 实证（下单抓包+EX26081252）
-pre_pick:    { tms_name: 预提费,   price_id: 121744 }  # 实证（跨通道同 id 复用）
-fuel:        { tms_name: 油费,     price_id: 1134 }    # 实证（get/pay/supplier 三通道同现）
-trip:        { tms_name: 出车费,   price_id: 821 }     # 实证
-hijack:      { tms_name: 打劫费,   price_id: 1135 }    # 实证；竞品样本中未出现，先登记防长尾撞上
-# 2026-09-01 起其余 16 项实证 id 自测试期自举登记（storage/fee_registry.json）同步：
-# 同一 TMS 真实建档（sn=AUTO_* 前缀，2026-08-14 建），price_id 全局唯一跨通道通用。
-# 不补的原因：这些费目在 TMS 已存在 → 生产自举重建被 204 拒 → exists_external
-# 拿不到 id → 费用降级不录入（「其它费没录进去」的根因，T27b 设计边界）。
-waiting:     { tms_name: 待时费,   price_id: 124844 }
-pre_inport:  { tms_name: 预进港,   price_id: 124834 }
-drop_box:    { tms_name: 落箱费,   price_id: 124843 }
-amend:       { tms_name: 打单费,   price_id: 124839 }
-yangshan:    { tms_name: 洋山费,   price_id: 124833 }
-damage_box:  { tms_name: 坏污箱费, price_id: 124836 }
-overdue:     { tms_name: 超期费,   price_id: 124845 }
-overweight:  { tms_name: 超重费,   price_id: 124838 }
-inspect:     { tms_name: 动检费,   price_id: 124837 }
-weigh:       { tms_name: 过磅费,   price_id: 124842 }
-tally:       { tms_name: 理货费,   price_id: 124835 }
-move:        { tms_name: 搬移费,   price_id: 124841 }
-lift:        { tms_name: 上下车费, price_id: 124840 }
-port_misc:   { tms_name: 港杂费,   price_id: 124846 }
-tax:         { tms_name: 税金,     price_id: 125466 }  
-other:       { tms_name: 其它费,   price_id: 124832 }  # to_other 长尾归并目标（is_other=1）
+# owner_price_ids 键 = owner_key(sk) = sha256(sk) 前 16 hex（查询：python
+# scripts/fee_owner_key.py <sk>）；该账号在 TMS 已有档案时预置，首传直接命中
+# 不重建；未列出的 owner 首传触发自举建档（挂自己账号）。
+freight:     { tms_name: 运费 }
+pre_pick:    { tms_name: 预提费 }
+fuel:        { tms_name: 油费 }
+trip:        { tms_name: 出车费 }
+hijack:      { tms_name: 打劫费 }   # 竞品样本中未出现，先登记防长尾撞上
+waiting:     { tms_name: 待时费 }
+pre_inport:  { tms_name: 预进港 }
+drop_box:    { tms_name: 落箱费 }
+amend:       { tms_name: 打单费 }
+yangshan:    { tms_name: 洋山费 }
+damage_box:  { tms_name: 坏污箱费 }
+overdue:     { tms_name: 超期费 }
+overweight:  { tms_name: 超重费 }
+inspect:     { tms_name: 动检费 }
+weigh:       { tms_name: 过磅费 }
+tally:       { tms_name: 理货费 }
+move:        { tms_name: 搬移费 }
+lift:        { tms_name: 上下车费 }
+port_misc:   { tms_name: 港杂费 }
+tax:         { tms_name: 税金 }     # 2026-09-01 用户拍板：账单中的税金照录（原 import:false 仅对账作废）
+other:       { tms_name: 其它费 }   # to_other 长尾归并目标（is_other=1）
+# crane（吊机费）未列：TMS 尚无此费目；账单中的吊机费自动归「其它费」照录。
 
+# per-owner 显式 price_id（原条目级全局 id 迁移，2026-09-08 owner 化）：
+# a8cf118e298903d2 = 15478（章家俊）——2026-08-14 自举建档的那批档案在其名下
+# （sn=AUTO_* 前缀；5 项主力费目为更早抓包实证 id）。2026-09-08 sk 轮换后
+# owner 键由 24f98255fd1066a9 迁移至此；预置后其首传直接命中，不重建不撞名；
+# sk 再轮换时同步迁移本段键（或改走 registry 直写认领，见
+# scripts/migrate_fee_registry_owners.py --to-owner）。
+# default = 无 sk 槽：建档只发生在 create（无 sk 已被 400 拦截），default 只被
+# 只读 preview 消费——配全套 id 保无 sk preview 与 create 预测一致（2026-09-08
+# 审查确认无建档副作用；与 test 表同值）。
+owner_price_ids:
+  "default":
+    freight: 820
+    pre_pick: 121744
+    fuel: 1134
+    trip: 821
+    hijack: 1135
+    waiting: 124844
+    pre_inport: 124834
+    drop_box: 124843
+    amend: 124839
+    yangshan: 124833
+    damage_box: 124836
+    overdue: 124845
+    overweight: 124838
+    inspect: 124837
+    weigh: 124842
+    tally: 124835
+    move: 124841
+    lift: 124840
+    port_misc: 124846
+    tax: 125466
+    other: 124832
+  "a8cf118e298903d2":
+    freight: 820        # 实证（下单抓包+EX26081252）
+    pre_pick: 121744    # 实证（跨通道同 id 复用）
+    fuel: 1134          # 实证（get/pay/supplier 三通道同现）
+    trip: 821           # 实证
+    hijack: 1135        # 实证
+    waiting: 124844     # 2026-08-14 自举建档实证
+    pre_inport: 124834
+    drop_box: 124843
+    amend: 124839
+    yangshan: 124833
+    damage_box: 124836
+    overdue: 124845
+    overweight: 124838
+    inspect: 124837
+    weigh: 124842
+    tally: 124835
+    move: 124841
+    lift: 124840
+    port_misc: 124846
+    tax: 125466
+    other: 124832       # to_other 长尾归并目标
 
 # 费目自举
 fee_bootstrap:

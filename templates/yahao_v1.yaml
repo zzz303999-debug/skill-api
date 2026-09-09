@@ -116,7 +116,9 @@ fees:
     车辆成本.预进港: pre_inport
     车辆成本.其它费: other
   unmapped_fee: to_other
-    # 2026-09-07：公司利润为业务展示列非应收费用（B1' 动态收录防误收声明）
+    # 2026-09-07：声明性冗余——yahao 为 two_row 家族，动态收录不生效（区块结构
+    # 严格界定费用区）；「公司利润」含锚点关键词已被 _is_anchor_column 兜底排除。
+    # 保留声明以备未来 two_row 放开收录时兜底（审查 S2：当前无消费路径）
   ignore_headers:
   - 公司利润
   fee_defaults:

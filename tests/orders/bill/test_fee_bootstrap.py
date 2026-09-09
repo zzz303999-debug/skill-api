@@ -30,7 +30,7 @@ from app.orders.bill.fees.fee_price_map import apply_price_map
 from app.orders.bill.fees.fee_registry import get_fee_registry
 from app.orders.bill.master_data.config import KIND_PRICE
 from app.orders.bill.schema import BillOrder
-from helpers import inject_price_map
+from helpers import TEST_SK_OWNER, inject_price_map
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,19 +67,29 @@ BS_CFG = {
     },
 }
 
-# 费目映射表测试体：已实证码 freight + 待建码 waiting/yangshan + 其它费 other + 税金 tax
+# 费目映射表测试体：已实证码 freight（owner_price_ids default 槽显式 id）+
+# 待建码 waiting/yangshan + 其它费 other + 税金 tax。条目级 price_id 已废弃
+# （owner 隔离，2026-09-08）。
 _FEE_MAP = {
-    "freight": {"tms_name": "运费", "price_id": 820},
-    "waiting": {"tms_name": "待时费", "price_id": None},
-    "yangshan": {"tms_name": "洋山费", "price_id": None},
-    "other": {"tms_name": "其它费", "price_id": None},
-    "tax": {"tms_name": "税金", "price_id": None, "import": False},
+    "freight": {"tms_name": "运费"},
+    "waiting": {"tms_name": "待时费"},
+    "yangshan": {"tms_name": "洋山费"},
+    "other": {"tms_name": "其它费"},
+    "tax": {"tms_name": "税金", "import": False},
 }
 
 
 def _fee_map_yaml(bootstrap: dict | None) -> str:
-    """构造注入用映射表 YAML（费目条目 + 可选 fee_bootstrap 段）。"""
+    """构造注入用映射表 YAML（费目条目 + 可选 fee_bootstrap 段）。
+
+    测试直调无 sk → DEFAULT_OWNER 槽；freight 显式 id 同时配 default 与
+    TEST_SK_OWNER（带 sk 用例同槽命中，保「已建档名跳过」语义）。
+    """
     body = {code: dict(entry) for code, entry in _FEE_MAP.items()}
+    body["owner_price_ids"] = {
+        "default": {"freight": 820},
+        TEST_SK_OWNER: {"freight": 820},
+    }
     if bootstrap is not None:
         body["fee_bootstrap"] = bootstrap
     return yaml.safe_dump(body, allow_unicode=True, sort_keys=False)
@@ -694,11 +704,11 @@ class TestGoldenBootstrap:
         ]
         assert null_prices == []
         assert not [o for o in result.canonical_orders if not o.bl_no]  # 干净样本断言
-        # registry 与建档清单一致（登记即命中）
+        # registry 与建档清单一致（登记即命中；带 sk 建档登记在 sk 槽）
         registered = {
             c["code"]: c["price_id"]
             for c in bootstrap["created"]
-            if get_fee_registry().lookup(c["code"]) is not None
+            if get_fee_registry().lookup(c["code"], TEST_SK_OWNER) is not None
         }
         assert registered == {c["code"]: c["price_id"] for c in bootstrap["created"]}
 
@@ -756,12 +766,12 @@ class TestBillrowNamedBootstrap:
         assert report is not None and report["mode"] == "create"
         created = {c["tms_name"]: c for c in report["created"]}
         assert set(created) == {"加班费", "报关费"}
-        # 表单：name=原名 + sn 含动态码大写；registry 已登记（幂等命中）
+        # 表单：name=原名 + sn 含动态码大写；registry 已登记（幂等命中，sk 槽）
         form_sent = fake_create.calls[0]["price"][created["加班费"]["code"]]
         assert form_sent["name"] == "加班费"
         assert created["加班费"]["code"].upper() in form_sent["sn"]
-        assert get_fee_registry().lookup(created["加班费"]["code"])["tms_name"] == "加班费"
-        assert get_fee_registry().lookup(created["报关费"]["code"])["tms_name"] == "报关费"
+        assert get_fee_registry().lookup(created["加班费"]["code"], TEST_SK_OWNER)["tms_name"] == "加班费"
+        assert get_fee_registry().lookup(created["报关费"]["code"], TEST_SK_OWNER)["tms_name"] == "报关费"
 
     async def test_second_batch_no_create_calls(self, price_cfg, md_endpoint, fake_create):
         price_cfg(_fee_map_yaml(BS_CFG))
@@ -830,38 +840,198 @@ class TestBillrowNamedBootstrap:
         assert again["created"] and again["created"][0]["tms_name"] == "加班费"
 
 
-def _make_canonical_order(other_note: str | None, *, decided: bool = False):
-    """构造 canonical 链未决单 stub（fees 含 other+note 形态；decided=True 模拟已标记单）。"""
-    from types import SimpleNamespace
+class TestDynamicFallbackToOther:
+    """模板外动态码建档失败/未触发的降级保底（2026-09-08 拍板：不丢费不
+    excluded，归并本通道其它费以其它费名义录入——与旧版 to_other 等价；
+    registry 建档成功后下次上传自动转独立发射）。"""
 
-    fees = []
-    if other_note:
-        fees.append(SimpleNamespace(code="other", note=other_note, money=100.0))
-    fees.append(SimpleNamespace(code="freight", note=None, money=200.0))
-    order = SimpleNamespace(fees=fees, create_result={"success": True} if decided else None)
-    return order
+    async def test_no_other_item_reroutes_to_other(self, price_cfg):
+        """本通道无其它费条目 → 动态码条目直接改道其它费发射。"""
+        from decimal import Decimal
 
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.schema import FeeItem
 
-class TestCanonicalOtherBootstrap:
-    """B2（2026-09-07 用户拍板）：canonical 链 to_other 原名自动建档。
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")  # 其它费档案已建档（保底归并前提）
+        fee = FeeItem(channel="shou", code=_dynamic_fee_code("高速费"), money=Decimal("6"), note="高速费")
+        apply_price_map([fee])
+        # 未建档（registry 空、YAML 无此码）→ 改道其它费：码/名/id 就位、不 excluded、金额不丢
+        assert fee.code == "other"
+        assert fee.price_id == 90002 and fee.note == "高速费"
+        assert fee.excluded is False
 
-    - 候选源 = 未决单 fees 中 code=other 的 note 原名（逗号拆分，与
-      reconciliation to_other_counts 同口径）；
-    - 订单照常 other+note 提交（payload 零变更），建档只是费用管理侧补档；
-    - 幂等：建一次后 registry 跳过（下批继续 other+note 可接受，无 B3 闭环）；
-    - preview 只出 planned 零副作用。
-    """
+    async def test_with_other_item_merges_money_and_note(self, price_cfg):
+        """同通道已有其它费条目 → 金额/原名并入（动态条目自身不发射）。"""
+        from decimal import Decimal
 
-    def test_collect_names_note_split_and_decided_skipped(self):
-        """note 逗号拆分 + 非空过滤；已标记单（skipped/被拒）不构成候选。"""
-        orders = [
-            _make_canonical_order("加班费,报关费"),
-            _make_canonical_order("查验费"),
-            _make_canonical_order("加班费", decided=True),  # 已决单跳过
-            _make_canonical_order(None),  # 无 other 项
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.schema import FeeItem
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")
+        other = FeeItem(channel="shou", code="other", money=Decimal("10"), note=None)
+        dyn = FeeItem(channel="shou", code=_dynamic_fee_code("高速费"), money=Decimal("6"), note="高速费")
+        apply_price_map([other, dyn])
+        assert other.price_id == 90002
+        assert other.money == Decimal("16") and other.note == "高速费"
+        assert dyn.excluded is True  # 金额已并入 other → 自身不重复发射
+
+    async def test_merge_dropped_report_and_no_double_count(self, price_cfg):
+        """归并保底只报告不丢费：dropped 带 merged_to_other 原金额与原名；桶条目
+        金额=两者之和，动态条目 excluded+金额置零——发射/响应求和口径不双算
+        （审查 S6 锁死）。"""
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.schema import FeeItem
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")
+        other = FeeItem(channel="shou", code="other", money=Decimal("10"), note=None)
+        dyn = FeeItem(
+            channel="shou", code=_dynamic_fee_code("高速费"),
+            money=Decimal("6"), note="高速费",
+        )
+        _, dropped = apply_price_map([other, dyn])
+        assert other.money == Decimal("16") and other.note == "高速费"
+        assert dyn.excluded is True and dyn.money == Decimal("0")
+        assert dropped == [
+            {
+                "channel": "shou",
+                "code": _dynamic_fee_code("高速费"),
+                "tms_name": None,
+                "money": "6",
+                "note": "高速费",
+                "reason": "merged_to_other",
+            }
         ]
-        names = fb_module.collect_canonical_other_names(orders)
-        assert names == ["加班费", "报关费", "查验费"]
+        # 发射口径不双算：Σ 未 excluded 条目金额 == 合并前 Σ（10+6）
+        assert sum(f.money for f in (other, dyn) if not f.excluded) == Decimal("16")
+
+    async def test_reconcile_identity_kept_after_merge(self, price_cfg):
+        """service 对账口径（S6 锁死）：merged_to_other 不调整 recorded→excluded
+        ——金额已并入桶条目正常发射仍在 recorded 内，恒等 diff=0 不破。"""
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.fees.fee_registry import DEFAULT_OWNER
+        from app.orders.bill.schema import FeeReconcile
+        from app.orders.bill.service import _reconcile_order_fees
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")
+        other = FeeItem(channel="shou", code="other", money=Decimal("10"), note=None)
+        dyn = FeeItem(
+            channel="shou", code=_dynamic_fee_code("高速费"),
+            money=Decimal("6"), note="高速费",
+        )
+        order = _make_order([other, dyn])
+        order.fee_reconcile = {
+            "shou": FeeReconcile(
+                bill_total=Decimal("16"), recorded_total=Decimal("16"),
+                excluded_total=Decimal("0"),
+            )
+        }
+        dropped, mismatch, _, stats = _reconcile_order_fees([order], DEFAULT_OWNER)
+        assert dropped and dropped[0]["reason"] == "merged_to_other"
+        rec = order.fee_reconcile["shou"]
+        assert rec.recorded_total == Decimal("16") and rec.excluded_total == Decimal("0")
+        assert rec.ok is True and mismatch == []
+        assert stats["shou"]["recorded_total"] == Decimal("16")
+
+    async def test_other_missing_warning_covers_dynamic_codes(
+        self, price_cfg, monkeypatch
+    ):
+        """其它费缺档显著告警（W2 修复）：纯动态码账单（无真其它费列）整批
+        excluded 也触发——原实现按「未 excluded」事后过滤恒为空（死代码）。"""
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.schema import FeeItem
+
+        price_cfg(_fee_map_yaml(None))  # 无 other 显式 id、registry 空 → 其它费无档
+        warnings = []
+        monkeypatch.setattr(
+            fp_module.log, "warning",
+            lambda event, extra=None: warnings.append((event, extra)),
+        )
+        dyn = FeeItem(
+            channel="shou", code=_dynamic_fee_code("高速费"),
+            money=Decimal("6"), note="高速费",
+        )
+        _, dropped = apply_price_map([dyn])
+        assert dyn.excluded is True
+        assert dropped and dropped[0]["reason"] == "price_id null"
+        assert warnings and warnings[0][0] == "fee_price_map_other_missing"
+        assert _dynamic_fee_code("高速费") in warnings[0][1]["codes"]
+
+    async def test_other_missing_silent_when_other_has_id(self, price_cfg, monkeypatch):
+        """其它费有档（显式段/registry）→ 归并保底走通，不误报缺档告警。"""
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+        from app.orders.bill.schema import FeeItem
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")
+        warnings = []
+        monkeypatch.setattr(
+            fp_module.log, "warning",
+            lambda event, extra=None: warnings.append((event, extra)),
+        )
+        dyn = FeeItem(
+            channel="shou", code=_dynamic_fee_code("高速费"),
+            money=Decimal("6"), note="高速费",
+        )
+        _, dropped = apply_price_map([dyn])
+        assert dyn.code == "other" and dyn.price_id == 90002  # 无桶改道发射
+        assert dropped == []
+        assert warnings == []
+
+    async def test_standard_code_without_yaml_not_merged(self, price_cfg):
+        """别名字典标准码（如 crane 吊机费，YAML 刻意无条目）→ 维持旧语义：
+        不并入其它费、不建档案，excluded+dropped 进对账报告（2026-09-08 审查
+        修复：归并保底仅限 is_dynamic_code 动态码）。"""
+        from decimal import Decimal
+
+        from app.orders.bill.schema import FeeItem
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("other", 90002, "其它费")
+        fee = FeeItem(channel="shou", code="crane", money=Decimal("30"), note=None)
+        updated, dropped = apply_price_map([fee])
+        assert fee.code == "crane"  # 不改道
+        assert fee.excluded is True  # 不录入仅对账
+        assert dropped and dropped[0]["reason"] == "price_id null"
+        assert updated[0].note is None  # 标准码 note 恒 None
+
+    async def test_collect_missing_skips_standard_without_yaml(self, price_cfg, md_endpoint):
+        """crane 类标准码（YAML 无条目）不构成建档候选——避免 TMS 档案意外复活
+        （_collect_missing 的 note 命名回退仅限动态码，2026-09-08 审查修复）。"""
+
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        report = await run_fee_bootstrap_async(
+            [_make_order([_fee(code="crane", money="30.00")])],
+            create_order=True,
+            sk="sk",
+        )
+        assert report is None  # 无建档候选（resolve null 但非动态码 → 不收集）
+
+    async def test_preview_planned_lists_dynamic_codes(self, price_cfg):
+        """preview：动态码缺档进 planned 计划清单（零副作用，与建档后独立发射对应）。"""
+        from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
+
+        price_cfg(_fee_map_yaml(BS_CFG))  # BS_CFG 开启自举（preview 只出计划零请求）
+        report = await run_fee_bootstrap_async(
+            [_make_order([_fee(code=_dynamic_fee_code("高速费"), money="6.00", note="高速费")])],
+            create_order=False,
+            sk="sk",
+        )
+        assert report is not None and report["mode"] == "preview"
+        assert report["planned"] == [
+            {"code": _dynamic_fee_code("高速费"), "tms_name": "高速费"}
+        ]
+        assert report["created"] == []
+
+
+class TestNamedBootstrapExtraNames:
+    """BillRow 链模板外费名建档 + extra_names 直传（2026-09-08 后 canonical
+    动态码建档并入 run_fee_bootstrap 提前闭环；本类锁定直传链建档/幂等/preview
+    零副作用）。"""
 
     async def test_preview_planned_zero_side_effect(self, price_cfg, fake_create):
         price_cfg(_fee_map_yaml(BS_CFG))
@@ -909,3 +1079,94 @@ class TestCanonicalOtherBootstrap:
         planned_all = [c["tms_name"] for c in report["created"]]
         assert planned_all == ["加班费", "查验费"]  # 加班费只出现一次
         assert len(fake_create.calls) == 1
+
+
+class TestOwnerIsolation:
+    """owner 隔离（2026-09-08 用户拍板：费目全链按 sk，废除首个触发者全局共享）。
+
+    生产实证驱动：test1/test2 首个触发者建档后全局复用 price_id，其他账号
+    订单费用挂别人名下档案（15599 订单挂 15478 档案）。锁定编排层三要素：
+    双 sk 同码各自建档、A 撞名终态不拦 B、apply 回填不跨槽。"""
+
+    async def test_same_code_both_sk_bootstrap_independently(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        """同码双 sk 各自建档：B 不命中 A 的登记（各自 price_id、各自槽）。"""
+        from app.orders.bill.submission.imported_registry import owner_key
+
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        orders = [_make_order([_fee(code="waiting", money="50.00")])]
+        first = await run_fee_bootstrap_async(orders, create_order=True, sk="sk-a")
+        second = await run_fee_bootstrap_async(orders, create_order=True, sk="sk-b")
+        id_a = first["created"][0]["price_id"]
+        id_b = second["created"][0]["price_id"]
+        # B 槽空 → 不命中 A 的登记 → 二次建档（mock 固定回值，比对行为非值：
+        # 两次建档调用 + 两槽各自登记；真实链路 price_id 由 TMS 递增分配）
+        assert len(fake_create.calls) == 2
+        reg = get_fee_registry()
+        assert reg.lookup("waiting", owner_key("sk-a"))["price_id"] == id_a
+        assert reg.lookup("waiting", owner_key("sk-b"))["price_id"] == id_b
+        assert reg.lookup("waiting", owner_key("sk-a")) is not None
+        assert id_a == 9000 and id_b == 9000  # mock 固定回值；隔离语义由两槽独立登记佐证
+
+    async def test_exists_external_of_a_not_block_b(
+        self, price_cfg, md_endpoint, fake_create, monkeypatch
+    ):
+        """A 撞名（204 已存在）终态只落 A 槽：B 上传同码照常自举建档。"""
+        from app.orders.bill.submission.imported_registry import owner_key
+
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+
+        async def _dup(forms_by_kind, sk=""):
+            return {
+                kind: {
+                    key: {
+                        "success": False,
+                        "archive_id": None,
+                        "duplicate": True,
+                        "error": {"code": "master_data_duplicate", "message": "已存在"},
+                    }
+                    for key in forms
+                }
+                for kind, forms in forms_by_kind.items()
+            }
+
+        monkeypatch.setattr(md_client_module, "create_archives_async", _dup)
+        orders = [_make_order([_fee(code="waiting", money="50.00")])]
+        blocked = await run_fee_bootstrap_async(orders, create_order=True, sk="sk-a")
+        assert blocked["created"] == [] and blocked["exists_external"]
+        # B 槽不受 A 的 exists_external 影响（无缺失判定按各自槽）
+        fake_create()
+        report_b = await run_fee_bootstrap_async(orders, create_order=True, sk="sk-b")
+        assert report_b["created"] and report_b["created"][0]["code"] == "waiting"
+        assert get_fee_registry().exists_external("waiting", owner_key("sk-a")) is True
+        assert get_fee_registry().exists_external("waiting", owner_key("sk-b")) is False
+
+    async def test_apply_price_map_scoped_to_owner(self, price_cfg):
+        """apply 回填只查当前 owner 槽：A 单不挂 B 的 price_id。"""
+        from app.orders.bill.submission.imported_registry import owner_key
+
+        price_cfg(_fee_map_yaml(None))
+        get_fee_registry().register("waiting", 90001, "待时费", owner_key("sk-a"))
+        get_fee_registry().register("waiting", 91001, "待时费", owner_key("sk-b"))
+        fee_a = _fee(code="waiting", money="50.00")
+        apply_price_map([fee_a], owner_key("sk-a"))
+        fee_b = _fee(code="waiting", money="50.00")
+        apply_price_map([fee_b], owner_key("sk-b"))
+        assert fee_a.price_id == 90001 and fee_b.price_id == 91001
+
+    async def test_explicit_ids_scoped_to_owner(self, price_cfg):
+        """显式段只对当前 owner 槽生效：A 槽配 waiting、B/default 槽不配 → 零跨槽
+        零全局兜底（resolve_price_id 核心语义直测，防误写成全局兜底）。"""
+        from app.orders.bill.submission.imported_registry import owner_key
+
+        body = {code: dict(entry) for code, entry in _FEE_MAP.items()}
+        body["owner_price_ids"] = {owner_key("sk-a"): {"waiting": 90001}}
+        price_cfg(yaml.safe_dump(body, allow_unicode=True, sort_keys=False))
+        owner_a, owner_b = owner_key("sk-a"), owner_key("sk-b")
+        assert fp_module.resolve_price_id("waiting", owner_a) == 90001
+        assert fp_module.resolve_price_id("waiting", owner_b) is None
+        assert fp_module.resolve_price_id("waiting") is None  # default 槽不配

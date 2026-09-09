@@ -28,15 +28,22 @@ from app.orders.bill import BoxGroup, CanonicalOrder, FeeItem, build_result_asyn
 from app.orders.bill.fees.fee_bootstrap import build_price_form, run_fee_bootstrap_async
 from app.orders.bill.fees.fee_price_map import apply_price_map
 from app.orders.bill.fees.fee_registry import get_fee_registry
+from app.orders.bill.submission.imported_registry import owner_key
 from helpers import FakeResponse, build_bill_bytes
 
 pytestmark = pytest.mark.asyncio
 
-# 注入的费目映射表（测试值）：freight 已有 id；waiting/other 待自举
+# 本文件带 sk 用例的统一 sk 与对应 owner 槽（owner 化后断言口径：建档登记
+# 在该槽，lookup/exists_external 断言须同槽——2026-09-08 费目隔离）
+_SK = "sk-token"
+_SK_OWNER = owner_key(_SK)
+
+# 注入的费目映射表（测试值）：freight 已有 id（owner_price_ids default 槽显式）；
+# waiting/other 待自举。条目级 price_id 已废弃（owner 隔离，2026-09-08）。
 _FEE_MAP = {
-    "freight": {"tms_name": "运费", "price_id": 820},
-    "waiting": {"tms_name": "待时费", "price_id": None},
-    "other": {"tms_name": "其它费", "price_id": None},
+    "freight": {"tms_name": "运费"},
+    "waiting": {"tms_name": "待时费"},
+    "other": {"tms_name": "其它费"},
 }
 
 _BS_CFG = {
@@ -63,6 +70,12 @@ _BS_CFG = {
 
 def _fee_map_yaml() -> str:
     body = {code: dict(entry) for code, entry in _FEE_MAP.items()}
+    # freight 显式 id 同时配 default（无 sk 直调）与 _SK_OWNER（带 sk 用例）
+    # 两槽，保「已有 id 不重建」语义
+    body["owner_price_ids"] = {
+        "default": {"freight": 820},
+        _SK_OWNER: {"freight": 820},
+    }
     body["fee_bootstrap"] = _BS_CFG
     return yaml.safe_dump(body, allow_unicode=True, sort_keys=False)
 
@@ -184,10 +197,10 @@ class TestPriceForm:
         assert req["url"] == "http://jxt.test/Create/Price"
         assert req["headers"] == {"sk": "sk-token"}
         assert req["data"]["name"] == "待时费" and req["data"]["sn"] == "AUTO_WAITING"
-        # registry 登记 + 当批回填（apply_price_map 经 registry 命中）
-        assert get_fee_registry().lookup("waiting")["price_id"] == 90001
+        # registry 登记 + 当批回填（apply_price_map 经 registry 命中，同 sk 槽）
+        assert get_fee_registry().lookup("waiting", _SK_OWNER)["price_id"] == 90001
         order = _make_order("waiting")
-        apply_price_map(order.fees)
+        apply_price_map(order.fees, _SK_OWNER)
         assert order.fees[0].price_id == 90001 and order.fees[0].tms_name == "待时费"
 
     async def test_multi_code_one_call_each(self, price_cfg, md_endpoint, fake_http, real_archives):
@@ -197,7 +210,7 @@ class TestPriceForm:
         report = await run_fee_bootstrap_async([_make_order("waiting", "other")], create_order=True, sk="sk-token")
         assert [c["code"] for c in report["created"]] == ["waiting", "other"]
         assert [r["data"]["sn"] for r in fake_http.captured] == ["AUTO_WAITING", "AUTO_OTHER"]
-        assert get_fee_registry().lookup("other")["price_id"] == 90002
+        assert get_fee_registry().lookup("other", _SK_OWNER)["price_id"] == 90002
 
 
 class TestPriceFailures:
@@ -208,7 +221,7 @@ class TestPriceFailures:
         report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["created"] == [] and report["exists_external"] == []
         assert report["failed"] and "HTTP error: 500" in report["failed"][0]["reason"]
-        assert get_fee_registry().lookup("waiting") is None  # 失败不登记 → 下批重试
+        assert get_fee_registry().lookup("waiting", _SK_OWNER) is None  # 失败不登记（sk 槽）→ 下批重试
 
     async def test_failure_non_json(self, price_cfg, md_endpoint, fake_http, real_archives):
         fake_http(lambda url, **kw: FakeResponse("html page", status_code=200))
@@ -228,8 +241,8 @@ class TestPriceFailures:
         assert report["failed"] == []
         ext = report["exists_external"]
         assert ext and ext[0]["code"] == "waiting" and "已存在" in ext[0]["message"]
-        assert get_fee_registry().lookup("waiting") is None
-        assert get_fee_registry().exists_external("waiting") is True
+        assert get_fee_registry().lookup("waiting", _SK_OWNER) is None
+        assert get_fee_registry().exists_external("waiting", _SK_OWNER) is True
         # 下批不再重试（exists_external 终态；无缺失码 → 不产生报告段）
         assert await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token") is None
 
@@ -241,7 +254,7 @@ class TestPriceFailures:
         report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] and "未返回主键" in report["failed"][0]["reason"]
         assert report["exists_external"] == [] and report["created"] == []
-        assert get_fee_registry().lookup("waiting") is None
+        assert get_fee_registry().lookup("waiting", _SK_OWNER) is None
 
 
 class TestServiceIntegration:
@@ -356,9 +369,9 @@ class TestBillrowServiceIntegration:
         assert {"加班费", "报关费", "查验费"} <= set(created)
         assert "运费" not in created
         assert all(isinstance(c["price_id"], int) for c in created.values())
-        # registry 已登记（幂等：下次同文件不再建档）
+        # registry 已登记（幂等：下次同文件不再建档；带 sk 建档登记在 sk 槽）
         reg = get_fee_registry()
-        assert all(reg.lookup(c["code"]) is not None for c in created.values())
+        assert all(reg.lookup(c["code"], _SK_OWNER) is not None for c in created.values())
 
     async def test_preview_planned_only_zero_side_effect(self, price_cfg, md_endpoint):
 
@@ -374,3 +387,64 @@ class TestBillrowServiceIntegration:
         assert {"加班费", "报关费", "查验费"} <= planned
         assert "运费" not in planned
         assert fb["created"] == [] and fb["failed"] == []
+
+
+class TestTwoSkIsolationE2E:
+    """同一账单双 sk 依次导入端到端（生产 test1/test2 归属错乱场景的回归，
+    2026-09-08 费目隔离拍板）：同名费目各自建档、订单费用 price_id 各挂
+    自己账号名下档案；订单去重按 owner 放行（同文件二次导入不 409）。"""
+
+    _HEADERS = {
+        "A": "序号",
+        "B": "客户名称",
+        "C": "门点",
+        "D": "箱型箱量",
+        "E": "提单号",
+        "F": "箱号",
+        "G": "做箱时间",
+        "H": "港区",
+        "I": "司机",
+        "J": "应收备注",
+        "K": "待时费",
+        "L": "运费",
+    }
+
+    async def test_same_bill_two_sk_each_archives_own_price_id(
+        self, md_endpoint, real_archives, monkeypatch
+    ):
+        price_seq = iter([77701, 77702, 77703, 77704])
+        price_calls: list[tuple[str, str]] = []
+
+        async def fake_post(url, *, payload=None, headers=None, **_kwargs):
+            if "/Create/Price" in url:
+                price_calls.append(("price", (payload or {}).get("name")))
+                return FakeResponse(
+                    {"code": "200", "msg": "添加成功", "data": {"price_id": next(price_seq)}}
+                )
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EXDUAL1"}]})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        bill = build_bill_bytes(
+            self._HEADERS,
+            [{"A": 1, "B": "客户甲", "E": "OOLU77000001A", "D": "40HQ", "K": 50, "L": 100}],
+        )
+        result_a = await build_result_async(
+            filename="dual.xlsx", file_bytes=bill, create_order=True, sk="sk-a"
+        )
+        result_b = await build_result_async(
+            filename="dual.xlsx", file_bytes=bill, create_order=True, sk="sk-b"
+        )
+        # 两单都成功：订单去重按 owner 隔离，B 不被 A 的成功记录拦截
+        assert result_a.summary["success"] == 1 and result_b.summary["success"] == 1
+        # 两 sk 槽均空（真实表只预置 default/登录 sk 槽）→ 各自全码自举一轮
+        # （按费用列出现序：待时费、运费）
+        assert price_calls == [("price", "待时费"), ("price", "运费")] * 2
+        # 费用回填各挂自己账号：A 单 7770x / B 单 7770(x+2)，互不串槽
+        ids_a = {f.code: f.price_id for o in result_a.canonical_orders for f in o.fees}
+        ids_b = {f.code: f.price_id for o in result_b.canonical_orders for f in o.fees}
+        assert ids_a == {"waiting": 77701, "freight": 77702}
+        assert ids_b == {"waiting": 77703, "freight": 77704}
+        # registry 双槽独立登记（幂等下批各自命中，不再重建）
+        reg = get_fee_registry()
+        assert reg.lookup("waiting", owner_key("sk-a"))["price_id"] == 77701
+        assert reg.lookup("waiting", owner_key("sk-b"))["price_id"] == 77703

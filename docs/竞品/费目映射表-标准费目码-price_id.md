@@ -69,9 +69,11 @@ fee_bootstrap:
 
 ## 3. 补值方法（任选其一，都不需要写代码）
 
-1. **自举（已实施，2026-08-14 合入）**：`fee_bootstrap` 编排（fee_bootstrap.py + fee_registry.py），导入中命中且解析为 null 的费目码**懒创建**（AddCarPrice 建档）→ registry 登记 → 当批回填 price_id；幂等（registry 命中即复用）、失败降级下批重试、生产默认关闭。**preview 零副作用**：预览只输出 planned 计划清单不发建档请求，真实导入（create_order=true）才建档。**golden 实证：秋怡 2019 全量 create 模式自举后 dropped 1901 → 0**；
-2. **outerHTML 法（一次全量）**：TMS 费用弹窗 → 右键「费目」下拉框 → 检查 → `<select>` 的 `<option value="820">运费</option>` value 即 price_id（⚠️ 2026-08-14 实证费用区无下拉框，此法作废，改走价格表/客服导出）；
-3. 价格表/费目管理界面导出或问金科信客服要价格表导出。
+1. **自举（已实施，2026-08-14 合入）**：`fee_bootstrap` 编排（fee_bootstrap.py + fee_registry.py），导入中命中且解析为 null 的费目码**懒创建**（AddCarPrice  建档）→ registry 登记 → 当批回填 price_id；幂等（registry 命中即复用）、失败降级下批重试、生产默认关闭。**preview 零副作用**：预览只输出 planned 计划清单不发建 档请求，真实导入（create_order=true）才建档。**golden 实证：秋怡 2019 全量 create 模式自举后 dropped 1901 → 0**；
+2. **canonical other 原名建档（B2，2026-09-07 合入）**：标准字段链 to_other 归并费目的 note 原名（如「高速费」）→ create 时并入建档（动态码 `x+sha1[:8]`，name=原名）→ 费用管理出现同名档案；**订单 payload 零变更**（照常 other+note 提交，档案与订单费用无关联，财务按新档案统计为 0——如需迁移需 B3 写别名字典闭环）；幂等 registry/204 已存在则不再建；
+3. **jinxin（BillRow 直传名）模板外建档（2026-09-07 合入）**：账单费用名中无已建档案者（别名命中且有 id 的跳过）create 时自动建档（`run_billrow_fee_bootstrap`）；preview 只出 planned；
+4. **outerHTML 法（一次全量）**：TMS 费用弹窗 → 右键「费目」下拉框 → 检查 → `<select>` 的 `<option value="820">运费</option>` value 即 price_id（⚠️ 2026-08-14 实证费用区无下拉框，此法作废，改走价格表/客服导出）；
+5. 价格表/费目管理界面导出或问金科信客服要价格表导出。
 
 ## 4. 运行期降级规则（fee_price_map.apply_price_map 实现）
 

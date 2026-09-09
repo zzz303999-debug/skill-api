@@ -48,6 +48,11 @@ ignore = ["E501"]
 [tool.ruff.lint.isort]
 known-first-party = ["app", "helpers"]
 
+[tool.ruff.lint.per-file-ignores]
+# 迁移工具需兼容服务器宿主 python 3.6（无内置泛型注解，% 格式为同代写法）——
+# 与 target-version py311 风格规则冲突，按文件豁免；见 scripts/migrate_fee_registry_owners.py 头注释
+"scripts/migrate_fee_registry_owners.py" = ["UP006", "UP031", "UP035", "UP045"]
+
 [tool.pytest.ini_options]
 markers = [
     "golden: calls the configured LLM gateway against all pinned golden cases",

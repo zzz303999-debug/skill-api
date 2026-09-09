@@ -26,7 +26,11 @@ from app.orders.bill import (
     group_canonical,
     parse_bill,
 )
-from app.orders.bill.fees.fee_name_map import canonicalize_fee, reload_fee_alias_dictionary
+from app.orders.bill.fees.fee_name_map import (
+    _dynamic_fee_code,
+    canonicalize_fee,
+    reload_fee_alias_dictionary,
+)
 from app.orders.bill.fees.fee_price_map import apply_price_map, reload_price_map
 from app.orders.bill.submission.payload import build_order_payload
 from helpers import inject_price_map
@@ -110,10 +114,26 @@ class TestCanonicalizeFee:
         meta = canonicalize_fee("应收", "洋山提", _FEES_CFG)
         assert meta["code"] == "yangshan"
 
-    def test_to_other_fallback(self):
-        """mapping/字典均未命中 → unmapped_fee 策略 to_other。"""
+    def test_unmapped_to_dynamic_code(self):
+        """mapping/字典均未命中 → unmapped_fee to_other 策略下按列名判定：
+        列名非其它费近义 → 动态码独立费目（2026-09-08 拍板，不再并其它费）。"""
         meta = canonicalize_fee("应收", "高速费", _FEES_CFG)
-        assert meta["code"] == "other" and meta["import"] is True
+        assert meta["code"] == _dynamic_fee_code("高速费")
+        assert meta["code"].startswith("x") and len(meta["code"]) == 9
+        assert meta["import"] is True
+
+    def test_other_alias_names_stay_other(self):
+        """列名即其它费近义（其它费/其他费用/其它，字典 other 别名清单）→ 维持
+        other 归并；模板 mapping 显式 other + 近义列名同样 other。"""
+        for name in ("其它费", "其他费用", "其它"):
+            meta = canonicalize_fee("应收", name, _FEES_CFG)
+            assert meta["code"] == "other"
+        cfg = {"mapping": {"应收.其它": "other"}}
+        meta = canonicalize_fee("应收", "其它", cfg)
+        assert meta["code"] == "other"
+        # 对照：mapping 显式 other 但列名非近义（AI 误映射场景）→ 动态码
+        meta = canonicalize_fee("应收", "高速费", cfg)
+        assert meta["code"] == _dynamic_fee_code("高速费")
 
     def test_skip_report_strategy(self):
         """unmapped_fee: skip_report → 空码不生成记录。"""
@@ -454,12 +474,17 @@ class TestGoldenFees:
         assert {"shou", "pay", "cost"} <= channels
         assert "duo_get" not in channels
 
-    def test_yinghui_long_tail_to_other(self):
-        """赢辉：长尾费目（无标准码）→ to_other 归并 + 原名进 note。"""
+    def test_yinghui_long_tail_dynamic(self):
+        """赢辉：长尾费目（无标准码，列名非其它费近义）→ 动态码独立费目
+        （2026-09-08 拍板），原名保留进 note；真其它费列（其他费用）仍归 other。"""
         out, orders = self._parse("yinghui", "利润明细表(2021-08-01-2021-12-31).xls")
+        dyn_items = [f for o in orders for f in o.fees if f.code.startswith("x")]
+        assert dyn_items
+        assert all(f.note for f in dyn_items)  # 原名保留（建档命名/降级保底原料）
+        # 真其它费列（应收.其他费用 → other）：近义名不写 note（无冗余）
         other_items = [f for o in orders for f in o.fees if f.code == "other"]
         assert other_items
-        assert all(f.note for f in other_items)  # 原名进备注
+        assert all(not f.note for f in other_items)
         # 行级费用列数（应收+应付+成本三区自动发现）> mapping 显式费目数
         fee_cols = {
             (f.get("section"), f.get("name"))

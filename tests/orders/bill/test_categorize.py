@@ -27,9 +27,11 @@ import app.orders.bill.master_data.config as md_cfg_module
 import app.orders.bill.parsing.template_store as ts_module
 from app.orders.bill import build_result_async, group_canonical, parse_bill
 from app.orders.bill.fees.fee_bootstrap import run_fee_bootstrap_async
+from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
 from app.orders.bill.fees.fee_price_map import apply_price_map
 from app.orders.bill.fees.fee_registry import get_fee_registry
 from app.orders.bill.master_data.orchestrator import collect_candidates
+from app.orders.bill.submission.imported_registry import owner_key
 from app.orders.bill.submission.payload import build_order_payload
 from helpers import FakeResponse, inject_price_map
 
@@ -41,6 +43,9 @@ pytestmark = pytest.mark.asyncio
 BIZ_HEADERS = ["序号", "客户名称", "门点", "司机", "车牌号", "提单号", "箱型箱量", "司机手机"]
 # 费用列与区块分界合计列（ranges：区块 → 末尾合计列名；数据行合计列留空）
 FEE_HEADERS = ["运费", "高速费", "待时费", "应收合计", "油费", "应付合计", "打劫费", "车辆成本合计"]
+# 高速费列未映射（unmapped to_other）→ 按列名判定为独立费目（2026-09-08 拍板）：
+# 动态码（x+sha1 前 8），建档后独立发射，不再并进其它费
+HIGHWAY_CODE = _dynamic_fee_code("高速费")
 
 
 # 注：历史问题——parser._header_column_index 曾对 openpyxl 空单元格（None）
@@ -71,7 +76,7 @@ def _mixed_template() -> dict:
         },
         "normalizers": {"box_type_qty": "box_parse"},
         # 四通道费用：应收→shou / 应付→pay / 车辆成本→cost（合计列分界）；
-        # 高速费未映射→to_other
+        # 高速费未映射（unmapped to_other）→ 动态码独立费目（fee_bootstrap 建档）
         "fees": {
             "channels": {"应收": "shou", "应付": "pay", "车辆成本": "cost"},
             "ranges": {"应收": "应收合计", "应付": "应付合计", "车辆成本": "车辆成本合计"},
@@ -174,14 +179,15 @@ class TestFourCategoryAggregation:
 
     async def test_financial_information_channels(self, mixed_bill, tmp_path):
         """财务信息：费用按通道归集（应收→shou/应付→pay/车辆成本→cost），
-        一行一票各行独立，未映射费目归并 other。"""
+        一行一票各行独立，未映射费目按名独立（动态码，2026-09-08 拍板）。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         fees = {(f.channel, f.code): f for f in orders[0].fees}
-        # 首行应收：运费 100；待时费 50；高速费未映射 → to_other
+        # 首行应收：运费 100；待时费 50；高速费未映射 → 动态码独立费目
         assert fees[("shou", "freight")].money == 100
         assert fees[("shou", "waiting")].money == 50
-        assert fees[("shou", "other")].money == 6
-        assert fees[("shou", "other")].note == "高速费"  # 原名进 note（payload 拼 ¥金额）
+        highway = fees[("shou", HIGHWAY_CODE)]
+        assert highway.money == 6
+        assert highway.note == "高速费"  # 原名保留（建档命名/降级归并保底）
         # 应付：油费
         assert fees[("pay", "fuel")].money == 80
         # 车辆成本：打劫费（与成本共用 cost 通道）
@@ -206,15 +212,15 @@ class TestFourCategoryAggregation:
 
     async def test_fee_column_bootstrap_planned(self, mixed_bill, tmp_path, monkeypatch):
         """费用栏目：缺失费目码进自举计划（有 price_id 的费目不重复建）。"""
-        inject_price_map(monkeypatch, {"other": None, "waiting": None})
+        inject_price_map(monkeypatch, {"waiting": None})
         _, orders = parse_mixed(mixed_bill, tmp_path)
         planned = await run_fee_bootstrap_async(orders, create_order=False)
         assert planned["mode"] == "preview"
         assert planned["created"] == []  # preview 零副作用
-        # 待时费/其它费 price_id null → 计划建档（按费用出现序：高速费先于待时费）；
-        # 运费/油费/打劫费已有 id → 不建
+        # 高速费（动态码）/待时费 price_id null → 计划建档（按费用出现序：高速费先于
+        # 待时费）；运费/油费/打劫费已有 id → 不建
         assert planned["planned"] == [
-            {"code": "other", "tms_name": "其它费"},
+            {"code": HIGHWAY_CODE, "tms_name": "高速费"},
             {"code": "waiting", "tms_name": "待时费"},
         ]
 
@@ -231,31 +237,31 @@ class TestFieldMapping:
 
     async def test_four_channel_form_mapping(self, mixed_bill, tmp_path, monkeypatch):
         """Excel 费用列 → FeeItem → form 键（shou/pay/cost 通道 + 合计回写）。"""
-        # 注入 waiting/other 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
+        # 注入 waiting 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
         # 预登记待建费目（模拟自举成功后），保证四通道全部可发射
-        inject_price_map(monkeypatch, {"waiting": None, "other": None})
+        inject_price_map(monkeypatch, {"waiting": None})
         reg = get_fee_registry()
         reg.register("waiting", 90001, "待时费")
-        reg.register("other", 90002, "其它费")
+        reg.register(HIGHWAY_CODE, 90002, "高速费")  # 动态费目建档后按名独立发射
         _, orders = parse_mixed(mixed_bill, tmp_path)
         order = orders[0]
         apply_price_map(order.fees)
         form, _ = build_order_payload(order)
-        # 应收 shou：运费 100（本行）/ 待时费 50 / 其它费 6
+        # 应收 shou：运费 100（本行）/ 待时费 50 / 高速费 6（独立费目条目）
         assert form["shou[0][运费][money]"] == "100.00"
         assert form["shou[0][运费][price_id]"] == "820"
         assert form["shou[0][待时费][money]"] == "50.00"
         assert form["shou[0][待时费][price_id]"] == "90001"
-        assert form["shou[0][其它费][money]"] == "6.00"
-        assert form["shou[0][其它费][price_id]"] == "90002"
+        assert form["shou[0][高速费][money]"] == "6.00"
+        assert form["shou[0][高速费][price_id]"] == "90002"
         # 应付 pay / 车辆成本 cost（含费目条目 driver_name 恒发键）
         assert form["pay[0][油费][money]"] == "80.00"
         assert form["pay[0][油费][price_id]"] == "1134"
         assert form["cost[0][打劫费][money]"] == "30.00"
         assert form["cost[0][打劫费][price_id]"] == "1135"
         assert form["cost[0][打劫费][driver_name]"] == ""
-        # 通道级 note 恒发（to_other 原名 + ¥金额；无 other 项通道发空串）
-        assert form["shou[0][note]"] == "高速费 ¥6.00"
+        # 通道级 note 恒发（独立费目不进 note；无 other 项通道发空串）
+        assert form["shou[0][note]"] == ""
         assert form["pay[0][note]"] == ""
         assert form["cost[0][note]"] == ""
         # 合计回写：driver[0] 应收/应付合计 + cost[0] 成本合计（首行 100+50+6）
@@ -271,7 +277,7 @@ class TestFieldMapping:
         """费目条目六属性键：price_type/is_profit/dai_dian 取模板 fee_defaults。"""
         reg = get_fee_registry()
         reg.register("waiting", 90001, "待时费")
-        reg.register("other", 90002, "其它费")
+        reg.register(HIGHWAY_CODE, 90002, "高速费")
         _, orders = parse_mixed(mixed_bill, tmp_path)
         apply_price_map(orders[0].fees)
         form, _ = build_order_payload(orders[0])
@@ -417,7 +423,8 @@ class TestTwoRowRegression:
         fees = {(f.channel, f.code): f for f in orders[0].fees}
         assert fees[("shou", "freight")].money == 100
         assert fees[("shou", "waiting")].money == 50
-        assert fees[("shou", "other")].money == 6
+        highway = fees[("shou", HIGHWAY_CODE)]
+        assert highway.money == 6
         assert fees[("pay", "fuel")].money == 80
         assert fees[("cost", "hijack")].money == 30
         assert {f.channel for f in orders[0].fees} == {"shou", "pay", "cost"}
@@ -492,8 +499,9 @@ class TestE2EMock:
     ):
         # 恢复真实 create_archives（conftest 全局 mock 是零网络兜底），httpx 层统一 mock
         monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
-        # 注入 waiting/other 无 id：触发费目自举建档（2026-09-01 真实表已补值）
-        inject_price_map(monkeypatch, {"waiting": None, "other": None})
+        # 注入 waiting 无 id：触发费目自举建档（2026-09-01 真实表已补值）；
+        # 高速费（动态码）恒无 id → 自举建档
+        inject_price_map(monkeypatch, {"waiting": None})
         state = {"addwork": 0, "price": 0, "archives": []}
         price_ids = iter([88801, 88802])
         addwork_forms: list[dict] = []
@@ -536,11 +544,11 @@ class TestE2EMock:
         # 基础建档（依赖序：客户 → 工厂 → 车辆 → 司机）
         archived = [a["kind"] for a in result.meta["master_data"]["archived"]]
         assert archived == ["client", "factory", "truck", "driver"]
-        assert state["archives"] and all(f[0] == "price" for f in state["archives"][:3])
-        # 费用栏目自举：other/waiting 建档成功并回填 price_id（按缺失出现序）
+        assert state["archives"] and all(f[0] == "price" for f in state["archives"][:2])
+        # 费用栏目自举：高速费（动态码）/waiting 建档成功并回填 price_id（按缺失出现序）
         bootstrap = result.meta["reconciliation"]["reports"]["fee_bootstrap"]
         assert bootstrap["created"] == [
-            {"code": "other", "tms_name": "其它费", "price_id": 88801},
+            {"code": HIGHWAY_CODE, "tms_name": "高速费", "price_id": 88801},
             {"code": "waiting", "tms_name": "待时费", "price_id": 88802},
         ]
         # 订单创建：AddWork 每单恰 1 次（行序号兜底键，两行各自录入），
@@ -550,18 +558,17 @@ class TestE2EMock:
         assert form["data[0][b_order_num]"] == "OOLU12345678"
         assert form["shou[0][运费][money]"] == "100.00"
         assert form["shou[0][待时费][price_id]"] == "88802"
-        assert form["shou[0][其它费][price_id]"] == "88801"
+        assert form["shou[0][高速费][price_id]"] == "88801"
         assert form["pay[0][油费][money]"] == "80.00"
         assert form["cost[0][打劫费][money]"] == "30.00"
         assert form["driver[0][get_ys_zj]"] == "156.00"
         # 建档请求体：客户/工厂（依赖前置 client_id）/车辆/司机（带 truck_id）；
-        # 第 3 个 price 是 B2（2026-09-07）canonical to_other 原名建档（高速费）
+        # 高速费动态码建档成功 → 当批独立发射（2026-09-08：废除 B2 孤儿建档，
+        # 不再并其它费；建档失败才降级归并其它费保底）
         archive_kinds = [a[0] for a in state["archives"]]
-        assert archive_kinds == [
-            "price", "price", "price", "client", "factory", "truck", "driver",
-        ]
-        b2_price_form = state["archives"][2][1]
-        assert b2_price_form["name"] == "高速费"  # to_other 原名 → 费用管理补档
+        assert archive_kinds == ["price", "price", "client", "factory", "truck", "driver"]
+        price_forms = [f for k, f in state["archives"] if k == "price"]
+        assert {f["name"] for f in price_forms} == {"高速费", "待时费"}  # 各按原名建档
         client_form = next(f for k, f in state["archives"] if k == "client")
         assert client_form["client_name"] == "客户甲"
         assert client_form["cg_id"] == "4"
@@ -585,5 +592,83 @@ class TestE2EMock:
             "failed_details": [],
         }
         assert state["addwork"] == 2  # 不重复下单
-        assert len(state["archives"]) == 7  # 不重复建档（自举/B2/基础档案均零新增）
+        assert len(state["archives"]) == 6  # 不重复建档（自举/基础档案均零新增）
         assert get_master_data_store().snapshot() == counts_after_first  # 计数不被重导推高
+
+    async def test_two_sk_dynamic_fee_independent_emission(
+        self, mixed_bill, tmp_path, md_config, monkeypatch, _no_real_archive_calls
+    ):
+        """接口级回归（2026-09-08 多用户拍板语义）：同一文件两个 sk 依次 create，
+        模板外费目（高速费）各自建档（owner 槽隔离）→ 各自独立发射互不并入其它费：
+        registry 双槽各记各的 price_id、订单表单各挂各的档案、reports 各自 created。"""
+        monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
+        inject_price_map(monkeypatch, {"waiting": None})
+        state: dict = {"archives": [], "addwork": 0}
+        price_ids = iter([88801, 88802, 88803, 88804])
+        addwork_forms: list[dict] = []
+
+        async def fake_post(url, *, payload=None, headers=None, **_kwargs):
+            if "/Create/Price" in url:
+                state["archives"].append(("price", payload))
+                return FakeResponse(
+                    {"code": "200", "msg": "添加成功", "data": {"price_id": next(price_ids)}}
+                )
+            if "/Create/Client" in url:
+                state["archives"].append(("client", payload))
+                return FakeResponse({"code": "200", "msg": "添加成功", "data": {"client_id": "c1"}})
+            if "/Create/Factory" in url:
+                state["archives"].append(("factory", payload))
+                return FakeResponse({"code": "200", "msg": "添加成功", "data": {"factory_id": "f1"}})
+            if "/Create/Truck" in url:
+                state["archives"].append(("truck", payload))
+                return FakeResponse({"code": "200", "msg": "添加成功", "data": {"truck_id": "t1"}})
+            if "/Create/Driver" in url:
+                state["archives"].append(("driver", payload))
+                return FakeResponse({"code": "200", "msg": "添加成功", "data": {"id": "d1"}})
+            state["addwork"] += 1
+            addwork_forms.append(payload)
+            return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+
+        # sk-a 首传：动态费目建档 → 独立发射（与 single-sk 语义一致）
+        first = await build_result_async(
+            filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk-a"
+        )
+        assert first.summary["created"] == 2
+        boot_a = first.meta["reconciliation"]["reports"]["fee_bootstrap"]["created"]
+        assert boot_a == [
+            {"code": HIGHWAY_CODE, "tms_name": "高速费", "price_id": 88801},
+            {"code": "waiting", "tms_name": "待时费", "price_id": 88802},
+        ]
+        form_a = addwork_forms[0]
+        assert form_a["shou[0][高速费][price_id]"] == "88801"  # 挂 sk-a 档案
+        assert "shou[0][其它费]" not in form_a  # 未并其它费
+        # sk-b 再传同文件：去重按 owner 隔离放行；同名费目各自重建（互不串扰）
+        second = await build_result_async(
+            filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk-b"
+        )
+        assert second.summary == {
+            "total": 2,
+            "success": 2,
+            "failed": 0,
+            "skipped": 0,
+            "created": 2,
+            "success_sns": ["EX1", "EX1"],
+            "failed_details": [],
+        }
+        boot_b = second.meta["reconciliation"]["reports"]["fee_bootstrap"]["created"]
+        assert boot_b == [
+            {"code": HIGHWAY_CODE, "tms_name": "高速费", "price_id": 88803},
+            {"code": "waiting", "tms_name": "待时费", "price_id": 88804},
+        ]
+        form_b = addwork_forms[2]  # 第二次 create 的首单表单
+        assert form_b["shou[0][高速费][price_id]"] == "88803"
+        assert "shou[0][其它费]" not in form_b
+        # registry 双槽独立登记（幂等：各自槽命中即复用，不再重建）
+        reg = get_fee_registry()
+        assert reg.lookup(HIGHWAY_CODE, owner_key("sk-a"))["price_id"] == 88801
+        assert reg.lookup(HIGHWAY_CODE, owner_key("sk-b"))["price_id"] == 88803
+        assert reg.lookup("waiting", owner_key("sk-a"))["price_id"] == 88802
+        assert reg.lookup("waiting", owner_key("sk-b"))["price_id"] == 88804
+        assert state["addwork"] == 4  # 双 sk 各 2 单（owner 隔离不去重）

@@ -37,6 +37,7 @@ from .columns import (
     business_end_col,
     discover_fee_columns,
     is_anchor_column,
+    is_non_fee_header,
     is_note_column,
     match_source_cols,
     normalize_header,
@@ -202,7 +203,12 @@ def _dynamic_fee_cols(
     kept: dict[int, str] = {}
     for col, raw_text in unmatched_cols.items():
         name = normalize_header(raw_text)
-        if not name:
+        if (
+            not name
+            or is_anchor_column(name)
+            or is_note_column(name)
+            or is_non_fee_header(name)
+        ):
             kept[col] = raw_text
             continue
         for row in range(header_row + 1, view.nrows + 1):
@@ -233,9 +239,9 @@ def read_data_rows(
     未知列动态收录（2026-09-04）：数据区含金额的未知列自动转费用列，金额进
     费用、非数字原文保留（与声明费用列同口径）；未收录列仅在其数据区至少有
     一个非空单元格时上报（全空装饰列/间距列不报；AI 明确 ignore 的列不报）。
-    忽略列二次收录（2026-09-07 B1）：AI/模板忽略列（_ignored_cols）同样过
-    金额判据——数据区有可转金额的收为费用列（列名命中 IGNORED_HEADERS 的
-    对账列除外），修复 L3 闸门 c 降级后新费用列被沉默吞掉的问题。
+    B1/B1'（忽略列金额判据二次收录，2026-09-07 小王费实证）已迁移收口至
+    _parse_with_template（2026-09-08）：本路径仅服务旧指纹库/精确回退（无 AI
+    ignored 输入），忽略列收录/两段 new_fee 兑底上报统一在模板路径承载。
     """
     data_cols, fee_cols, unmatched_cols = _header_columns(
         view, header_row, data_lookup, fee_lookup, ignored_cols
@@ -244,26 +250,6 @@ def read_data_rows(
         view, header_row, unmatched_cols
     )
     fee_cols = {**fee_cols, **dynamic_fee_cols}
-    # B1：忽略列金额判据二次收录（2026-09-07 用户拍板）——L3 闸门 c 将白名单外
-    # 费用列降级 ignore 并固化 _ignored_cols，堵死了动态收录入口（模板路径新
-    # 费用列沉默丢失）；锚点特征列（合计/未付等对账列，数据区可能全是金额）
-    # 与备注/IGNORED_HEADERS 名不收，防误收。
-    if ignored_cols:
-        ignored_unmatched = {
-            col: _header_text(view.merged_cell(header_row, col))
-            for col in ignored_cols
-            if col not in data_cols and col not in fee_cols
-        }
-        ignored_unmatched = {
-            col: text
-            for col, text in ignored_unmatched.items()
-            if text
-            and not is_anchor_column(normalize_header(text))
-            and not is_note_column(normalize_header(text))
-            and normalize_header(text) not in IGNORED_HEADERS
-        }
-        recovered_fee_cols, _ = _dynamic_fee_cols(view, header_row, ignored_unmatched)
-        fee_cols.update(recovered_fee_cols)
     unmatched_counts = {col: 0 for col in unmatched_cols}
 
     rows: list[BillRow] = []
@@ -521,6 +507,7 @@ def _parse_with_template(
         if _text:
             candidates[_col] = _text
     dynamic_fee_cols: dict[int, str] = {}  # canonical 家族收录列（列号→费用名）
+    pending_two_row_fees: list[str] = []  # two_row 兑底上报（new_fee: 前缀）
     if candidates and not any(sections):
         for col, raw_text in list(candidates.items()):
             name = normalize_header(raw_text)
@@ -529,6 +516,7 @@ def _parse_with_template(
                 or name == _anchor_name
                 or is_anchor_column(name)
                 or is_note_column(name)
+                or is_non_fee_header(name)
                 or name in IGNORED_HEADERS
                 or name in _ignore_names
             ):
@@ -541,6 +529,28 @@ def _parse_with_template(
                     else:
                         dynamic_fee_cols[col] = name
                     unmatched_raw.pop(col, None)
+                    break
+    elif candidates:
+        # two_row 区块表头（2026-09-07 审查 W3）：区块外列语义无保证不收录
+        # （区块外收录打破对账恒等），但金额型候选（含 AI 降级 ignore 的费用列）
+        # 不能沉默——以上报兑底（new_fee: 前缀，与 L3 白名单外同口径），提示
+        # 人工确认后固化模板 fees 段；防误收判据与单行收录同口径。
+        for col, raw_text in candidates.items():
+            name = normalize_header(raw_text)
+            if (
+                not name
+                or name == _anchor_name
+                or is_anchor_column(name)
+                or is_note_column(name)
+                or is_non_fee_header(name)
+                or name in IGNORED_HEADERS
+                or name in _ignore_names
+            ):
+                continue
+            for row in range(header_row + 1, view.nrows + 1):
+                raw = view.cell(row, col)
+                if raw is not None and _to_money(raw) is not None:
+                    pending_two_row_fees.append(name)
                     break
     unmatched_hits = {col: 0 for col in unmatched_raw}
 
@@ -704,6 +714,12 @@ def _parse_with_template(
         for col in range(1, view.ncols + 1)
         if col in unmatched_hits and unmatched_hits[col] > 0
     ]
+    # two_row 兑底上报（2026-09-07 审查 W3）：区块外金额列不收录但不沉默
+    if pending_two_row_fees:
+        unmatched = [
+            *unmatched,
+            *(f"new_fee:{name}" for name in pending_two_row_fees),
+        ]
     period = extract_bill_period(view, header_row)
     template_meta = {
         "fingerprint": match.fingerprint,

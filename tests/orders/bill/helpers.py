@@ -10,11 +10,17 @@ import xlwt
 from openpyxl import Workbook
 
 from app.orders.bill import BillPeriod, group_orders
+from app.orders.bill.submission.imported_registry import owner_key
 
 GOLDEN_DIR = Path(__file__).resolve().parent.parent.parent / "golden" / "bill"
 REAL_XLS = GOLDEN_DIR / "2015-01到2015-12上海通寰应收对账单.xls"
 REBUILT_XLSX = GOLDEN_DIR / "2015-01到2015-12上海通寰应收对账单-rebuilt.xlsx"
 PERIOD_2015 = BillPeriod(start="2015-01-01", end="2015-12-31")
+
+# 测试常用 sk 与对应 owner 槽（owner 化后断言口径：带 sk 的建档登记在该槽，
+# lookup/register/exists_external 断言须同槽——2026-09-08 费目隔离）
+TEST_SK = "sk"
+TEST_SK_OWNER = owner_key(TEST_SK)
 
 # 真实账单基线（2026-08 探查确认）：1094 原始行 → 尾部 4 行过滤 → 1090 数据行；
 # 一行一票（2026-08-31 业务拍板）：单数 = 数据行数
@@ -99,18 +105,23 @@ def go(rows, period):
 
 
 def inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
-    """注入临时费目映射表（真实表 deepcopy + 覆盖指定码 price_id）。
+    """注入临时费目显式 id（真实表 deepcopy + 覆盖指定码，对全部 owner 槽生效）。
 
-    锁定「null → 自举建档 / 降级」场景：2026-09-01 起真实表全量补实证 id，
-    相关机制测试改由配置注入驱动，与真实配置值解耦（monkeypatch teardown
-    自动恢复函数；缓存由各文件 fixture 重置）。
+    锁定「null → 自举建档 / 降级」场景：owner 化（2026-09-08）后条目级
+    price_id 废弃，price_id 来源 = owner_price_ids 显式段 → registry；本工具
+    monkeypatch explicit_price_ids（任意 owner 槽同值——测试语境的「无 id」
+    不区分槽，链路无 sk/带 sk 行为一致），覆盖语义：id 值 → 置值；None →
+    删除该码（registry 槽被 conftest autouse 清空 → 降级语义锁定）。
+    与真实配置值解耦（monkeypatch teardown 自动恢复；缓存由各文件 fixture 重置）。
     """
     import copy
 
     from app.orders.bill.fees import fee_price_map
 
-    real = copy.deepcopy(fee_price_map.load_price_map())
+    real = copy.deepcopy(fee_price_map.explicit_price_ids("default") or {})
     for code, pid in overrides.items():
-        entry = real.setdefault(code, {"tms_name": code, "price_id": pid, "import": True})
-        entry["price_id"] = pid
-    monkeypatch.setattr(fee_price_map, "load_price_map", lambda: real)
+        if pid is None:
+            real.pop(code, None)
+        else:
+            real[code] = int(pid)
+    monkeypatch.setattr(fee_price_map, "explicit_price_ids", lambda owner: dict(real))

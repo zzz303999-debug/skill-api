@@ -242,17 +242,22 @@ class FeeItem(BaseModel):
     解析 → 归集（group_canonical）产出 code/money/excluded；price_id 回填
     （apply_price_map）补 tms_name/price_id；price_id null 降级项 excluded=True
     （不录入，进对账报告），import:false 项（如税金）同样 excluded=True（仅对账）。
+
+    code 语义（2026-09-08 拍板）：标准费目码 / other（真其它费列归并）之外，
+    模板外费目为动态码（x+sha1(原名)[:8]，fee_map 按列名判定）——建档成功
+    （fee_bootstrap 自举）后当批独立发射；建档失败降级归并其它费（apply_price_map
+    保底，条目 excluded 金额并入其它费，不丢费）。note = 模板外费目原名。
     """
 
     model_config = ConfigDict(extra="ignore")
 
     channel: Literal["shou", "pay", "cost", "duo_get"] = Field(description="TMS 费用通道")
-    code: str = Field(description="标准费目码（other=未匹配长尾归并）")
-    tms_name: str | None = Field(None, description="价格表费目名（price map 回填）")
+    code: str = Field(description="费目码（标准码/other 真其它费/动态码 x+hex8 模板外费目）")
+    tms_name: str | None = Field(None, description="价格表费目名（price map/registry 回填）")
     price_id: int | None = Field(None, description="价格表 ID（price map 回填；null=待补降级）")
     money: Decimal = Field(default=Decimal("0"), description="金额（两位小数）")
-    note: str | None = Field(None, description="to_other 时 = 原费目名")
-    excluded: bool = Field(default=False, description="不录入项（import:false 或 price_id null），仅对账")
+    note: str | None = Field(None, description="模板外费目原名（建档命名/降级归并保底）")
+    excluded: bool = Field(default=False, description="不录入项（import:false 或 price_id null/金额已并入其它费），仅对账")
 
 
 class FeeReconcile(BaseModel):

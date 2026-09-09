@@ -10,7 +10,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from ..fees.fee_name_map import canonicalize_fee_name
+from ..fees.fee_name_map import (
+    canonicalize_fee_name,
+    is_dynamic_code,
+    other_alias_names,
+)
 from ..schema import (
     BillOrder,
     BillPeriod,
@@ -111,10 +115,13 @@ def group_canonical(
 
 
 def _fees_of(row: dict, template: dict) -> tuple[list[FeeItem], dict[str, FeeReconcile]]:
-    """行级费用聚合（T10/T14）：按 (通道, 标准费目码) 累加 → FeeItem + 通道对账。
+    """行级费用聚合（T10/T14）：按 (通道, 费目码) 累加 → FeeItem + 通道对账。
 
     - import:false 项（税金等）excluded=True（不录入仅对账，金额进排除项合计）；
-    - to_other（code=other）原名去重进 note（payload 拼「原名 ¥金额」列表）；
+    - code=other 仅剩真其它费列（列名=其它费近义，fee_map 按列名判定后其余
+      已转动态码独立费目，2026-09-08 拍板）；其它费近义名自身不写 note（冗余）；
+    - 独立费目（动态码）note 保留原名（建档命名用；建档失败时 apply 降级归并
+      其它费保底）；
     - 对账恒等：bill_total（账单锚点列「合计/小计」Σ，含排除项）− recorded_total
       = excluded_total，容差 0.01；超差 ok=False 进对账报告（只报告不拦截）。
     """
@@ -142,8 +149,16 @@ def _fees_of(row: dict, template: dict) -> tuple[list[FeeItem], dict[str, FeeRec
             )
             by_key[key] = fee
         fee.money += money
+        name = item.get("name")
         if code == "other":
-            _merge_fee_note(fee, item.get("name"))
+            # 真其它费列：近义名自身不写 note（避免 note="其它费"冗余）；
+            # 若多列不同近义名归并其它费则保留原名可读性
+            if name and name not in other_alias_names():
+                _merge_fee_note(fee, name)
+        elif is_dynamic_code(code) and fee.note is None and name:
+            # 模板外动态码：原名保留——建档命名 + 降级归并保底原料
+            # （标准码 note 恒 None——避免响应 note 字段意外扩展）
+            fee.note = str(name)
         if importable:
             rec.recorded_total += money
         else:
@@ -237,8 +252,8 @@ def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> Canoni
     的转换与 group_canonical 同属归集职责。映射口径见《TMS业务订单新增接口-
     逆推规范》§4；旧流程 order_data 的扁平键逐项对齐到标准字段；缺失项（必填
     bl_no/box_groups）登记 missing_fields。费用：order_data["shou"]（费目名 →
-    金额）经费目别名字典归一为 FeeItem（未命中字典 → other + 原名进 note），
-    金额为 0/空不生成记录。
+    金额）经费目别名字典归一为 FeeItem（未命中字典 → 动态码独立费目 + 原名进
+    note，2026-09-08 拍板），金额为 0/空不生成记录。
     """
     data = order.order_data or {}
     box_groups = [

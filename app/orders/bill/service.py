@@ -65,23 +65,30 @@ def _order_dedup_parts(order) -> tuple[str | None, str | None]:
 
 
 def _reconcile_order_fees(
-    orders: list,
+    orders: list, owner: str
 ) -> tuple[list[dict], list[dict], Counter[str], dict[str, dict]]:
     """逐单费用对账（T14）：price_id 回填 + 降级口径调整 + 恒等复算 + 通道统计。
 
     返回 (price_id null 降级清单, 超差单条目, to_other 原名计数, 通道统计累计)。
     费目自举（T25）已由调用方先执行（run_fee_bootstrap_async）：本批缺失费目码
     自动建档 → registry 登记 → 下方 apply_price_map 经 registry 命中回填
-    （当批正常录入；preview 零副作用只出 planned 清单不发请求）。"""
+    （当批正常录入；preview 零副作用只出 planned 清单不发请求）。
+    merged_to_other（动态码归并其它费保底）仅报告不调整对账——金额已并入桶
+    条目正常发射，仍在 recorded 口径内（2026-09-08 拍板）。
+    """
     dropped: list[dict] = []
     mismatch: list[dict] = []
     to_other_counts: Counter[str] = Counter()
     channel_stats: dict[str, dict] = {}
     for order in orders:
-        _, order_dropped = apply_price_map(order.fees)
+        _, order_dropped = apply_price_map(order.fees, owner)
         for entry in order_dropped:
             entry["bl_no"] = order.bl_no
             dropped.append(entry)
+            # merged_to_other（动态码降级归并其它费）：金额已并入桶条目正常发射，
+            # 仍在 recorded 口径内 → 不调整对账；其余降级项（未发射）recorded → excluded
+            if entry.get("reason") == "merged_to_other":
+                continue
             # 降级项调整对账口径：recorded → excluded
             rec = order.fee_reconcile.get(entry["channel"])
             if rec is not None:
@@ -147,8 +154,11 @@ def _build_fee_reports(
 ) -> dict:
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
-    - 先对全部订单 apply_price_map（回填 tms_name/price_id；price_id null 降级
-      excluded 并同步调整对账口径 recorded → excluded）；
+    - 先对全部订单 apply_price_map（回填 tms_name/price_id，均限当前 sk 的
+      owner 槽——订单费用只挂自己账号名下的档案，2026-09-08 费目隔离拍板；
+      price_id null 降级 excluded 并同步调整对账口径 recorded → excluded）；
+      merged_to_other（动态码归并其它费保底）仅报告不调整对账——金额已并入
+      桶条目正常发射，仍在 recorded 口径内；
     - 恒等校验：bill_total − recorded_total = excluded_total，容差 0.01；
       超差按单列条目（单号、通道、三口径值）；
     - 报告内容：price_id null 降级清单、unmapped skip 逐行（计数）、to_other 原名
@@ -159,7 +169,12 @@ def _build_fee_reports(
     """
     from app.core.config import settings
 
-    dropped, mismatch, to_other_counts, channel_stats = _reconcile_order_fees(orders)
+    from .fees.fee_bootstrap import _owner_for as _fee_owner_for
+
+    owner = _fee_owner_for(sk)
+    dropped, mismatch, to_other_counts, channel_stats = _reconcile_order_fees(
+        orders, owner
+    )
     threshold = settings.fee_to_other_warning_threshold
     to_other_warning = [
         {"name": name, "count": count}
@@ -583,20 +598,11 @@ async def build_result_async(
             billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
                 pending_legacy, create_order=create_order, sk=sk
             )
-    elif canonical_orders:
-        # B2（2026-09-07 用户拍板）：canonical 链 to_other 原名并入建档——订单照常
-        # other+note 提交（payload 零变更），费用管理侧自动补档（幂等：建一次后
-        # registry 跳过，下批继续 other+note 可接受）；preview 只出 planned 零副作用
-        from .fees.fee_bootstrap import (
-            collect_canonical_other_names,
-            run_billrow_fee_bootstrap_async,
-        )
-
-        other_names = collect_canonical_other_names(canonical_orders)
-        if other_names:
-            billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
-                [], create_order=create_order, sk=sk, extra_names=other_names
-            )
+    # canonical 链模板外费目建档（2026-09-08 拍板废除 B2 孤儿建档）：模板外列
+    # 经 fee_map 按列名判定为独立动态码费目，建档已并入 run_fee_bootstrap（上述
+    # _build_fee_reports 内、apply 回填之前执行）→ 建档成功当批独立发射；
+    # 建档失败降级归并其它费保底（apply_price_map 内处理）。无独立 B2 挂点。
+    # （原 B2 在 apply 之后建档，档案永远赶不上当批——费用永远挂其它费）
 
     # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
     master_data_report = None

@@ -27,6 +27,14 @@ _SECTION_NAMES = ("应收", "应付", "车辆成本", "公司成本", "成本")
 _ANCHOR_KEYWORDS = ("合计", "小计", "已收", "已付", "未收", "未付", "利润")
 # 备注类列名（column_range 家族费用列发现时排除，避免备注被当费用列）
 _NOTE_KEYWORDS = ("备注", "附言")
+# 业务列关键词（2026-09-07 审查 W3）：动态收录排除——数字型业务列（junyu 箱量/
+# 新式样件数毛重/手机号等）数据区含金额会被误收为 other+原名费用并经 B2 建档
+# 污染价格表；收录判据（_parse_with_template/read_data_rows）统一排除；命中但
+# 列名以「费」结尾的不判业务列（电话费/手机费是费用列名，2026-09-08 审查 W3
+# 误杀修复——业务列名如手机号/联系电话不以「费」结尾，不受影响）
+_NON_FEE_KEYWORDS = (
+    "箱量", "件数", "毛重", "净重", "重量", "体积", "手机", "电话", "联系方式",
+)
 
 
 def normalize_header(text: str) -> str:
@@ -110,6 +118,18 @@ def is_anchor_column(name: str) -> bool:
 def is_note_column(name: str) -> bool:
     """备注类列判定（column_range 家族费用列发现时排除）。"""
     return any(kw in name for kw in _NOTE_KEYWORDS)
+
+
+def is_non_fee_header(name: str) -> bool:
+    """业务列判定（收录排除）：列名含业务关键词且不以「费」结尾 → 非费用。
+
+    以「费」结尾豁免（2026-09-08 审查 W3）：电话费/手机费/重量费等是真实
+    费用列名而非业务列；业务列名（手机号/联系电话/箱量/毛重/件数）不以
+    「费」结尾，仍按关键词命中排除。
+    """
+    return bool(name) and not name.endswith("费") and any(
+        kw in name for kw in _NON_FEE_KEYWORDS
+    )
 
 
 def range_bounds(
