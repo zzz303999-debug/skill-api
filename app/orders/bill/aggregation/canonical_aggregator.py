@@ -47,20 +47,17 @@ _SINGLE_FIELDS: tuple[str, ...] = tuple(
 )
 
 
-def _box_type_of(row: dict) -> str | None:
-    """行内箱型：box_type_qty 归一化结果首项（非标箱型同此）。"""
-    items = row.get("box_type_qty")
-    if isinstance(items, list) and items and isinstance(items[0], dict):
-        return items[0].get("type")
-    return None
+def _boxes_of(row: dict) -> tuple[list[BoxGroup], Any]:
+    """行内箱聚合：逐项按箱型累加数量（保出现序）+ 首项箱型原文（container 用）。
 
-
-def _box_groups_of(row: dict) -> list[BoxGroup]:
-    """行内箱型聚合：box_type_qty 逐项按箱型累加数量（保出现序；一行可含多箱型）。"""
+    首项返回原 _box_type_of 语义：items[0].get("type") 原文不清洗/不判空。"""
     counts: dict[str, int] = {}
     order: list[str] = []
     items = row.get("box_type_qty")
+    first = None
     if isinstance(items, list):
+        if items and isinstance(items[0], dict):
+            first = items[0].get("type")
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -72,10 +69,10 @@ def _box_groups_of(row: dict) -> list[BoxGroup]:
                 counts[box_type] = 0
                 order.append(box_type)
             counts[box_type] += qty
-    return [BoxGroup(b_type=t, box_num=counts[t]) for t in order]
+    return [BoxGroup(b_type=t, box_num=counts[t]) for t in order], first
 
 
-def _container_of(row: dict) -> list[ContainerInfo]:
+def _container_of(row: dict, box_type: Any) -> list[ContainerInfo]:
     """行内箱信息：一行至多一条（箱号/箱型/封条号，两者皆空不建）。"""
     container_no = str(row.get("container_no") or "").strip()
     seal_no = str(row.get("seal_no") or "").strip()
@@ -84,7 +81,7 @@ def _container_of(row: dict) -> list[ContainerInfo]:
     return [
         ContainerInfo(
             container_no=container_no or None,
-            box_type=_box_type_of(row),
+            box_type=box_type,
             seal_no=seal_no or None,
         )
     ]
@@ -199,9 +196,10 @@ def _canonical_from_row(
         for name in _SINGLE_FIELDS
         if (value := row.get(name)) is not None and str(value).strip()
     }
-    bl_no = clean_group_key(values.get("bl_no"))
-    box_groups = _box_groups_of(row)
-    containers = _container_of(row)
+    bl_no_raw = values.pop("bl_no", None)
+    bl_no = clean_group_key(bl_no_raw)
+    box_groups, first_box_type = _boxes_of(row)
+    containers = _container_of(row, first_box_type)
     month = values.get("month") or _pick_month(row)
     fees, fee_reconcile = _fees_of(row, template)
 
@@ -212,7 +210,7 @@ def _canonical_from_row(
         values["plate_no"] = clean_plate_no(values["plate_no"])
 
     order = CanonicalOrder(
-        bl_no=bl_no or values.get("bl_no"),
+        bl_no=bl_no or bl_no_raw,
         box_groups=box_groups,
         containers=containers,
         month=month,
@@ -222,7 +220,7 @@ def _canonical_from_row(
         # 行序号（清洗浮点尾巴）：去重键的行序号兜底段（无箱号时）
         row_seq=clean_group_key(row.get("seq")),
         row_count=1,
-        **{k: v for k, v in values.items() if k != "bl_no"},
+        **values,
     )
     # 费用通道默认值（payload 发射用）：模板 fees.fee_defaults 烘焙进私有属性
     order._fee_defaults = (template.get("fees", {}) or {}).get("fee_defaults") or {}

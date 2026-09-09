@@ -52,6 +52,14 @@ class AggregationOutput:
     reconciliation: dict = field(default_factory=dict)
 
 
+def _row_text(row: BillRow) -> str:
+    """整行原文拼串（尾部锚点行探测用）。"""
+    return " ".join(
+        str(v) for v in row.model_dump().values()
+        if v is not None and str(v).strip()
+    )
+
+
 def _collect_anchors(
     rows: list[BillRow],
 ) -> tuple[
@@ -87,22 +95,12 @@ def _collect_anchors(
             }
             continue
         if "总箱型箱量" in seq and box_total is None:
-            parts = [
-                str(value)
-                for value in row.model_dump().values()
-                if value is not None and str(value).strip()
-            ]
-            matches = _BOX_ANCHOR_RE.findall(" ".join(parts))
+            matches = _BOX_ANCHOR_RE.findall(_row_text(row))
             if matches:
                 box_total = {box_type.upper(): int(count) for box_type, count in matches}
             continue
         if uppercase_total is None:
-            parts = [
-                str(value)
-                for value in row.model_dump().values()
-                if value is not None and str(value).strip()
-            ]
-            row_text = " ".join(parts)
+            row_text = _row_text(row)
             if "合计大写" in row_text:
                 uppercase_total = parse_cn_upper_amount(row_text)
     return data_rows, fee_total, box_total, uppercase_total
@@ -241,6 +239,20 @@ def _nonempty(value) -> str | None:
     return None
 
 
+def _text_values(row: BillRow, *attrs: str) -> dict[str, str]:
+    """非空文本字段收集（None/空白省略；键序 = attrs 顺序）。"""
+    return {
+        a: v
+        for a in attrs
+        if (v := _nonempty(getattr(row, a)))
+    }
+
+
+def _strip_float_tail(text: str) -> str:
+    """Excel 数字单元格浮点尾巴（9486.0 → 9486）。"""
+    return text.split(".")[0] if _FLOAT_TAIL_RE.match(text) else text
+
+
 def clean_plate_no(value) -> str | None:
     """车牌清洗：Excel 数字单元格浮点尾巴（9486.0 → 9486），其余原样。
 
@@ -250,9 +262,7 @@ def clean_plate_no(value) -> str | None:
     text = str(value).strip()
     if not text:
         return None
-    if _FLOAT_TAIL_RE.match(text):
-        return text.split(".")[0]
-    return text
+    return _strip_float_tail(text)
 
 
 def clean_group_key(value) -> str | None:
@@ -264,9 +274,7 @@ def clean_group_key(value) -> str | None:
     text = str(value).strip()
     if not text:
         return None
-    if _FLOAT_TAIL_RE.match(text):
-        return text.split(".")[0]
-    return text
+    return _strip_float_tail(text)
 
 
 def _box_entries(row: BillRow) -> tuple[list[dict], bool]:
@@ -364,17 +372,14 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
     """单行 → BillOrder（一行一票，2026-08-31 业务拍板；每行独立成单）。"""
     bl_no, bl_reason = clean_order_num(row.order_num1)
 
-    c_title = _nonempty(row.c_title)
-    c_name = _nonempty(row.c_name)
-    c_phone = _nonempty(row.c_phone)
-    c_sn = _nonempty(row.c_sn)
-    factory_name = _nonempty(row.factory_name)
-    factory_bei = _nonempty(row.factory_bei)
-    b_wharf = _nonempty(row.b_wharf)
-    b_get_address = _nonempty(row.b_get_address)
-    b_back_address = _nonempty(row.b_back_address)
-    d_name = _nonempty(row.d_name)
-    d_phone = _nonempty(row.d_phone)
+    # 非必填文本段统一收集（None/空白省略；下方按段挑选，键序 = 既有响应键序）
+    texts = _text_values(
+        row,
+        "c_title", "c_name", "c_phone", "c_sn", "factory_name",
+        "factory_bei", "b_wharf", "b_get_address", "b_back_address",
+        "d_name", "d_phone",
+    )
+    c_title = texts.get("c_title")  # 必填判空（missing_fields/BillOrder 共用）
     d_num = clean_plate_no(_nonempty(row.d_num))
     # 箱号取本行原文（去空白），行序号清洗浮点尾巴——二者供去重组合键使用
     raw_container = _nonempty(row.container_no)
@@ -423,31 +428,26 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
         "box": box_entries,
         "driver": [{"pay_yf_zj": 0.0}],
     }
-    for key, value in (
-        ("c_sn", c_sn),
-        ("c_name", c_name),
-        ("c_phone", c_phone),
-        ("factory_name", factory_name),
-        ("factory_bei", factory_bei),
-        ("b_wharf", b_wharf),
-        ("month", month),
-        ("c_note", c_note),
-    ):
-        if value:
-            order_data[key] = value
+    # 非必填空值省略（键序勿动：与既有响应键序一致）
+    order_data.update(
+        (k, texts[k])
+        for k in ("c_sn", "c_name", "c_phone", "factory_name", "factory_bei", "b_wharf")
+        if k in texts
+    )
+    if month:
+        order_data["month"] = month
+    if c_note:
+        order_data["c_note"] = c_note
     if shou:
         order_data["shou"] = shou
     driver = order_data["driver"][0]
     if b_date:
         driver["b_date"] = b_date
-    if b_get_address:
-        driver["b_get_address"] = b_get_address
-    if b_back_address:
-        driver["b_back_address"] = b_back_address
-    if d_name:
-        driver["d_name"] = d_name
-    if d_phone:
-        driver["d_phone"] = d_phone
+    driver.update(
+        (k, texts[k])
+        for k in ("b_get_address", "b_back_address", "d_name", "d_phone")
+        if k in texts
+    )
     if d_num:
         driver["d_num"] = d_num
     if shou:
