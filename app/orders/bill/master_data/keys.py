@@ -12,7 +12,6 @@ import re
 # 空白归一：全部空白（含全角空格/连续空白）一律删除——任何空白差异都不产生
 # 新计数键（防「锦煦 」/「锦　煦」/「锦 煦」算两个；宁合并不拆分）
 _WHITESPACE_RE = re.compile(r"\s+")
-_FULL_WIDTH_RE = re.compile(r"[\uFF01-\uFF5E]")
 
 
 def _to_half_width(text: str) -> str:

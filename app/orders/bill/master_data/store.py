@@ -159,6 +159,19 @@ class MasterDataStore:
             self._save()
             return dict(rec)
 
+    def is_final(self, kind: str, key: str, owner: str = DEFAULT_OWNER) -> bool:
+        """记录是否已达终态（M1c，2026-09-09）：本侧已建档（archive_id）/ TMS
+        已存在（exists_external）/ 本侧不可建档（skip_archive）→ 不再重试。"""
+        rec = self.get(kind, key, owner)
+        return bool(
+            rec
+            and (
+                rec.get("archive_id")
+                or rec.get("exists_external")
+                or rec.get("skip_archive")
+            )
+        )
+
     def snapshot(self) -> dict[str, dict[str, dict[str, dict[str, Any]]]]:
         """全量快照（报告 TOP 清单/测试断言用）；结构 kind → key → owner → rec。"""
         with self._lock:
