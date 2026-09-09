@@ -1,83 +1,25 @@
-"""统一响应外壳（{code, msg, data}）的路径注册与错误体构造。"""
+"""统一响应外壳（{code, msg, data}）的错误路径注册与错误体构造。
+
+成功路径外壳语义（200/204/409 判定）在各 orders 域 import_response.py（bill/
+manifest，2026-09-09 下沉）；本模块只服务 api 层：错误常发生在路由之前的中间
+件/异常处理器（401/413/422/429/500），彼时只有 URL 路径可用，故按路径注册表
+决定错误响应是否套统一外壳；未注册路径保持旧 {error:...} 结构不变。
+"""
 
 from __future__ import annotations
 
-# ---- 统一响应外壳（{code, msg, data}）----
-# 已适配路径全场景（成功/业务失败/请求错误）统一取 code/msg/data 三字段
-# （code 机器可读、msg 可直接展示的中文说明、data 为补充详情）：
-# - /orders/bill/import：账单录入（v2.2 起先行适配）
-# - /orders/manifest/import：舱单录入（2026-09-01 适配，成功 msg 为
-#   "请求成功"/"添加成功"/"204 具体原因"，错误场景 msg 为中文说明）
-# - /skills/tuoshu/extract：托书单文件抽取（2026-08-31 适配，data 内为
-#   {skill, version, result, meta, content?}，result 即原 data 抽取结果）
-# 其余接口保持 {error: {code, message, description, details}} 结构不变。
-# 新接口适配统一外壳：路径加入下方集合即可（错误响应由全局异常处理器套壳）。
+# 已适配统一外壳的路径（新接口适配：路径加入此集合即可）
 _UNIFIED_RESPONSE_PATHS = frozenset(
     {"/orders/bill/import", "/orders/manifest/import", "/skills/tuoshu/extract"}
 )
 
 
 def _use_unified_response(path: str) -> bool:
-    """该路径的错误响应是否使用统一外壳 {code, msg, data}。
-
-    去尾斜杠后匹配（审查修正 2026-08-27）：中间件/422 处理器先于路由执行，
-    尾斜杠请求（307 重定向前）若不归一，会回退旧 {error:...} 结构，
-    同接口两种错误结构并存。
-    """
+    """该路径错误响应是否使用统一外壳；去尾斜杠匹配（中间件先于路由执行，
+    尾斜杠请求 307 重定向前不归一，会回退旧结构致同接口两结构并存）。"""
     return path.rstrip("/") in _UNIFIED_RESPONSE_PATHS
 
 
 def _unified_error_body(code: str, msg: str, details: dict | None = None) -> dict:
-    """构造统一外壳错误体：code 机器可读、msg 可直接展示、details 并入 data。"""
+    """构造统一外壳错误体（code 机器可读、msg 可直接展示、details 并入 data）。"""
     return {"code": code, "msg": msg, "data": details or None}
-
-
-# ---- 导入类路由成功路径的外壳映射（bill/manifest 共享，2026-09 收口）----
-# 两路由同构（create 有新建 200 / 全失败 204、preview 200），差异仅在失败
-# 文案扫描口径，经参数化下沉至此；409（重复上传）含路由副作用留在各自路由。
-
-
-def create_mode_shell(summary: dict, *, codes: tuple[str, ...] = ()) -> tuple[str, str]:
-    """create 模式映射：有新建 → ("200","添加成功")；全部失败 → ("204", 拦截文案)。
-
-    codes 非空时按优先级只扫这些 error_code（账单口径：箱型白名单→提单号
-    缺失）；空时取首个非空 error_message（舱单口径）。文案均兜底「添加失败」。"""
-    if summary.get("created", 0) > 0:
-        return "200", "添加成功"
-    failed_details = summary.get("failed_details") or []
-    if codes:
-        failed_msg = next(
-            (
-                d.get("error_message")
-                for code in codes
-                for d in failed_details
-                if d.get("error_code") == code
-            ),
-            None,
-        )
-    else:
-        failed_msg = next(
-            (d.get("error_message") for d in failed_details if d.get("error_message")),
-            None,
-        )
-    return "204", failed_msg or "添加失败"
-
-
-def preview_mode_shell(
-    orders: list, *, codes: tuple[str, ...] | None = None
-) -> tuple[str, str]:
-    """preview 模式映射：("200", "请求成功")；整批被拒时 msg 为首个错误文案。
-
-    codes 非空时只认该错误码集合（账单认 unknown_box_type / missing_bl_no，
-    2026-09-04 文件级连坐对齐）；None 时任意错误（舱单口径）。code 保持 "200"
-    （preview 未产生下游动作，语义不冲突）。"""
-    msg = next(
-        (
-            (o.create_result or {}).get("error", {}).get("message")
-            for o in orders
-            if (o.create_result or {}).get("error")
-            and (codes is None or (o.create_result or {}).get("error", {}).get("code") in codes)
-        ),
-        None,
-    )
-    return "200", msg or "请求成功"

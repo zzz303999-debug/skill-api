@@ -6,10 +6,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 
-from app.api.response_shell import create_mode_shell, preview_mode_shell
 from app.api.uploads import _read_upload
 from app.core.errors import BadRequestError
 from app.orders.manifest import ManifestImportResponse, build_manifest_result_async
+from app.orders.manifest.import_response import manifest_import_outcome
 
 router = APIRouter()
 
@@ -65,10 +65,7 @@ async def import_manifest(
         create_order=create_order,
         sk=sk,
     )
-    # 统一响应外壳（code/msg/data）：映射逻辑收口 response_shell（bill/manifest
-    # 共享）；舱单口径：204/preview 文案取首个非空错误文案，无 error_code 优先级
-    if create_order and result.summary:
-        code, msg = create_mode_shell(result.summary)
-    else:
-        code, msg = preview_mode_shell(result.orders)
-    return ManifestImportResponse(code=code, msg=msg, data=result)
+    # 成功路径外壳语义（200/204/失败文案）由 orders 域判定（manifest/
+    # import_response.py，2026-09-09 与账单导入对称下沉）：路由只组装响应对象
+    outcome = manifest_import_outcome(result, create_order)
+    return ManifestImportResponse(code=outcome.code, msg=outcome.msg, data=result)
