@@ -170,6 +170,22 @@ class TestAiMapping:
         assert caught.value.code == "header_mapping_rejected"
         assert any("费用列" in r and "抽样" in r for r in caught.value.details["failure_reasons"])
 
+    async def test_fee_sample_accepts_thousands_text(self, tmp_path, monkeypatch):
+        """费用列千分位文本（1,234.50）不被抽样闸门误拒（P3 口径统一：闸门与真
+        解析共用 parser._to_money——千分位/货币符号可解析，弱版 float 会拒）。"""
+        path = tmp_path / "fee-thousands.xlsx"
+        path.write_bytes(
+            build_bill_bytes(
+                HETERO_HEADERS,
+                [{"A": 1, "B": "OOLU12345678", "C": "客户甲", "D": "40HQ", "E": "1,234.50"}],
+            )
+        )
+        _patch_ai(monkeypatch, AI_MAPPING_OK)
+        output = await service_module._parse_stage_async(path.name, path.read_bytes())
+        assert output.canonical_rows is not None and len(output.canonical_rows) == 1
+        fees = output.canonical_rows[0]["_fees"]
+        assert any(f["money"] == 1234.5 for f in fees)
+
     async def test_duplicate_field_mapping_rejected(self, tmp_path, monkeypatch):
         """同一标准字段被两列重复映射 → 400（闸门 b）。"""
         path = _write_hetero(tmp_path)

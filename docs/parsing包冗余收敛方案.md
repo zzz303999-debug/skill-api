@@ -79,7 +79,7 @@
 - 纯数字 `.0+` → 去尾 ↔ 原 _strip_float_tail 同分支 ✓
 - 其余文本 strip 后原样 ↔ 原实现 strip 后原样 ✓
 
-### P3 · ai_header `_to_money` 与 parser 口径统一（**待拍板：行为修正**）
+### P3 · ai_header `_to_money` 与 parser 口径统一（**A 案已实施 2026-09-09**）
 
 **现状**（实证）：ai_header._to_money（L242，13 行）docstring 自称"与
 parser._to_money 同口径"，实为弱版——只 `float(text.strip())`，不处理：
@@ -92,9 +92,11 @@ parser._to_money（L136，21 行复杂版）才是真解析口径（T9：合并�
 千分位/多段形态会被误判为"值不符"→ 保守方向误拒（AI 映射被拒走 400 或回退），
 不产生错数据但偶发误拒异构模板。
 
-**候选 A（推荐）**：ai_header._to_money 删除，调用点改 `parser._to_money`（parser
-无 ai_header 依赖 → 无环）；校验口径与真解析一致 → 误拒面收敛。**行为修正**
-（采纳判定边界变化：少拒合法映射），需测试适配（若有针对弱版的用例）。
+**候选 A（推荐）✅ 已实施**：ai_header._to_money 删除，调用点改 `parser._to_money`
+（ai_header → parser 单向，无环）；校验口径与真解析一致 → 误拒面收敛。
+**行为修正**（采纳判定边界变化：少拒合法映射——千分位/货币符号/多段文本费用列
+不再误拒），新增锁定用例 test_fee_sample_accepts_thousands_text（1,234.50
+文本抽样通过 + 收录金额 1234.5）；既有"全中文金额拒"用例回归不变。
 **候选 B**：保持双版，仅改 ai_header docstring 去掉"同口径"误导（纯文档）。
 **候选 C**：本轮不动，P4 拆 parser 时顺带收口。
 

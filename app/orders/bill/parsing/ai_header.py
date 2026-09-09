@@ -31,6 +31,7 @@ from ..schema import (
     MAX_HEADER_SCAN_ROWS,
 )
 from .columns import normalize_header
+from .parser import _to_money
 from .template_store import alias_dictionary, collect_fee_names
 
 log = get_logger(__name__)
@@ -235,20 +236,6 @@ def _normalize_fee_target(target: str) -> str | None:
     name = target.removeprefix("fee:").strip()
     name = HEADER_ALIASES.get(name, name)
     return name if name in collect_fee_names() else None
-
-
-def _to_money(value: Any) -> float | None:
-    """费用单元格转金额（与 parser._to_money 同口径，抽样校验用）。"""
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        try:
-            return float(value.strip())
-        except ValueError:
-            return None
-    return None
 
 
 def _sample_check(
