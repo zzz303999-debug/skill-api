@@ -912,8 +912,8 @@ class TestDynamicFallbackToOther:
         ——金额已并入桶条目正常发射仍在 recorded 内，恒等 diff=0 不破。"""
         from app.orders.bill.fees.fee_name_map import _dynamic_fee_code
         from app.orders.bill.fees.fee_registry import DEFAULT_OWNER
+        from app.orders.bill.fees.reconcile import reconcile_order_fees
         from app.orders.bill.schema import FeeReconcile
-        from app.orders.bill.service import _reconcile_order_fees
 
         price_cfg(_fee_map_yaml(None))
         get_fee_registry().register("other", 90002, "其它费")
@@ -929,7 +929,7 @@ class TestDynamicFallbackToOther:
                 excluded_total=Decimal("0"),
             )
         }
-        dropped, mismatch, _, stats = _reconcile_order_fees([order], DEFAULT_OWNER)
+        dropped, mismatch, _, stats = reconcile_order_fees([order], DEFAULT_OWNER)
         assert dropped and dropped[0]["reason"] == "merged_to_other"
         rec = order.fee_reconcile["shou"]
         assert rec.recorded_total == Decimal("16") and rec.excluded_total == Decimal("0")

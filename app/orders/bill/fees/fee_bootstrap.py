@@ -1,7 +1,8 @@
 """费目自举编排（T25）：缺失费目码自动建档 → registry 登记 → 当批回填。
 
 - 懒创建：只建「真实导入中命中且解析为 null」的费目码，不批量预建（防污染价格表）；
-- 时机：费用归一完成后、payload 构造前（service._build_fee_reports 挂点）；
+- 时机：费用归一完成后、payload 构造前（service 编排经 reconcile.build_fee_reports
+  挂点，2026-09-09 P2 下沉）；
 - **preview 零副作用**（与阶段三 preview 只读语义一致）：create_order=false 只输出
   「计划创建清单」（planned）不发建档请求；真实导入（create_order=true）才建档；
 - 幂等：registry 命中即复用，不重发建档；同批同码只调一次；建档失败 → 当批降级
