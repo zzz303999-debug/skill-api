@@ -43,14 +43,12 @@ from .columns import (
     normalize_header,
 )
 from .legacy_template import compute_legacy_fingerprint, load_template
-from .normalizers import NORMALIZER_REGISTRY, parse_year_hint, to_number
+from .normalizers import NORMALIZER_REGISTRY, to_number
+from .period import extract_bill_period, resolve_year_hint
 from .sheet_view import _SheetView  # noqa: F401（read_data_rows 等签名引用）
 
 # 支持的扩展名 → 期望的内容格式（与 _detect_format 的返回值对应）
 SUPPORTED_EXTS: dict[str, str] = {".xls": "xls", ".xlsx": "xlsx", ".xlsm": "xlsx"}
-
-# 结算区间日期，如「结算日期：2018-01-01-2018-12-31」
-_PERIOD_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
 
 # 内容格式 magic bytes：xlsx 为 zip（PK\x03\x04），xls 为 OLE2（D0 CF 11 E0）
 _XLSX_MAGIC = b"PK\x03\x04"
@@ -285,34 +283,6 @@ def read_data_rows(
     return rows, unmatched
 
 
-def _format_period_date(parts: tuple[str, str, str]) -> str | None:
-    """YYYY-M-D 三元组 → YYYY-MM-DD；月份/日期越界返回 None。"""
-    year, month, day = (int(p) for p in parts)
-    if not (1 <= month <= 12 and 1 <= day <= 31):
-        return None
-    return f"{year:04d}-{month:02d}-{day:02d}"
-
-
-def extract_bill_period(view: _SheetView, header_row: int) -> BillPeriod:
-    """从表头行之前的抬头区识别结算区间；识别不到返回空 BillPeriod（不报错）。"""
-    for row in range(1, header_row):
-        for col in range(1, view.ncols + 1):
-            raw = view.merged_cell(row, col)
-            if raw is None:
-                continue
-            text = str(raw)
-            if "结算" not in text:
-                continue
-            matches = _PERIOD_DATE_RE.findall(text)
-            if len(matches) < 2:
-                continue
-            start = _format_period_date(matches[0])
-            end = _format_period_date(matches[1])
-            if start and end:
-                return BillPeriod(start=start, end=end)
-    return BillPeriod()
-
-
 # 序号列数值判定（row_filter: seq_numeric 口径）
 _SEQ_NUMERIC_RE = re.compile(r"^\d+(\.\d+)?$")
 
@@ -321,34 +291,8 @@ _SEQ_NUMERIC_RE = re.compile(r"^\d+(\.\d+)?$")
 _BILLROW_FIELDS = set(BillRow.model_fields)
 
 
-def _settlement_text(view: _SheetView, header_row: int) -> str | None:
-    """表头上方抬头区含「结算」的文本（year_hint 解析用）。"""
-    parts: list[str] = []
-    for row in range(1, header_row):
-        for col in range(1, view.ncols + 1):
-            raw = view.merged_cell(row, col)
-            if raw is None:
-                continue
-            text = str(raw)
-            if "结算" in text:
-                parts.append(text)
-    return "\n".join(parts) if parts else None
-
-
-def _resolve_year_hint(
-    template: dict, filename: str, view: _SheetView, header_row: int
-) -> tuple[int, int] | None:
-    """按配置 year_source 顺序尝试年份提示：filename → 结算日期行。"""
-    sources = template.get("year_source") or []
-    settlement_text = _settlement_text(view, header_row)
-    for source in sources:
-        if source == "settlement_row":
-            hint = parse_year_hint("", settlement_text)
-        else:
-            hint = parse_year_hint(filename or "", None)
-        if hint is not None:
-            return hint
-    return None
+# 结算区间/年份提示识别已下沉 period.py（P4-S1）：extract_bill_period /
+# resolve_year_hint 自此模块引用
 
 
 def _apply_normalizer(
@@ -470,7 +414,7 @@ def _parse_with_template(
     stop_on = [str(s) for s in (template.get("data", {}) or {}).get("stop_on") or []]
     row_filter = (template.get("data", {}) or {}).get("row_filter", "seq_numeric")
     normalizers = template.get("normalizers", {}) or {}
-    year_hint = _resolve_year_hint(template, filename, view, header_row)
+    year_hint = resolve_year_hint(template, filename, view, header_row)
 
     is_billrow = set(columns) <= _BILLROW_FIELDS
     raw_rows: list[BillRow] = [] if is_billrow else []
