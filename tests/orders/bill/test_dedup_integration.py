@@ -169,7 +169,7 @@ class TestDedupSkE2E:
     def test_missing_bl_no_after_prior_success_not_409(self, monkeypatch):
         """缺号连坐 × 去重混合（2026-09-04 边界）：A 单已建成功，再传 A 原样 +
         缺号行 → A 保持 skipped 不动（不误报 409）、缺号行整批拒、code=204。"""
-        from app.orders.bill.service import _MISSING_BL_NO_MSG
+        from app.orders.bill.validation import MISSING_BL_NO_MSG
 
         calls = _patch_downstream(monkeypatch)
         first = _bill_file([_ROW1, _ROW2])
@@ -188,7 +188,7 @@ class TestDedupSkE2E:
             assert r.status_code == 200
             body = r.json()
             assert body["code"] == "204"  # skipped 与 failed 混合 → 不误报 409
-            assert body["msg"] == _MISSING_BL_NO_MSG
+            assert body["msg"] == MISSING_BL_NO_MSG
             summary = body["data"]["summary"]
             assert summary["total"] == 3
             assert summary["skipped"] == 1  # ROW1 已建单不动
@@ -215,7 +215,7 @@ class TestDedupSkE2E:
     def test_missing_bl_no_canonical_family_rejected(self, monkeypatch):
         """canonical 家族（junyu 表头）缺提单号行 → 文件级连坐同样生效
         （2026-09-04：此前连坐用例只覆盖 jinxin BillRow 链）。"""
-        from app.orders.bill.service import _MISSING_BL_NO_MSG
+        from app.orders.bill.validation import MISSING_BL_NO_MSG
 
         calls = _patch_downstream(monkeypatch)
         missing_row = {**dict(_ROW2), "E": None}
@@ -227,14 +227,14 @@ class TestDedupSkE2E:
             assert r.status_code == 200
             body = r.json()
             assert body["code"] == "200"
-            assert body["msg"] == _MISSING_BL_NO_MSG
+            assert body["msg"] == MISSING_BL_NO_MSG
 
             # create：整批拒、零下游
             r = _upload(client, "c.xlsx", file_bytes, create=True, sk="sk-A")
             assert r.status_code == 200
             body = r.json()
             assert body["code"] == "204"
-            assert body["msg"] == _MISSING_BL_NO_MSG
+            assert body["msg"] == MISSING_BL_NO_MSG
             summary = body["data"]["summary"]
             assert summary["created"] == 0 and summary["failed"] == 2
             # canonical_orders 侧单级 code 同样 missing_bl_no（双表示一致）

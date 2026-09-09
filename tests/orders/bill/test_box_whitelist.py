@@ -14,7 +14,7 @@ import pytest
 import app.core.box_whitelist as whitelist_module
 import app.core.http_client as http_client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder, build_result_async
-from app.orders.bill.service import _reject_unknown_box_types
+from app.orders.bill.validation import reject_unknown_box_types
 from helpers import FakeResponse, build_bill_bytes
 
 pytestmark = pytest.mark.asyncio
@@ -195,7 +195,7 @@ class TestRejectUnknownBoxTypes:
         """40GOH 单触发文件级拒绝：合法单也一并失败（消息报文件级清单）。"""
         good = _canonical_order("OOLU10000001", "40HQ")
         bad = _canonical_order("OOLU10000002", "40GOH")
-        rejected = _reject_unknown_box_types([good, bad])
+        rejected = reject_unknown_box_types([good, bad])
         assert rejected is True
         # 非法单：报自己的箱型 + 上游业务码（对齐 TMS 204 失败口径）
         assert bad.create_result["success"] is False
@@ -213,7 +213,7 @@ class TestRejectUnknownBoxTypes:
     async def test_all_known_pass(self):
         """全部箱型在白名单 → 不拒（create_result 保持 None 待提交）。"""
         orders = [_canonical_order("OOLU10000003", "40HQ"), _canonical_order("OOLU10000004", "40OT")]
-        rejected = _reject_unknown_box_types(orders)
+        rejected = reject_unknown_box_types(orders)
         assert rejected is False
         assert all(o.create_result is None for o in orders)
 
@@ -221,7 +221,7 @@ class TestRejectUnknownBoxTypes:
         """既有语义管线（BillOrder.order_data.box）同样参与文件级校验。"""
         legacy = BillOrder(order_num1="OOLU10000005", order_data={"box": [{"b_type": "40GOH"}]})
         good = _canonical_order("OOLU10000006", "40HQ")
-        _reject_unknown_box_types([legacy, good])
+        reject_unknown_box_types([legacy, good])
         assert legacy.create_result["error"]["code"] == "unknown_box_type"
         assert good.create_result["error"]["message"] == "文件含非法箱型：40GOH，请联系客服"
 
@@ -231,7 +231,7 @@ class TestRejectUnknownBoxTypes:
             _canonical_order("OOLU10000007", "40HQ"),
             _canonical_order("OOLU10000008", "大冷"),
         ]
-        rejected = _reject_unknown_box_types(orders)
+        rejected = reject_unknown_box_types(orders)
         assert rejected is False
         assert all(o.create_result is None for o in orders)
 
@@ -242,7 +242,7 @@ class TestRejectUnknownBoxTypes:
             _canonical_order("OOLU10000010", "20GOH"),
             _canonical_order("OOLU10000011", "40HQ"),
         ]
-        _reject_unknown_box_types(orders)
+        reject_unknown_box_types(orders)
         assert orders[2].create_result["error"]["message"] == "文件含非法箱型：40GOH、20GOH，请联系客服"
         assert orders[2].create_result["error"]["details"]["unknown_box_types"] == ["40GOH", "20GOH"]
         assert orders[2].create_result["error"]["details"]["upstream"]["code"] == "204"
@@ -252,7 +252,7 @@ class TestRejectUnknownBoxTypes:
         skipped = _canonical_order("OOLU10000012", "40GOH")
         skipped.create_result = {"success": True, "skipped": True, "sn": "EX1", "error": None}
         bad = _canonical_order("OOLU10000013", "40GOH")
-        _reject_unknown_box_types([skipped, bad])
+        reject_unknown_box_types([skipped, bad])
         assert skipped.create_result["skipped"] is True
         assert bad.create_result["error"]["code"] == "unknown_box_type"
 
