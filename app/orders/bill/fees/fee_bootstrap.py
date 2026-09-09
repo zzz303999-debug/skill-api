@@ -1,17 +1,17 @@
 """费目自举编排（T25）：缺失费目码自动建档 → registry 登记 → 当批回填。
 
 - 懒创建：只建「真实导入中命中且解析为 null」的费目码，不批量预建（防污染价格表）；
-- 时机：费用归一完成后、payload 构造前（service 编排经 reconcile.build_fee_reports
-  挂点，2026-09-09 P2 下沉）；
-- **preview 零副作用**（与阶段三 preview 只读语义一致）：create_order=false 只输出
-  「计划创建清单」（planned）不发建档请求；真实导入（create_order=true）才建档；
-- 幂等：registry 命中即复用，不重发建档；同批同码只调一次；建档失败 → 当批降级
-  skip_report（registry 不记失败，下批重试）；
-- 环境开关：fee_bootstrap.enabled 按环境配置（test=true，prod 默认 false——生产
-  价格表由运维管控，自举属越权行为需显式开启）；
-- 不阻塞：自举任何失败不得影响下单（沿用既有降级语义）；
-- 「其它费」特判：other 码建档额外发 is_other=1（逆推规范 §8.2 实证响应含 is_other
-  字段，语义待验证）——创建后需人工在 UI 确认归类。
+- preview 零副作用：create_order=false 只出 planned 计划清单（不发请求/查端点/
+  写 registry）；建档失败不阻塞下单（canonical 链降级 skip_report / billrow 直传
+  链仅报告，下批重试）；
+- 幂等：registry 命中复用、同批同码只调一次；TMS 已存在（204）→ exists_external
+  不再重试；registry 不记失败；
+- 环境开关：fee_bootstrap.enabled（test=true；prod 默认 false——生产价格表运维
+  管控需显式开启）；建档端点复用 master_data endpoints（endpoint_key 引用）；
+- 双链（canonical 按 fee.code / BillRow 按 shou 键名收集）共享建档提交段
+  _create_price_archives，billrow 链报告带 kind=billrow_named；
+- 「其它费」特判：other 码建档额外发 is_other=1（逆推规范 §8.2）——创建后需
+  人工在 UI 确认归类。
 """
 
 from __future__ import annotations
@@ -118,16 +118,30 @@ def build_price_form(code: str, tms_name: str) -> dict[str, str]:
     return form
 
 
+def _pending_orders(orders: list) -> list:
+    """未决单过滤（2026-08-26 防御）：跳过已标记单（去重 skipped/箱型拒绝）——
+    被拒单不参与费目自举（避免被拒文件仍触发 AddCarPrice 建档）。"""
+    return [o for o in orders if getattr(o, "create_result", None) is None]
+
+
+def _already_registered(code: str, owner: str) -> bool:
+    """幂等跳过判定：当前 owner 槽解析已有 price_id（显式段/registry）或 TMS
+    已存在（204，T27b）→ 不重发建档。"""
+    return (
+        resolve_price_id(code, owner) is not None
+        or get_fee_registry().exists_external(code, owner)
+    )
+
+
 def _collect_missing(orders, owner: str) -> list[tuple[str, str]]:
     """本批「解析为 null」的费目码：(code, tms_name)——均限当前 owner 槽。
 
-    判定：显式段+registry 两级解析后仍无 price_id、非 excluded（import:false
-    如税金不建档）、有 tms_name 可命名；同批同码只收集一次，保持出现顺序。
-    命名来源两级：标准码取 fee_price_map YAML 条目 tms_name；模板外动态码
-    （fee_map 按列名判定产出，2026-09-08 拍板）YAML 无条目 → 取 fee.note 原名。
+    判定：解析（显式段+registry）仍无 price_id、非 excluded（import:false 如
+    税金不建档）、有 tms_name 可命名；同批同码只收集一次，保持出现顺序。
+    命名来源两级：标准码取 YAML 条目 tms_name；模板外动态码（fee_map 按列名
+    判定产出，2026-09-08 拍板）YAML 无条目 → 取 fee.note 原名。
     """
     price_map = load_price_map()
-    registry = get_fee_registry()
     seen: set[str] = set()
     missing: list[tuple[str, str]] = []
     for order in orders:
@@ -135,16 +149,13 @@ def _collect_missing(orders, owner: str) -> list[tuple[str, str]]:
             code = str(fee.code or "")
             if fee.excluded or not code or code in seen:
                 continue
-            if resolve_price_id(code, owner) is not None:
-                continue  # 显式段/registry 已有 id（幂等：不重发建档）
-            if registry.exists_external(code, owner):
-                continue  # T27b：TMS 已存在（204 已存在，当前 owner）→ 不再重试
+            if _already_registered(code, owner):
+                continue
             entry = price_map.get(code) or {}
             tms_name = str(entry.get("tms_name") or "").strip()
             if not tms_name and is_dynamic_code(code):
-                # 模板外动态码（fee_map 按列名判定产出）：YAML 无条目 → 以订单原名
-                # 命名建档（聚合保留原名在 note）；标准码/其它费恒有 YAML 条目或
-                # 无条目时按旧语义不建档（不落此分支——避免 crane 类码意外复活）
+                # 模板外动态码：YAML 无条目 → 以订单原名命名建档（聚合保留原名在
+                # note）；标准码/其它费无条目时不落此分支（避免 crane 类码意外复活）
                 tms_name = str(fee.note or "").strip()
             if not tms_name:
                 log.warning("fee_bootstrap_no_tms_name", extra={"code": code})
@@ -162,38 +173,64 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
 
 
 async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:
-    """run_fee_bootstrap（2026-09 异步化改造后为生产唯一入口）：建档段走 create_archives_async，其余逻辑逐行一致。
+    """canonical 链费目自举（建档提交段 _create_price_archives 共享；2026-09
+    异步化改造后为生产唯一入口）。
 
-    **preview 零副作用**、registry 登记与降级语义不变；
-    建档异常不使订单丢失（防御分支同步保留）。
+    **preview 零副作用**：create_order=false 只出 planned 计划清单（不发请求/
+    查端点/写 registry）；建档失败不阻塞下单（降级 skip_report，下批重试）。
     """
     config = load_bootstrap_config()
     if not config.get("enabled"):
         return None
-    # 防御（2026-08-26）：跳过已标记的单（去重 skipped / 箱型拒绝），
-    # 被拒单不参与费目自举（避免被拒文件仍触发 AddCarPrice 建档）
-    orders = [o for o in orders if getattr(o, "create_result", None) is None]
+    orders = _pending_orders(orders)
     owner = _owner_for(sk)
     missing = _collect_missing(orders, owner)
     if not missing:
         return None
     if not create_order:
-        # preview：只报告计划创建清单，零副作用（不发请求、不查端点、不写 registry）
-        return {
-            "enabled": True,
-            "mode": "preview",
-            "planned": [
-                {"code": code, "tms_name": tms_name} for code, tms_name in missing
-            ],
-            "created": [],
-            "failed": [],
-            "exists_external": [],
-        }
+        return _report(
+            "preview", None,
+            planned=[{"code": code, "tms_name": tms_name} for code, tms_name in missing],
+            created=[], failed=[], exists_external=[],
+        )
+    return await _create_price_archives(missing, sk, owner)
+
+
+def _report(
+    mode: str,
+    kind: str | None,
+    planned: list,
+    created: list,
+    failed: list,
+    exists_external: list,
+) -> dict:
+    """自举报告结构组装（preview/create/防御共用）；billrow 链带 kind 键。"""
+    report: dict = {"enabled": True, "mode": mode}
+    if kind:
+        report["kind"] = kind
+    report.update(
+        planned=planned, created=created, failed=failed, exists_external=exists_external
+    )
+    return report
+
+
+async def _create_price_archives(
+    missing: list[tuple[str, str]], sk: str, owner: str, *, kind: str | None = None
+) -> dict[str, Any] | None:
+    """建档提交与结果整理（canonical/BillRow 双链共享；kind 仅 billrow 报告带键）。
+
+    结果三态：success → registry 登记 + created；duplicate（204 已存在，T27b）
+    → mark_exists_external（不重试自举，按 owner 隔离）；其余 → failed（registry
+    不记失败，下批重试）；建档层意外异常不使订单丢失（防御，当批全 failed）。
+    """
     url = bootstrap_endpoint()
     if url is None:
         log.warning(
             "fee_bootstrap_endpoint_missing",
-            extra={"endpoint_key": config.get("endpoint_key")},
+            extra={
+                "endpoint_key": str(load_bootstrap_config().get("endpoint_key") or ""),
+                **({"kind": kind} if kind else {}),
+            },
         )
         return None
 
@@ -210,14 +247,13 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
     except Exception as exc:  # 防御：建档层意外异常也不使订单丢失（降级语义）
         log.warning(
             "fee_bootstrap_create_unexpected",
-            extra={"error_type": exc.__class__.__name__},
+            extra={"error_type": exc.__class__.__name__, **({"kind": kind} if kind else {})},
         )
-        return {
-            "enabled": True,
-            "mode": "create",
-            "planned": [],
-            "created": [],
-            "failed": [
+        return _report(
+            "create", kind,
+            planned=[],
+            created=[],
+            failed=[
                 {
                     "code": code,
                     "tms_name": tms_name,
@@ -225,8 +261,8 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
                 }
                 for code, tms_name in missing
             ],
-            "exists_external": [],
-        }
+            exists_external=[],
+        )
     created: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     exists_external: list[dict[str, Any]] = []
@@ -237,21 +273,25 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
             get_fee_registry().register(code, price_id, tms_name, owner)
             log.info(
                 "fee_bootstrap_created",
-                extra={"code": code, "price_id": price_id},
+                extra={"code": code, "price_id": price_id, **({"kind": kind} if kind else {})},
             )
             created.append(
                 {"code": code, "tms_name": tms_name, "price_id": price_id}
             )
         elif outcome.get("duplicate"):
-            # T27b：费目在当前 owner 的 TMS 价格表已存在（204 已存在拒单）→
-            # 登记 exists_external 不再重试自举；price_id 无（无查询接口），
-            # 费用继续降级不录入仅对账（按 owner 隔离：A 账号撞名不影响 B）
+            # T27b：费目在当前 owner 的 TMS 价格表已存在（204 拒单）→ 登记
+            # exists_external 不再重试自举；price_id 无（无查询接口），费用继续
+            # 降级不录入仅对账（按 owner 隔离：A 账号撞名不影响 B）
             get_fee_registry().mark_exists_external(code, tms_name, owner)
             log.info(
                 "fee_bootstrap_exists_external",
                 # 键名不能用 message（logging LogRecord 保留字，extra 冲突直接
                 # KeyError 使 204 已存在场景整请求 500——2026-09-08 实弹发现）
-                extra={"code": code, "tms_message": (outcome.get("error") or {}).get("message")},
+                extra={
+                    "code": code,
+                    "tms_message": (outcome.get("error") or {}).get("message"),
+                    **({"kind": kind} if kind else {}),
+                },
             )
             exists_external.append(
                 {
@@ -268,14 +308,10 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
                     "reason": _failure_reason(outcome) or "未知错误",
                 }
             )
-    return {
-        "enabled": True,
-        "mode": "create",
-        "planned": [],
-        "created": created,
-        "failed": failed,
-        "exists_external": exists_external,
-    }
+    return _report(
+        "create", kind,
+        planned=[], created=created, failed=failed, exists_external=exists_external,
+    )
 
 
 def _filter_missing_names(names, owner: str) -> list[tuple[str, str]]:
@@ -284,21 +320,16 @@ def _filter_missing_names(names, owner: str) -> list[tuple[str, str]]:
     from .fee_name_map import fee_alias_dictionary
 
     alias = fee_alias_dictionary()
-    registry = get_fee_registry()
     seen: set[str] = set()
     missing: list[tuple[str, str]] = []
     for raw in names:
         name = str(raw).strip()
         if not name or name in seen:
             continue
-        # 字典码与动态码统一幂等判定：显式段/registry 已有 id → 跳过；
-        # TMS 已存在（204，当前 owner）→ 跳过不重试（动态码同规则）
-        code = alias.get(name)
-        eff_code = code or _dynamic_fee_code(name)
-        if resolve_price_id(eff_code, owner) is not None:
-            continue  # 档案已建档（幂等：不重发）
-        if registry.exists_external(eff_code, owner):
-            continue  # T27b：TMS 已存在（204 已存在，当前 owner）→ 不再重试自举
+        # 字典码与动态码统一幂等判定（同 owner 槽）
+        eff_code = alias.get(name) or _dynamic_fee_code(name)
+        if _already_registered(eff_code, owner):
+            continue
         seen.add(name)
         missing.append((eff_code, name))
     return missing
@@ -307,9 +338,7 @@ def _filter_missing_names(names, owner: str) -> list[tuple[str, str]]:
 def _collect_billrow_missing(orders, owner: str) -> list[tuple[str, str]]:
     """BillRow 链（订单费用为直传中文名）建档候选：(code, tms_name)。
 
-    判定：别名字典（中文→码）命中且已有 price_id（显式段/registry 两级解析，
-    当前 owner）→ 档案已建档，跳过（幂等）；字典未命中（模板外新名，如 加班费）
-    或命中但无 price_id → 建档候选（code=字典码或动态码，tms_name=原名）。
+    判定：名字 → 字典码（未命中 → 动态码，模板外新名如 加班费），已建档跳过；
     同批同名只收集一次，保持出现顺序。
     """
     names: list[str] = []
@@ -322,31 +351,24 @@ def _collect_billrow_missing(orders, owner: str) -> list[tuple[str, str]]:
 async def run_billrow_fee_bootstrap_async(
     orders, *, create_order: bool, sk: str = "", extra_names: list[str] | None = None
 ) -> dict[str, Any] | None:
-    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板；2026-09
-    异步化改造后建档段走 create_archives_async）。
+    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 拍板；建档提交段共享）。
 
-    背景：jinxin 链费用以中文名直传 AddWork，订单侧可录（TMS 不校验档案），
-    但 TMS「费用管理」只有 AddCarPrice 建档过的费目——模板外新费目（加班费/报关费/
-    查验费等）订单有、费用管理无档案 → 本函数在 create 时自动建档同名档案。
-
-    - 候选 = 本批订单 shou 键名中「无已建档档案」者（模板 6 名已建档 → 跳过）；
-      extra_names 为外部直传候选（canonical 链动态码建档已并入 run_fee_bootstrap，
-      2026-09-08 拍板；本参数保留供直调/未来链路）
-    - **preview 零副作用**：create_order=false 只输出 planned 计划清单，不发请求；
-    - 建档失败/端点未配：**不阻塞下单**（直传不依赖 price_id），仅进报告，下批重试
-      ——与 canonical 链（建档失败降级 skip_report）不同：此处档案是费用管理侧
-      补齐，订单费用照常按名直传；
-    - 幂等：registry 登记后复用；同批同名只调一次；TMS 已存在（204）→ exists_external。
+    背景：jinxin 链费用以中文名直传 AddWork（订单可录），但 TMS「费用管理」只有
+    AddCarPrice 建档过的费目——模板外新费目（加班费/报关费等）订单有、费用管理
+    无档案 → create 时自动建档同名档案。与 canonical 链差异：建档失败/端点未配
+    **不阻塞下单**（直传不依赖 price_id，仅进报告，下批重试）。
+    - 候选 = 本批订单 shou 键名中无已建档档案者；extra_names 为外部直传候选
+      （保留供直调/未来链路），与 BillRow 候选同名去重（BillRow 链优先保序）；
+    - preview 零副作用；幂等：registry 登记复用 / 同批同名只调一次 / TMS 已存在
+      （204）→ exists_external。
     """
     config = load_bootstrap_config()
     if not config.get("enabled"):
         return None
-    orders = [o for o in orders if getattr(o, "create_result", None) is None]
+    orders = _pending_orders(orders)
     owner = _owner_for(sk)
     missing = _collect_billrow_missing(orders, owner)
     if extra_names:
-        # B2（2026-09-07）：canonical 链 to_other 原名并入——同款幂等判定
-        # （同 owner 槽），与 BillRow 候选同名去重（BillRow 链优先保序）
         have = {name for _, name in missing}
         missing.extend(
             pair for pair in _filter_missing_names(extra_names, owner) if pair[1] not in have
@@ -354,99 +376,9 @@ async def run_billrow_fee_bootstrap_async(
     if not missing:
         return None
     if not create_order:
-        return {
-            "enabled": True,
-            "mode": "preview",
-            "kind": "billrow_named",
-            "planned": [
-                {"code": code, "tms_name": tms_name} for code, tms_name in missing
-            ],
-            "created": [],
-            "failed": [],
-            "exists_external": [],
-        }
-    url = bootstrap_endpoint()
-    if url is None:
-        log.warning(
-            "fee_bootstrap_endpoint_missing",
-            extra={"endpoint_key": config.get("endpoint_key"), "kind": "billrow_named"},
+        return _report(
+            "preview", "billrow_named",
+            planned=[{"code": code, "tms_name": tms_name} for code, tms_name in missing],
+            created=[], failed=[], exists_external=[],
         )
-        return None
-
-    from ..master_data.client import create_archives_async
-    from ..master_data.config import KIND_PRICE
-
-    forms = {
-        KIND_PRICE: {
-            code: build_price_form(code, tms_name) for code, tms_name in missing
-        }
-    }
-    try:
-        results = await create_archives_async(forms, sk)
-    except Exception as exc:  # 防御：建档层意外异常也不使订单丢失（降级语义）
-        log.warning(
-            "fee_bootstrap_create_unexpected",
-            extra={"error_type": exc.__class__.__name__, "kind": "billrow_named"},
-        )
-        return {
-            "enabled": True,
-            "mode": "create",
-            "kind": "billrow_named",
-            "planned": [],
-            "created": [],
-            "failed": [
-                {
-                    "code": code,
-                    "tms_name": tms_name,
-                    "reason": f"unexpected error: {exc.__class__.__name__}",
-                }
-                for code, tms_name in missing
-            ],
-            "exists_external": [],
-        }
-    created: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
-    exists_external: list[dict[str, Any]] = []
-    for code, tms_name in missing:
-        outcome = (results.get(KIND_PRICE) or {}).get(code) or {}
-        if outcome.get("success"):
-            price_id = int(outcome["archive_id"])
-            get_fee_registry().register(code, price_id, tms_name, owner)
-            log.info(
-                "fee_bootstrap_created",
-                extra={"code": code, "price_id": price_id, "kind": "billrow_named"},
-            )
-            created.append(
-                {"code": code, "tms_name": tms_name, "price_id": price_id}
-            )
-        elif outcome.get("duplicate"):
-            get_fee_registry().mark_exists_external(code, tms_name, owner)
-            log.info(
-                "fee_bootstrap_exists_external",
-                # 同上：tms_message 代替保留键 message（2026-09-08 实弹发现）
-                extra={"code": code, "tms_message": (outcome.get("error") or {}).get("message")},
-            )
-            exists_external.append(
-                {
-                    "code": code,
-                    "tms_name": tms_name,
-                    "message": (outcome.get("error") or {}).get("message") or "已存在",
-                }
-            )
-        else:
-            failed.append(
-                {
-                    "code": code,
-                    "tms_name": tms_name,
-                    "reason": _failure_reason(outcome) or "未知错误",
-                }
-            )
-    return {
-        "enabled": True,
-        "mode": "create",
-        "kind": "billrow_named",
-        "planned": [],
-        "created": created,
-        "failed": failed,
-        "exists_external": exists_external,
-    }
+    return await _create_price_archives(missing, sk, owner, kind="billrow_named")

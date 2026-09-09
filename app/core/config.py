@@ -93,8 +93,10 @@ class Settings(BaseSettings):
     health_probe_enabled: bool = True
     health_probe_timeout_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
 
-    # 存储
+    # 存储与配置目录
     storage_dir: Path = Path("./storage")
+    # YAML 配置目录（fee_price_map.*/fee_alias_dictionary 等）
+    config_dir: Path = Path("./config")
     # 审计场景建议调大（如 720 = 30 天），保证留痕可追溯
     storage_keep_hours: int = 24
 
@@ -102,6 +104,13 @@ class Settings(BaseSettings):
     @classmethod
     def _resolve_storage_dir(cls, value: Path) -> Path:
         """相对路径统一基于项目根目录解析，避免依赖进程 CWD（容器内 CWD 可能变化）。"""
+        path = Path(value)
+        return path if path.is_absolute() else _PROJECT_ROOT / path
+
+    @field_validator("config_dir")
+    @classmethod
+    def _resolve_config_dir(cls, value: Path) -> Path:
+        """相对路径统一基于项目根目录解析（与 storage_dir 同规则）。"""
         path = Path(value)
         return path if path.is_absolute() else _PROJECT_ROOT / path
 

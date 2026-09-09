@@ -18,16 +18,13 @@ price_id → 独立发射）；建档失败降级归并 other（apply_price_map 
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
 
 import yaml
 
+from app.core.config import settings
 from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
-
-# 全局费目别名字典目录（config/，与 templates/ 字段别名字典分离）
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
 
 # unmapped_fee 策略取值
 UNMAPPED_TO_OTHER = "to_other"
@@ -73,7 +70,7 @@ def fee_alias_dictionary() -> dict[str, str]:
     global _ALIAS_CACHE
     if _ALIAS_CACHE is not None:
         return _ALIAS_CACHE
-    path = _CONFIG_DIR / "fee_alias_dictionary.yaml"
+    path = settings.config_dir / "fee_alias_dictionary.yaml"
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):

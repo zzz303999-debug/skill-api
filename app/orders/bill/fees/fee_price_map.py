@@ -31,8 +31,6 @@ from .fee_registry import DEFAULT_OWNER, get_fee_registry
 
 log = get_logger(__name__)
 
-_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent / "config"
-
 # 非费目条目的顶层段（不进条目缓存）：fee_bootstrap 为自举配置（另由
 # fee_bootstrap.load_bootstrap_config 自读），owner_price_ids 为 per-owner 显式 id 段
 _RESERVED_SECTIONS = {"fee_bootstrap", "owner_price_ids"}
@@ -43,7 +41,7 @@ _OWNER_PRICE_IDS: dict[str, dict[str, int]] | None = None
 
 def price_map_path() -> Path:
     """按环境解析映射表路径：config/fee_price_map.{settings.env}.yaml。"""
-    return _CONFIG_DIR / f"fee_price_map.{settings.env}.yaml"
+    return settings.config_dir / f"fee_price_map.{settings.env}.yaml"
 
 
 def load_price_map() -> dict[str, dict]:
