@@ -99,8 +99,10 @@ class TestOverview:
         assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", meta["parsed_at"])
 
     async def test_json_contract(self):
-        """model_dump(mode='json') 顶层与 orders[] 键对齐文档 §3.3/§3.4（新增 canonical_orders）。"""
-        dumped = (await build_real_result()).model_dump(mode="json")
+        """model_dump(mode='json') 顶层与 orders[] 键对齐文档 §3.3/§3.4（R2 起
+        BillRow 源只回 orders，canonical_orders 空数组）。"""
+        result = await build_real_result()
+        dumped = result.model_dump(mode="json")
         assert set(dumped) == {
             "file",
             "bill_period",
@@ -126,17 +128,20 @@ class TestOverview:
             "create_result",
         }
         assert all(o["create_result"] is None for o in dumped["orders"])
-        # TMS 通道：金科信经转换得到标准订单（通寰家族由 jinxin_v1 覆盖）
-        assert len(dumped["canonical_orders"]) == REAL_ORDER_COUNT
-        first = dumped["canonical_orders"][0]
-        assert first["bl_no"] == "SHSB52129400"
-        assert first["source_template"] == "jinxin_v1"
-        assert first["box_groups"] and first["box_groups"][0]["b_type"]
-        assert first["missing_fields"] == []
+        # R2（2026-09-09）：BillRow 源响应只回 orders——canonical_orders 空数组
+        # （to_canonical 副本仅内部建档管线用）；转换正确性下方直调锁定（同源输入）
+        assert dumped["canonical_orders"] == []
+        from app.orders.bill import to_canonical
+
+        canon = to_canonical(result.orders[0])
+        assert canon.bl_no == "SHSB52129400"
+        assert canon.source_template == "jinxin_v1"
+        assert canon.box_groups and canon.box_groups[0].b_type
+        assert canon.missing_fields == []
         # 客户字段（2026-08-13 实证）：c_title=客户名称（旧链路 AddWork 实证 dump），
         # c_name=客户联系人；金科信经转换后同样适用（表单键断言见 test_payload）
-        assert first["customer_name"]
-        assert first["unmapped_note"] is None  # 客户字段已有 c_title 落点，无未映射字段
+        assert canon.customer_name
+        assert canon.unmapped_note is None  # 客户字段已有 c_title 落点，无未映射字段
 
 
 @pytest.mark.skipif(

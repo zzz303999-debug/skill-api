@@ -165,8 +165,9 @@ class BillParseResult(BaseModel):
     """账单导入的解析结果响应（对齐接口文档 3.3 响应总览）。
 
     orders：既有流程语义归集（BillOrder）；canonical_orders：标准字段源归集
-    （CanonicalOrder）。解析输入层两路互斥；输出层填充规则见 service 编排
-    （BillRow 源会 to_canonical 双份表达，收敛方向见 docs/service.py拆分计划 R2）。
+    （CanonicalOrder）。响应只回实际下单那份（R2，2026-09-09）：BillRow 源
+    只回 orders（to_canonical 副本仅内部建档管线用）；标准字段源只回
+    canonical_orders。
     """
 
     model_config = ConfigDict(extra="ignore")

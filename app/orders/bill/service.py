@@ -3,7 +3,8 @@
 双管线（模板识别后自动分流，见 parser.ParseOutput）：
 - 既有流程语义（columns 目标 = BillRow 字段）：group_orders → BillOrder → orders；
   create_order=True 时走既有双通道下单（client.create_orders，行为语义不变）；
-  同时经 to_canonical 转换为 CanonicalOrder 供 TMS 通道（无标准字段模板的家族由此覆盖）。
+  to_canonical 副本仅供内部建档管线（master_data pending）输入，响应不回传
+  （R2，2026-09-09——前端只读 orders）。
 - 标准字段语义（columns 目标 = CanonicalOrder 字段）：group_canonical →
   CanonicalOrder → canonical_orders；create_order=True 时走 TMS form-data 通道
   （payload/client，见 T7）；费用 price_id 回填（T12）+ 费用对账报告（T14）
@@ -549,6 +550,10 @@ async def build_result_async(
     if output.new_template is not None:
         meta["l3_template"] = output.new_template
 
+    # R2（2026-09-09 用户拍板）：响应只回实际下单那份——BillRow 源前端读
+    # orders（canonical_orders 置空；to_canonical 副本仅内部建档管线用，避免
+    # 双份不同步与 payload 翻倍）；标准字段源 orders 恒空、canonical_orders 全量
+    response_canonical = canonical_orders if not orders else []
     return BillParseResult(
         file=filename,
         bill_period=bill_period,
@@ -556,7 +561,7 @@ async def build_result_async(
         order_count=len(canonical_orders) or len(orders),
         create_order=create_order,
         orders=orders,
-        canonical_orders=canonical_orders,
+        canonical_orders=response_canonical,
         summary=summary,
         upstream=upstream,
         meta=meta,
