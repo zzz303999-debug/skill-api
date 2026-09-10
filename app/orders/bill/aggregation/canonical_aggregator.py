@@ -103,7 +103,7 @@ def group_canonical(
 ) -> list[CanonicalOrder]:
     """标准字段行一行一票 → CanonicalOrder 列表（TMS 通道）。
 
-    2026-08-31 业务拍板：每条数据行独立成单，不再按模板 group_key 归集
+    业务拍板：每条数据行独立成单，不再按模板 group_key 归集
     （配置废弃不再读取）；TMS 允许同提单号多条订单。每行的箱信息聚合为
     containers/box_groups、费用为行级金额；必填（bl_no/box_groups）缺失
     登记 missing_fields，不阻塞。输出保持账单行序。
@@ -116,7 +116,7 @@ def _fees_of(row: dict, template: dict) -> tuple[list[FeeItem], dict[str, FeeRec
 
     - import:false 项（税金等）excluded=True（不录入仅对账，金额进排除项合计）；
     - code=other 仅剩真其它费列（列名=其它费近义，fee_map 按列名判定后其余
-      已转动态码独立费目，2026-09-08 拍板）；其它费近义名自身不写 note（冗余）；
+      已转动态码独立费目，拍板）；其它费近义名自身不写 note（冗余）；
     - 独立费目（动态码）note 保留原名（建档命名用；建档失败时 apply 降级归并
       其它费保底）；
     - 对账恒等：bill_total（账单锚点列「合计/小计」Σ，含排除项）− recorded_total
@@ -205,7 +205,7 @@ def _canonical_from_row(
 
     # 车牌清洗（Excel 数字单元格浮点尾巴 9486.0 → 9486，与旧链路同口径）；
     # 一行一票后单行至多一个车牌，历史「多车牌并入 remark」段不可能出现
-    # （2026-08-26 多车牌防丢失口径由去重键提单号+箱号承接）
+    # （多车牌防丢失口径由去重键提单号+箱号承接）
     if values.get("plate_no"):
         values["plate_no"] = clean_plate_no(values["plate_no"])
 
@@ -246,12 +246,12 @@ def _first_nonempty(d: dict[str, Any], *keys: str) -> Any | None:
 def to_canonical(order: BillOrder, source_template: str = "jinxin_v1") -> CanonicalOrder:
     """BillOrder → CanonicalOrder 转换（既有流程零感知；内置模板家族的 TMS 通道入口）。
 
-    2026-09 由 schema 迁入归集簇（schema 回归纯契约）：旧链路订单 → 标准订单
+    由 schema 迁入归集簇（schema 回归纯契约）：旧链路订单 → 标准订单
     的转换与 group_canonical 同属归集职责。映射口径见《TMS业务订单新增接口-
     逆推规范》§4；旧流程 order_data 的扁平键逐项对齐到标准字段；缺失项（必填
     bl_no/box_groups）登记 missing_fields。费用：order_data["shou"]（费目名 →
     金额）经费目别名字典归一为 FeeItem（未命中字典 → 动态码独立费目 + 原名进
-    note，2026-09-08 拍板），金额为 0/空不生成记录。
+    note，拍板），金额为 0/空不生成记录。
     """
     data = order.order_data or {}
     box_groups = [

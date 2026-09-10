@@ -43,7 +43,7 @@ pytestmark = pytest.mark.asyncio
 BIZ_HEADERS = ["序号", "客户名称", "门点", "司机", "车牌号", "提单号", "箱型箱量", "司机手机"]
 # 费用列与区块分界合计列（ranges：区块 → 末尾合计列名；数据行合计列留空）
 FEE_HEADERS = ["运费", "高速费", "待时费", "应收合计", "油费", "应付合计", "打劫费", "车辆成本合计"]
-# 高速费列未映射（unmapped to_other）→ 按列名判定为独立费目（2026-09-08 拍板）：
+# 高速费列未映射（unmapped to_other）→ 按列名判定为独立费目（拍板）：
 # 动态码（x+sha1 前 8），建档后独立发射，不再并进其它费
 HIGHWAY_CODE = _dynamic_fee_code("高速费")
 
@@ -179,7 +179,7 @@ class TestFourCategoryAggregation:
 
     async def test_financial_information_channels(self, mixed_bill, tmp_path):
         """财务信息：费用按通道归集（应收→shou/应付→pay/车辆成本→cost），
-        一行一票各行独立，未映射费目按名独立（动态码，2026-09-08 拍板）。"""
+        一行一票各行独立，未映射费目按名独立（动态码，拍板）。"""
         _, orders = parse_mixed(mixed_bill, tmp_path)
         fees = {(f.channel, f.code): f for f in orders[0].fees}
         # 首行应收：运费 100；待时费 50；高速费未映射 → 动态码独立费目
@@ -237,7 +237,7 @@ class TestFieldMapping:
 
     async def test_four_channel_form_mapping(self, mixed_bill, tmp_path, monkeypatch):
         """Excel 费用列 → FeeItem → form 键（shou/pay/cost 通道 + 合计回写）。"""
-        # 注入 waiting 无 id（2026-09-01 真实表已补值）：模拟自举前状态，
+        # 注入 waiting 无 id（真实表已补值）：模拟自举前状态，
         # 预登记待建费目（模拟自举成功后），保证四通道全部可发射
         inject_price_map(monkeypatch, {"waiting": None})
         reg = get_fee_registry()
@@ -499,7 +499,7 @@ class TestE2EMock:
     ):
         # 恢复真实 create_archives（conftest 全局 mock 是零网络兜底），httpx 层统一 mock
         monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)
-        # 注入 waiting 无 id：触发费目自举建档（2026-09-01 真实表已补值）；
+        # 注入 waiting 无 id：触发费目自举建档（真实表已补值）；
         # 高速费（动态码）恒无 id → 自举建档
         inject_price_map(monkeypatch, {"waiting": None})
         state = {"addwork": 0, "price": 0, "archives": []}
@@ -530,7 +530,7 @@ class TestE2EMock:
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
 
         # 第一次上传：四类链路全部触发（一行一票：两行 → 两单）。
-        # 同号无箱号行按行序号兜底成键（#1/#2），两行各自录入（2026-08-31 拍板）
+        # 同号无箱号行按行序号兜底成键（#1/#2），两行各自录入（拍板）
         result = await build_result_async(filename="mixed.xlsx", file_bytes=mixed_bill, create_order=True, sk="sk")
         assert result.summary == {
             "total": 2,
@@ -563,7 +563,7 @@ class TestE2EMock:
         assert form["cost[0][打劫费][money]"] == "30.00"
         assert form["driver[0][get_ys_zj]"] == "156.00"
         # 建档请求体：客户/工厂（依赖前置 client_id）/车辆/司机（带 truck_id）；
-        # 高速费动态码建档成功 → 当批独立发射（2026-09-08：废除 B2 孤儿建档，
+        # 高速费动态码建档成功 → 当批独立发射（废除 B2 孤儿建档，
         # 不再并其它费；建档失败才降级归并其它费保底）
         archive_kinds = [a[0] for a in state["archives"]]
         assert archive_kinds == ["price", "price", "client", "factory", "truck", "driver"]
@@ -598,7 +598,7 @@ class TestE2EMock:
     async def test_two_sk_dynamic_fee_independent_emission(
         self, mixed_bill, tmp_path, md_config, monkeypatch, _no_real_archive_calls
     ):
-        """接口级回归（2026-09-08 多用户拍板语义）：同一文件两个 sk 依次 create，
+        """接口级回归（多用户拍板语义）：同一文件两个 sk 依次 create，
         模板外费目（高速费）各自建档（owner 槽隔离）→ 各自独立发射互不并入其它费：
         registry 双槽各记各的 price_id、订单表单各挂各的档案、reports 各自 created。"""
         monkeypatch.setattr(md_client_module, "create_archives_async", _no_real_archive_calls)

@@ -1,4 +1,4 @@
-"""结算区间与年份提示识别（2026-09-09 P4-S1 自 parser.py 拆出）。
+"""结算区间与年份提示识别（P4-S1 自 parser.py 拆出）。
 
 抬头区「结算」文本 → 两个 YYYY-MM-DD（extract_bill_period，识别不到返回空
 BillPeriod 不报错）；year_source 配置 → 年份提示（resolve_year_hint，日期归一
@@ -31,7 +31,7 @@ def extract_bill_period(view: _SheetView, header_row: int) -> BillPeriod:
             if "结算" not in text:
                 continue
             # 结算日期形如「2018-01-01-2018-12-31」；YYYY-MM-DD 正则单源
-            # （normalizers._SETTLEMENT_RE，2026-09-09 收敛重复定义）
+            # （normalizers._SETTLEMENT_RE，收敛重复定义）
             matches = _SETTLEMENT_RE.findall(text)
             if len(matches) < 2:
                 continue

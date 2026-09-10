@@ -21,7 +21,7 @@ def _llm_unavailable_for_bill(monkeypatch):
 
     指纹未命中的构造账单会触发 AI 流程；生产两段式编排（_parse_stage_async）
     的 achat_json 抛 LLMError → 回退精确匹配（同步 parse_bill 为纯 CPU 基准，
-    不含 LLM，2026-09 第二波同步链清理）。需要真实 AI 映射的用例
+    不含 LLM）。需要真实 AI 映射的用例
     （test_template.py / test_ai_header_async.py）自行 monkeypatch 覆盖。
     """
 

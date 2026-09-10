@@ -1,6 +1,6 @@
 """旧版账单模板：内置模板定义 + 历史固化 JSON 的回退读取（读取兼容）。
 
-层级关系（2026-09 命名统一）：本模块是**旧版**单模板持久化
+层级关系（命名统一）：本模块是**旧版**单模板持久化
 （内置模板 + 历史固化 JSON，sha1-16 指纹 = compute_legacy_fingerprint）；
 现役 YAML 模板库与三级识别在 template_store.py（md5-8 指纹）——
 本模块仅作为模板库未命中时的回退读取，两套库键不可互相替代。
@@ -85,7 +85,7 @@ def compute_legacy_fingerprint(headers: list[str]) -> str:
 def _build_builtin() -> BillTemplate:
     """内置模板：列名映射 = 现有 HEADER_COLUMN_MAP + 费用名 + 别名。
 
-    费目名动态化（2026-09-04）：内置模板费用与 jinxin_v1 模板同源（旧式 fees
+    费目名动态化：内置模板费用与 jinxin_v1 模板同源（旧式 fees
     声明）；函数内 lazy import 破 template ↔ template_store 互引环。
     """
     from . import template_store

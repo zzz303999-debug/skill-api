@@ -5,7 +5,7 @@
 - 每档案一个 builder：只发最小字段集（逆推规范 §14 表）+ defaults 合并，禁止抓包
   测试值（test/11111/章家俊等）进代码/测试——全部走配置 defaults；
 - 司机建档日期区间双写（拆分字段 + 区间串）按抓包同发（本阶段无证件日期，恒空）；
-- 司机端点 2026-08-14 实证启用：/Car/CarDriver/AddCarDriver（与客户/工厂/车辆同族），
+- 司机端点 实证启用：/Car/CarDriver/AddCarDriver（与客户/工厂/车辆同族），
   bailor_title/bailor_id 可空（不发送），响应带主键 data.id；早前 AddDriverGroup 端点
   方案 A（bailor_title 必填 / bailor_id 主键唯一 / 响应无主键）作废；
 - 响应解析：code 字符串 "200" 判定；主键按档案类取 client_id/factory_id/bailor_id/
@@ -162,7 +162,7 @@ def build_driver_form(
             "num": candidate.plate or "",
         },
     )
-    # TMS CarDriver.php 硬读 phone 键（缺键 → 500 Undefined index，2026-08-14 live
+    # TMS CarDriver.php 硬读 phone 键（缺键 → 500 Undefined index，live
     # 实证）：恒发键（无手机号时发空串兜底，键存在即不触发 Undefined index）
     form.setdefault("phone", "")
     if truck_id:
@@ -242,7 +242,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
     data = raw.get("data")
     archive_id = data.get(_PRIMARY_KEY_MAP[kind]) if isinstance(data, dict) else None
     if archive_id is None:
-        # TMS 成功但无主键回值（2026-08-14 live 实证：AddCarFactory 返回
+        # TMS 成功但无主键回值（live 实证：AddCarFactory 返回
         # {"code":200,"msg":"添加成功","data":[]}，重复提交仍成功——每次重试都会
         # 再建一条档案）：档案已创建但无查询接口无法取 id → 返回 no_id_created
         # 标记，调用方登记 exists_external 终态不再重试（避免重复建档）
@@ -273,7 +273,7 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
 async def create_archives_async(
     forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str
 ) -> dict[str, dict[str, dict[str, Any]]]:
-    """create_archives（2026-09 异步化改造后为生产唯一入口）：网络段走 post_form_async，其余逻辑逐行一致。
+    """create_archives（异步化改造后为生产唯一入口）：网络段走 post_form_async，其余逻辑逐行一致。
 
     档案间存在依赖（客户 → 工厂/司机），保持逐条串行；
     单条失败不影响后续；任何情况不自动重试（防重复建档）。

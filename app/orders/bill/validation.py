@@ -1,4 +1,4 @@
-"""账单导入文件级校验（2026-09-09 P1 自 service.py 下沉）：箱型白名单连坐 +
+"""账单导入文件级校验（P1 自 service.py 下沉）：箱型白名单连坐 +
 提单号缺失连坐。
 
 两条校验共享同一文件级语义（preview 与 create 统一执行）：任一未决单触发 →
@@ -15,7 +15,7 @@ MISSING_BL_NO_MSG = "提单号为必填项；文件存在提单号缺失行时�
 
 
 def reject_unknown_box_types(orders: list) -> bool:
-    """文件级箱型白名单校验（2026-08-18 用户拍板）：任一单含标准代码形态且不在
+    """文件级箱型白名单校验（用户拍板）：任一单含标准代码形态且不在
     白名单的箱型 → 全部未决单拒绝（unknown_box_type，不调下游），返回 True。
 
     preview 与 create 统一执行（preview 也拒）；已标记 skipped 的单不动
@@ -67,11 +67,11 @@ def reject_unknown_box_types(orders: list) -> bool:
 
 
 def reject_missing_bl_no(orders: list) -> bool:
-    """文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    """文件级提单号缺失校验（用户拍板，语义对齐箱型连坐）：任一未决单
     提单号缺失 → 全部未决单拒绝（missing_bl_no，一单不录，不调下游），返回 True。
 
     preview 与 create 统一执行（preview 也拒，msg 提示）；已标记（skipped）的单
-    不动。拦截文案统一（不分缺号行/连坐行）；details 仅报缺失行数（2026-09-04
+    不动。拦截文案统一（不分缺号行/连坐行）；details 仅报缺失行数（
     精简：不收集行号——双表示（orders/canonical）下行号源不一致，且前端按 msg
     排查即可）。
     """

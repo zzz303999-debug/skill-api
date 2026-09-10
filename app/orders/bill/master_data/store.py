@@ -4,7 +4,7 @@
   沿用 repo 既有持久化约定——无 SQLite/DB 设施，与 template_store/access_log 同源）；
 - 结构：{kind: {key: {owner: {count, archive_id, archived_at, last_seen}}}}，键 =
   (kind, 归一键, owner)；owner = 去重/建档维度（sha256(sk) 前 16 hex，与
-  imported_registry 同款口径，2026-09 统一按 sk 判断）；
+  imported_registry 同款口径，统一按 sk 判断）；
 - 语义：计数与建档登记按 owner 隔离（不同 TMS 用户各自累计/建档，互不串扰）；
   无 sk 直调（测试/异常路径）落 DEFAULT_OWNER 槽；archive_id 非空 = 已建档；
   旧版全局条目（无 owner）加载时整体迁入 _LEGACY_OWNER 槽保留审计、不再参与判定。
@@ -160,7 +160,7 @@ class MasterDataStore:
             return dict(rec)
 
     def is_final(self, kind: str, key: str, owner: str = DEFAULT_OWNER) -> bool:
-        """记录是否已达终态（M1c，2026-09-09）：本侧已建档（archive_id）/ TMS
+        """记录是否已达终态（M1c）：本侧已建档（archive_id）/ TMS
         已存在（exists_external）/ 本侧不可建档（skip_archive）→ 不再重试。"""
         rec = self.get(kind, key, owner)
         return bool(

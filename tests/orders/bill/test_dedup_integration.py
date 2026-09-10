@@ -1,6 +1,6 @@
 """(提单号, sk) 去重集成/e2e 测试：TestClient 全链路（mock 下游 AddWork，零网络）。
 
-覆盖完整用户旅程（2026-08-31 起去重维度 = (提单号, sk)）：
+覆盖完整用户旅程（起去重维度 = (提单号, sk)）：
 preview 零触达 → sk-A 创建 → 同 sk 重传 409 → 异 sk 放行 → 各自 409 →
 注册表落盘结构（无 sk 原文）→ 旧版全局注册表自动解封（生产误拦修正）→
 同 sk 部分命中不误报 409。
@@ -167,7 +167,7 @@ class TestDedupSkE2E:
             assert calls["addwork"] == 2  # 首传 1 次 + 二传仅新单 1 次（已建单不调下游）
 
     def test_missing_bl_no_after_prior_success_not_409(self, monkeypatch):
-        """缺号连坐 × 去重混合（2026-09-04 边界）：A 单已建成功，再传 A 原样 +
+        """缺号连坐 × 去重混合（边界）：A 单已建成功，再传 A 原样 +
         缺号行 → A 保持 skipped 不动（不误报 409）、缺号行整批拒、code=204。"""
         from app.orders.bill.validation import MISSING_BL_NO_MSG
 
@@ -214,7 +214,7 @@ class TestDedupSkE2E:
 
     def test_missing_bl_no_canonical_family_rejected(self, monkeypatch):
         """canonical 家族（junyu 表头）缺提单号行 → 文件级连坐同样生效
-        （2026-09-04：此前连坐用例只覆盖 jinxin BillRow 链）。"""
+        （此前连坐用例只覆盖 jinxin BillRow 链）。"""
         from app.orders.bill.validation import MISSING_BL_NO_MSG
 
         calls = _patch_downstream(monkeypatch)

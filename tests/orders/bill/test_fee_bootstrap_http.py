@@ -34,12 +34,12 @@ from helpers import FakeResponse, build_bill_bytes
 pytestmark = pytest.mark.asyncio
 
 # 本文件带 sk 用例的统一 sk 与对应 owner 槽（owner 化后断言口径：建档登记
-# 在该槽，lookup/exists_external 断言须同槽——2026-09-08 费目隔离）
+# 在该槽，lookup/exists_external 断言须同槽——费目隔离）
 _SK = "sk-token"
 _SK_OWNER = owner_key(_SK)
 
 # 注入的费目映射表（测试值）：freight 已有 id（owner_price_ids default 槽显式）；
-# waiting/other 待自举。条目级 price_id 已废弃（owner 隔离，2026-09-08）。
+# waiting/other 待自举。条目级 price_id 已废弃（owner 隔离）。
 _FEE_MAP = {
     "freight": {"tms_name": "运费"},
     "waiting": {"tms_name": "待时费"},
@@ -304,7 +304,7 @@ class TestServiceIntegration:
 
 
 class TestBillrowServiceIntegration:
-    """jinxin（BillRow 直传名）链模板外费用建档 service 集成（2026-09-04 拍板）：
+    """jinxin（BillRow 直传名）链模板外费用建档 service 集成（拍板）：
     订单费用可直传但 TMS 费用管理缺档案 → create 自动 AddCarPrice 建档同名档案；
     preview 只出 planned；建档失败不阻塞下单；模板 6 名已建档不重复建。"""
 
@@ -391,7 +391,7 @@ class TestBillrowServiceIntegration:
 
 class TestTwoSkIsolationE2E:
     """同一账单双 sk 依次导入端到端（生产 test1/test2 归属错乱场景的回归，
-    2026-09-08 费目隔离拍板）：同名费目各自建档、订单费用 price_id 各挂
+    费目隔离拍板）：同名费目各自建档、订单费用 price_id 各挂
     自己账号名下档案；订单去重按 owner 放行（同文件二次导入不 409）。"""
 
     _HEADERS = {

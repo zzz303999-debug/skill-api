@@ -4,7 +4,7 @@
 - 既有流程语义（columns 目标 = BillRow 字段）：group_orders → BillOrder → orders；
   create_order=True 时走既有双通道下单（client.create_orders，行为语义不变）；
   to_canonical 副本仅供内部建档管线（master_data pending）输入，响应不回传
-  （R2，2026-09-09——前端只读 orders）。
+  （R2——前端只读 orders）。
 - 标准字段语义（columns 目标 = CanonicalOrder 字段）：group_canonical →
   CanonicalOrder → canonical_orders；create_order=True 时走 TMS form-data 通道
   （payload/client，见 T7）；费用 price_id 回填（T12）+ 费用对账报告（T14）
@@ -65,7 +65,7 @@ def _write_tempfile(suffix: str, file_bytes: bytes) -> str:
 
 
 async def _parse_stage_async(filename: str, file_bytes: bytes) -> ParseOutput:
-    """解析编排（两段式，2026-09 收尾改造）：CPU 段 to_thread、LLM 网络段真异步。
+    """解析编排（两段式，收尾改造）：CPU 段 to_thread、LLM 网络段真异步。
 
     - 常见路径（L1/L2 指纹命中）：open_and_identify 单段完成，零额外开销；
     - L3 未命中：AiHeaderNeeded 信号 → achat_json 表头映射（真异步）→
@@ -126,11 +126,11 @@ def _aggregate_stage(output, create_order: bool, sk: str):
         for order in canonical_orders:
             order.unmapped_note = collect_unmapped_note(order)
 
-    # 重复上传去重预判（成功单注册表，方案一，2026-08-31 起按 (提单号+箱号, sk) 维度）：
+    # 重复上传去重预判（成功单注册表，方案一，起按 (提单号+箱号, sk) 维度）：
     # create 模式先查同一 sk 已成功组合键，命中即标记 skipped（只查不登；登记在
     # 提交成功后由 client 完成）；不同 sk 各自可导（生产误拦修正）。
-    # 一行一票（2026-08-31 业务拍板）：提单号必填；缺失行无去重键，不查重保持
-    # 未决，交下方文件级校验统一连坐拒绝（2026-09-04 用户拍板：与箱型同语义，
+    # 一行一票（业务拍板）：提单号必填；缺失行无去重键，不查重保持
+    # 未决，交下方文件级校验统一连坐拒绝（用户拍板：与箱型同语义，
     # 一单不录）。计数/自举/费用报告只对未决单进行；preview 不预判（零注册表读写）。
     if create_order:
         from .submission.imported_registry import get_imported_registry, normalize, owner_key
@@ -161,7 +161,7 @@ async def build_result_async(
     create_order: bool = False,
     sk: str = "",
 ) -> BillParseResult:
-    """build_result（2026-09 异步化改造后为生产唯一入口）：解析/归集（CPU 密集）入线程池，网络段全 async
+    """build_result（异步化改造后为生产唯一入口）：解析/归集（CPU 密集）入线程池，网络段全 async
     （并发下单/自举/建档），响应组装语义。
 
     create_order=True 时下单走 create_orders_async / create_canonical_orders_async
@@ -216,7 +216,7 @@ async def build_result_async(
         else None
     )
 
-    # 文件级提单号缺失校验（2026-09-04 用户拍板，语义对齐箱型连坐）：任一未决单
+    # 文件级提单号缺失校验（用户拍板，语义对齐箱型连坐）：任一未决单
     # 提单号缺失 → 全部未决单拒绝（一单不录，不调下游）。置于箱型校验之后：
     # 两者同时存在时箱型先标记（路由 msg 优先级 unknown_box_type > missing_bl_no）。
     # 双表示分组执行：既有语义路径 orders（BillRow 源）与 canonical_orders 同源
@@ -228,7 +228,7 @@ async def build_result_async(
     )
 
     # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
-    # 2026-08-26 修正——必须在校验后重算，校验被拒单 create_result 已标记
+    # 修正——必须在校验后重算，校验被拒单 create_result 已标记
     # （非 None），自然排除，费目自举/建档只对可录单执行（被拒文件零下游副作用）；
     # 校验前快照会让被拒单仍进入建档/自举（实测 AddCarClient 被误调）
     pending = [o for o in canonical_orders if o.create_result is None]
@@ -245,8 +245,8 @@ async def build_result_async(
             bootstrap_report=bootstrap_report,
         )
 
-    # BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板；2026-09
-    # 异步化改造后建档段走 create_archives_async）：订单费用以中文名直传可录，
+    # BillRow 链（jinxin 直传名）模板外费用建档（用户拍板；建档段走
+    # create_archives_async）：订单费用以中文名直传可录，
     # 但 TMS「费用管理」只有 AddCarPrice 建档过的费目——模板外新费目订单有、
     # 费用管理无档案 → create 自动建档同名档案（复用费目自举配置/端点/registry）；
     # preview 只出 planned 计划清单零副作用；建档失败不阻塞下单（直传不依赖
@@ -260,7 +260,7 @@ async def build_result_async(
             billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
                 pending_legacy, create_order=create_order, sk=sk
             )
-    # canonical 链模板外费目建档（2026-09-08 拍板废除 B2 孤儿建档）：模板外列
+    # canonical 链模板外费目建档（拍板废除 B2 孤儿建档）：模板外列
     # 经 fee_map 按列名判定为独立动态码费目，建档已并入 run_fee_bootstrap（上述
     # _build_fee_reports 内、apply 回填之前执行）→ 建档成功当批独立发射；
     # 建档失败降级归并其它费保底（apply_price_map 内处理）。无独立 B2 挂点。
@@ -313,7 +313,7 @@ async def build_result_async(
     if output.new_template is not None:
         meta["l3_template"] = output.new_template
 
-    # R2（2026-09-09 用户拍板）：响应只回实际下单那份——BillRow 源前端读
+    # R2（用户拍板）：响应只回实际下单那份——BillRow 源前端读
     # orders（canonical_orders 置空；to_canonical 副本仅内部建档管线用，避免
     # 双份不同步与 payload 翻倍）；标准字段源 orders 恒空、canonical_orders 全量
     response_canonical = canonical_orders if not orders else []

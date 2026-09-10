@@ -1,6 +1,6 @@
 """箱型白名单（上传前拦截）测试：白名单加载/标准代码判定/未知箱型过滤/service 集成。
 
-规则（2026-08-18 用户拍板，叠加在既有「非空即合法、非标表述放行」之上）：
+规则（用户拍板，叠加在既有「非空即合法、非标表述放行」之上）：
 - 标准代码形态（两位数字 + 2~3 位大写字母，如 40HQ/40GOH）必须命中白名单；
 - 非标准形态（大冷/拼箱/17M飞翼车/12T 等）不校验照常提交；
 - 未命中 → 该单拒绝（unknown_box_type「系统没有此箱型：<箱型>，请联系客服」），
@@ -156,7 +156,7 @@ class TestCheckUnknown:
         assert whitelist_module.check_unknown_box_types(["40GOH"]) == ["40GOH"]
 
     async def test_20hq_40rt_confirmed_invalid(self):
-        """20HQ/40RT 经用户确认非法（2026-08-26）→ 拦截且不在白名单。"""
+        """20HQ/40RT 经用户确认非法→ 拦截且不在白名单。"""
         assert whitelist_module.check_unknown_box_types(["20HQ", "40RT"]) == ["20HQ", "40RT"]
         assert "20HQ" not in whitelist_module.load_box_types()
         assert "40RT" not in whitelist_module.load_box_types()

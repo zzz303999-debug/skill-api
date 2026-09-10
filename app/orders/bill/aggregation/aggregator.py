@@ -1,4 +1,4 @@
-"""竞品账单「一行一票」旧链路（2026-08-31 业务拍板）：每条数据行独立为 BillOrder。
+"""竞品账单「一行一票」旧链路（业务拍板）：每条数据行独立为 BillOrder。
 
 只做归集，不组装响应：行序直转 + 账单锚点对账（合计行/合计大写/总箱型箱量，
 只报告不拦截，见 _collect_anchors/_build_reconciliation）。标准字段链路已拆至
@@ -28,7 +28,7 @@ from .cn_amount import parse_cn_upper_amount
 _SEQ_RE = re.compile(r"^\d+(\.\d+)?$")
 # 提单号：清洗后 ≥8 位字母数字
 _BL_NO_RE = re.compile(r"^[A-Za-z0-9]{8,}$")
-# 箱型：不做格式校验，非空即合法（2026-08-12 业务确认：真实账单含大量
+# 箱型：不做格式校验，非空即合法（业务确认：真实账单含大量
 # 非标表述，如 45HQ/大冷/飞翼车/2X20/12T/拼箱 等，均须正常归集）
 # 月-日日期（账单内通常只有月-日，如 "9-1"）
 _MONTH_DAY_RE = re.compile(r"^(\d{1,2})-(\d{1,2})$")
@@ -252,7 +252,7 @@ def clean_group_key(value) -> str | None:
 def _box_entries(row: BillRow) -> tuple[list[dict], bool]:
     """box 归集（一行一票，一行一箱型）：非空即一条 box_num=1；返回 (条目, 是否有箱型原文)。
 
-    箱型不做格式校验（业务确认 2026-08-12）：非空即合法，含标准箱型与
+    箱型不做格式校验（业务确认）：非空即合法，含标准箱型与
     大冷/飞翼车/2X20/拼箱 等非标表述；无原文才视为缺失。
     """
     raw = (row.b_type or "").strip().upper()
@@ -302,7 +302,7 @@ def _fill_year(md: str, period: BillPeriod) -> str | None:
 def _fee_entries(row: BillRow) -> tuple[list[dict], float]:
     """行级费用条目：按行 fees 键序遍历，金额为数字才建条目；合计入 get_ys_zj。
 
-    费用项以模板声明为源（2026-09-04 动态化，不再按代码常量遍历）；同名
+    费用项以模板声明为源（动态化，不再按代码常量遍历）；同名
     费用跨行累加由一行一票（每行独立成单）消解。
     """
     entries: list[dict] = []
@@ -320,7 +320,7 @@ def _build_c_note(row: BillRow) -> str | None:
     各段非空才拼、段间 "；" 分隔；备注/应付备注直拼无前缀。
 
     一行一票后单行至多一车牌/一日期，历史「多车牌并入备注」段已随多行合并
-    移除（防丢失口径 2026-08-26 由去重键提单号+箱号承接）。
+    移除（防丢失口径 由去重键提单号+箱号承接）。
     """
     segments: list[str] = []
     if v := _nonempty(row.c_sn):
@@ -339,7 +339,7 @@ def _build_c_note(row: BillRow) -> str | None:
 
 
 def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
-    """单行 → BillOrder（一行一票，2026-08-31 业务拍板；每行独立成单）。"""
+    """单行 → BillOrder（一行一票，业务拍板；每行独立成单）。"""
     bl_no, bl_reason = clean_order_num(row.order_num1)
 
     # 非必填文本段统一收集（None/空白省略；下方按段挑选，键序 = 既有响应键序）
@@ -359,7 +359,7 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
     # box：非空即一条（不做格式校验）；无箱型原文才视为缺失
     box_entries, has_valid_box = _box_entries(row)
 
-    # b_date：做箱时间列优先、日期列回退（2026-09-03 用户拍板），月-日补年份
+    # b_date：做箱时间列优先、日期列回退（用户拍板），月-日补年份
     md = _pick_month_day(row)
     b_date = _fill_year(md, period) if md else None
     month = b_date[:7] if b_date else None
@@ -383,12 +383,12 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
         missing_reasons[MISSING_BOX] = REASON_NOT_FOUND
 
     # order_data：必填缺失显式置 None/[]，不填空串/0；非必填空值省略键；
-    # data 恒为 1 条货物明细（2026-08-26 实测修正，原因见 data 键注释）
+    # data 恒为 1 条货物明细（实测修正，原因见 data 键注释）
     order_data: dict = {
         "order_num1": bl_no,
         "type": 1,
         "c_title": c_title,
-        # data 收敛 1 条（2026-08-26 实测修正）：TMS 按 data 条数展开明细并把
+        # data 收敛 1 条（实测修正）：TMS 按 data 条数展开明细并把
         # 费用重复计入（N 条同 b_order_num → 费用总额翻倍）；对齐标准通道
         # data[0] 语义，柜级信息由 box[]/driver[0] 承载。
         "data": [{"b_order_num": bl_no}],
@@ -437,7 +437,7 @@ def _order_from_row(row: BillRow, period: BillPeriod) -> BillOrder:
 def group_orders(rows: list[BillRow], period: BillPeriod) -> AggregationOutput:
     """一行一票：每条数据行独立成单，不再按提单号合并同号多行。
 
-    2026-08-31 业务拍板（TMS 允许同提单号多条订单，去重键改为提单号+箱号）。
+    业务拍板（TMS 允许同提单号多条订单，去重键改为提单号+箱号）。
     返回 AggregationOutput（orders + reconciliation 账单锚点对账，只报告不拦截）；
     输出保持账单行序；空/非法提单号行同样独立成单并标记缺失。
     """

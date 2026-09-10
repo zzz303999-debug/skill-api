@@ -2,7 +2,7 @@
 
 - 启动/首次使用加载 `config/fee_price_map.{settings.env}.yaml`；缺文件/YAML 错误
   → 启动 fail fast（RuntimeError，不允许裸跑）；环境切换只换文件，代码零环境名。
-- owner 隔离（2026-09-08 用户拍板：费目全链按 sk 判定，零全局路径）：price_id
+- owner 隔离（用户拍板：费目全链按 sk 判定，零全局路径）：price_id
   是归属敏感的 TMS 档案主键，**不再支持条目级全局显式 id**（残留旧键 fail fast
   防静默失效）——显式 id 按账号配在 `owner_price_ids: {<owner_key>: {<code>: id}}`
   段（键 = owner_key(sk) = sha256 前 16 hex，查询工具 scripts/fee_owner_key.py）；
@@ -52,7 +52,7 @@ def load_price_map() -> dict[str, dict]:
     """
     global _CACHE, _OWNER_PRICE_IDS
     # 双缓存同时就绪才早退：两段分别赋值会让 owner 段解析失败被 _CACHE 已缓存
-    # 吞掉（永久静默），也让并发首载窗口丢显式 id（2026-09-08 审查修复）
+    # 吞掉（永久静默），也让并发首载窗口丢显式 id（审查修复）
     if _CACHE is not None and _OWNER_PRICE_IDS is not None:
         return _CACHE
     path = price_map_path()
@@ -100,7 +100,7 @@ def _parse_owner_price_ids(
             if value is None:
                 continue
             # 只接受 int 与纯数字串：bool/float/非纯数字串拒绝（int() 会对
-            # 820.9→820、true→1 静默截断，配错必须 fail fast——2026-09-08 审查）
+            # 820.9→820、true→1 静默截断，配错必须 fail fast——审查）
             if isinstance(value, int) and not isinstance(value, bool):
                 num = value
             elif isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
@@ -123,8 +123,8 @@ def explicit_price_ids(owner: str) -> dict[str, int]:
 
 
 def _normalize_entry(code: str, entry) -> dict:
-    """条目归一：{tms_name, import}；条目级 price_id 已废弃（owner 隔离，
-    2026-09-08）——显式 id 迁 owner_price_ids 段，残留旧键 fail fast 防静默失效。"""
+    """条目归一：{tms_name, import}；条目级 price_id 已废弃（owner 隔离）——
+    显式 id 迁 owner_price_ids 段，残留旧键 fail fast 防静默失效。"""
     if not isinstance(entry, dict):
         raise RuntimeError(f"fee price map entry invalid: {code}")
     if entry.get("price_id") is not None:
@@ -166,7 +166,7 @@ def resolve_price_id(code: str, owner: str = DEFAULT_OWNER) -> int | None:
 
     显式段优先（人工修正永远压过自举自动产物）；registry 由自举建档成功后
     按 owner 登记，命中即复用（幂等，不重发建档）。零全局路径：只查当前
-    owner 槽，不回退其他 owner（2026-09-08 费目隔离拍板）。
+    owner 槽，不回退其他 owner（费目隔离拍板）。
     """
     explicit = explicit_price_ids(owner)
     if explicit.get(code) is not None:
@@ -184,7 +184,7 @@ def apply_price_map(
     命名来源：标准码取 YAML 条目 tms_name；动态码（模板外费目，fee_bootstrap
     建档后）取 registry 记录 tms_name（缺省回退 note 原名）。
 
-    降级规则（映射表文档 §4；2026-09-08 动态码独立费目拍板）：
+    降级规则（映射表文档 §4；动态码独立费目拍板）：
     - **模板外动态码（is_dynamic_code）建档失败/未触发**（price_id null）→ 降级归并
       本通道其它费（金额+原名 note 并入；不 excluded 不丢费）——与旧版 to_other 合并
       行为等价，registry 建档成功后下次上传即转独立发射；归并事件进 dropped 报告
@@ -200,7 +200,7 @@ def apply_price_map(
     other_entry = price_map.get("other") or {}
     other_price_id = resolve_price_id("other", owner)
     dropped: list[dict] = []
-    # 其它费缺档告警统计源（2026-09-08 审查 W2 修复）：只收循环内实际降级
+    # 其它费缺档告警统计源（审查 W2 修复）：只收循环内实际降级
     # excluded 的非 import:false 条目——原实现按「未 excluded」事后过滤恒为空
     # （降级分支已置 excluded），纯动态码账单/无真其它费列时告警恒不触发
     missing_codes: list[str] = []
@@ -271,7 +271,7 @@ def apply_price_map(
                     "reason": "price_id null",
                 }
             )
-    # 其它费缺档显著告警（2026-09-08 审查补位 + W2 修复）：真其它费列自身或
+    # 其它费缺档显著告警（审查补位 + W2 修复）：真其它费列自身或
     # 动态码归并保底无目标（其它费无 id）→ 未解析条目整批 excluded——原 to_other
     # warning 依赖 code=other 条目存在且未降级，动态码形态/纯动态码账单下恒不
     # 触发（死代码）；统计源改用循环内实际降级条目（missing_codes/missing_other）

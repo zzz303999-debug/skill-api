@@ -2,7 +2,7 @@
 
 - 存储：{storage_dir}/fee_registry.json（单文件 JSON；进程内锁 + 临时文件原子替换，
   复用 master_data_store 的持久化模式——JSON + 进程锁 + 原子写，无 SQLite/DB 设施）；
-- owner 维度（2026-09-08 用户拍板：费目建档全链按 sk 隔离，废除首个触发者建档
+- owner 维度（用户拍板：费目建档全链按 sk 隔离，废除首个触发者建档
   全局共享的旧语义——档案归属必须跟当前上传者账号走，不串到别人名下）：
   owner = owner_key(sk)（sha256 前 16 hex，与 imported_registry/master_data_store
   同款口径），建档幂等判定与登记按 owner 槽隔离，无全局回退；
@@ -33,7 +33,7 @@ _KEYS: tuple[str, ...] = ("price_id", "tms_name", "created_at", "status")
 
 # 无 sk 上下文（测试/异常直调）的 owner 槽位：真实 owner 为 16 位 hex，不会与
 # 字面量撞名；旧版全局条目迁移槽（保留审计，不再参与判定）——与
-# master_data_store 同款口径（2026-09-08 费目隔离拍板）
+# master_data_store 同款口径（费目隔离拍板）
 DEFAULT_OWNER = "default"
 _LEGACY_OWNER = "_legacy"
 
@@ -68,7 +68,7 @@ class FeeRegistry:
 
         旧版全局格式 {code: rec} 与新版 {code: {owner: rec}} 兼容：顶层 value
         直接含记录键（price_id 等）判为旧版，整体迁入 _LEGACY_OWNER 槽（无 sk
-        无法归属；保留审计，不再参与幂等判定——各 owner 槽自举重建，2026-09-08
+        无法归属；保留审计，不再参与幂等判定——各 owner 槽自举重建，
         费目隔离拍板）。顺带修复：status 键旧版加载时被丢弃导致 exists_external
         进程重启后失效的重试循环。
         """

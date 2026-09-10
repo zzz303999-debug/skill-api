@@ -19,13 +19,13 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
 
 # 表头行最大扫描行数（抬头区通常 1~5 行）：parser/ai_header/template_store
-# 三方共用同一口径，归位契约层统一引用（2026-09 治理：消除 template_store
+# 三方共用同一口径，归位契约层统一引用（治理：消除 template_store
 # 复制粘贴定义与 parser↔ai_header 常量循环）
 MAX_HEADER_SCAN_ROWS = 15
 
 # 应收费用列名：按费用中文名建立 shou 条目（如 shou[0][运费][money]），
 # 同费用名多行金额累加。费用名集以 templates/*.yaml fees 声明为源
-# （template_store.collect_legacy_fee_names / collect_fee_names，2026-09-04
+# （template_store.collect_legacy_fee_names / collect_fee_names，
 # 动态化后本模块不再持有费用列名常量）；
 
 # 表头列名变体 → 标准列名：真实账单表头存在内部空格（如「落/还箱 费」），
@@ -84,7 +84,7 @@ REASON_INVALID_FORMAT = "格式不合法"
 
 
 class OrderError(BaseModel):
-    """单条订单创建失败详情（create_result.error，R4/R5 2026-09-09 模型化）。
+    """单条订单创建失败详情（create_result.error，R4/R5 模型化）。
 
     固定三字段，无 description（本地零消费的冗余双轨已删除，message 为唯一
     可读文案）：code 机器可读（unknown_box_type/missing_bl_no/order_upstream_
@@ -99,7 +99,7 @@ class OrderError(BaseModel):
 
 
 class CreateResult(BaseModel):
-    """单条订单创建结果（create_result，R5 2026-09-09 模型化，对齐接口文档 §3.2.1）。
+    """单条订单创建结果（create_result，R5 模型化，对齐接口文档 §3.2.1）。
 
     固定六键，缺省键恒输出不省略（skipped 默认 False、o_id/upstream/error 默认
     null）：success 成功（含去重 skipped）；skipped 去重跳过；sn 下游订单号；
@@ -199,7 +199,7 @@ class BillParseResult(BaseModel):
     """账单导入的解析结果响应（对齐接口文档 3.3 响应总览）。
 
     orders：既有流程语义归集（BillOrder）；canonical_orders：标准字段源归集
-    （CanonicalOrder）。响应只回实际下单那份（R2，2026-09-09）：BillRow 源
+    （CanonicalOrder）。响应只回实际下单那份（R2）：BillRow 源
     只回 orders（to_canonical 副本仅内部建档管线用）；标准字段源只回
     canonical_orders。
     """
@@ -224,7 +224,7 @@ class BillParseResult(BaseModel):
             "成功单的上游回显明细（create 且本批确有新建成功单时填充）："
             "{code:\"200\", msg:\"添加成功\", data:[每单原始回显（含 sn/sns）]}；"
             "无新建成功单（全部失败/全部 skipped/preview/无单可创建）→ null"
-            "（失败不伪造上游回显，2026-09-09 R3 去伪）"
+            "（失败不伪造上游回显，R3 去伪）"
         ),
     )
     meta: dict[str, Any] = Field(
@@ -278,7 +278,7 @@ class FeeItem(BaseModel):
     （apply_price_map）补 tms_name/price_id；price_id null 降级项 excluded=True
     （不录入，进对账报告），import:false 项（如税金）同样 excluded=True（仅对账）。
 
-    code 语义（2026-09-08 拍板）：标准费目码 / other（真其它费列归并）之外，
+    code 语义（拍板）：标准费目码 / other（真其它费列归并）之外，
     模板外费目为动态码（x+sha1(原名)[:8]，fee_map 按列名判定）——建档成功
     （fee_bootstrap 自举）后当批独立发射；建档失败降级归并其它费（apply_price_map
     保底，条目 excluded 金额并入其它费，不丢费）。note = 模板外费目原名。

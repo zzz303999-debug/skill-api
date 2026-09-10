@@ -87,9 +87,9 @@ def _make_order(fees: list[FeeItem] | None = None, bl_no: str = "BL12345678") ->
 def _inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
     """注入临时映射表（真实表 deepcopy + 覆盖指定码 price_id），锁定降级场景。
 
-    2026-09-01 起真实表全量补实证 id，「null → 降级」机制改由配置注入锁定，
+    起真实表全量补实证 id，「null → 降级」机制改由配置注入锁定，
     与真实配置值解耦（monkeypatch teardown 自动恢复函数，缓存 fixture 重置表）。
-    2026-09-01 起实现上移至 helpers.inject_price_map（三文件共享）。
+    起实现上移至 helpers.inject_price_map（三文件共享）。
     """
 
     inject_price_map(monkeypatch, overrides)
@@ -116,7 +116,7 @@ class TestCanonicalizeFee:
 
     def test_unmapped_to_dynamic_code(self):
         """mapping/字典均未命中 → unmapped_fee to_other 策略下按列名判定：
-        列名非其它费近义 → 动态码独立费目（2026-09-08 拍板，不再并其它费）。"""
+        列名非其它费近义 → 动态码独立费目（拍板，不再并其它费）。"""
         meta = canonicalize_fee("应收", "高速费", _FEES_CFG)
         assert meta["code"] == _dynamic_fee_code("高速费")
         assert meta["code"].startswith("x") and len(meta["code"]) == 9
@@ -476,7 +476,7 @@ class TestGoldenFees:
 
     def test_yinghui_long_tail_dynamic(self):
         """赢辉：长尾费目（无标准码，列名非其它费近义）→ 动态码独立费目
-        （2026-09-08 拍板），原名保留进 note；真其它费列（其他费用）仍归 other。"""
+        （拍板），原名保留进 note；真其它费列（其他费用）仍归 other。"""
         out, orders = self._parse("yinghui", "利润明细表(2021-08-01-2021-12-31).xls")
         dyn_items = [f for o in orders for f in o.fees if f.code.startswith("x")]
         assert dyn_items

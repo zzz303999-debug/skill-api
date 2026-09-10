@@ -4,7 +4,7 @@
 2. 全局 `config/fee_alias_dictionary.yaml`（费目名 → 码，L3/新家族冷启动）；
 3. `unmapped_fee` 策略：`to_other`（码=other，原名进备注）| `skip_report`（该列不生成记录）。
 
-**模板外费目独立建档（2026-09-08 用户拍板「按列名判定」）**：任何路径解析到
+**模板外费目独立建档（用户拍板「按列名判定」）**：任何路径解析到
 `other` 的列，只要原列名不是其它费近义名（fee_alias_dictionary 中 other 的
 别名清单：其它费/其他费用/其它）→ 一律改用动态码（x+sha1(名)[:8]）作费目码——
 费用以独立条目建档后挂账，不再并进「其它费」大杂烩；真其它费列（列名即近义名）
@@ -38,14 +38,14 @@ def _dynamic_fee_code(name: str) -> str:
 
     中文费目名不能直接进 sn（{prefix}_{code} 拼写），拼音不可靠（多音字）；
     取 sha1 前 8 位 hex 作后缀，同名恒同码（幂等），跨批复用 registry。
-    （2026-09-08 移入本模块：模板外列独立建档的统一码规约，fee_bootstrap 复用）
+    （移入本模块：模板外列独立建档的统一码规约，fee_bootstrap 复用）
     """
     return "x" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8]
 
 
 def is_dynamic_code(code: str) -> bool:
     """动态码判定（模板外费目码 x+8hex，_dynamic_fee_code 规约）：建档失败
-    降级/保底语义用它识别；补 8 位 hex 校验防 x 前缀等长业务码误判（2026-09-08
+    降级/保底语义用它识别；补 8 位 hex 校验防 x 前缀等长业务码误判（
     审查 S2：仅长度+前缀判定会把映射表显式 x 开头码误走归并降级）。"""
     return (
         bool(code)
@@ -124,7 +124,7 @@ def _parse_mapping_entry(entry) -> dict:
 def other_alias_names() -> frozenset[str]:
     """其它费近义名集（fee_alias_dictionary 中码=other 的名字清单）。
 
-    按列名判定（2026-09-08 拍板）用：解析到 other 的列，列名在集内 = 真其它费
+    按列名判定（拍板）用：解析到 other 的列，列名在集内 = 真其它费
     列（维持归并语义）；不在集内 = 模板外费目（动态码独立建档发射）。
     """
     return frozenset(
@@ -147,7 +147,7 @@ def canonicalize_fee(
     模板 fees.mapping（区块.费目 或 费目 键）→ 全局别名字典 → unmapped_fee 策略：
     - to_other：码=other，原名进备注（真其它费列——列名即其它费近义名）
     - skip_report：{code: "", import: False}（不生成记录）
-    - **模板外费目（列名非其它费近义）→ 动态码**（2026-09-08 拍板：独立建档
+    - **模板外费目（列名非其它费近义）→ 动态码**（拍板：独立建档
       发射，不再并其它费；原名由调用方 name 字段携带进 note/建档）
     - negative（T27a）：负向扣减项标记（扣除费）；negative_policy=skip_report
       时负项不录入仅对账（import=False，金额仍参与对账恒等）。
@@ -181,7 +181,7 @@ def canonicalize_fee(
 
 def canonicalize_fee_name(name: str) -> tuple[str, str | None]:
     """费目名 → (费目码, note)：字典命中取码、note=None；未命中归动态码（模板外
-    费目独立建档，2026-09-08 拍板）并原名进 note（与 to_other 同名口径——原名
+    费目独立建档，拍板）并原名进 note（与 to_other 同名口径——原名
     保留供建档命名/降级归并其它费）。
 
     供无模板上下文的转换路径（to_canonical 等）使用。真其它费近义名恒在字典

@@ -204,13 +204,13 @@ class TestDedupWithFeeOrders:
         first = _fee_order()
         await create_canonical_orders_async([first], "sk")
         assert first.create_result.success is False
-        assert first.create_result.skipped is False  # 失败非 skipped（补全缺省键，2026-09-09 R5）
+        assert first.create_result.skipped is False  # 失败非 skipped（补全缺省键，R5）
         assert calls["addwork"] == 1
 
         retry = _fee_order()
         await create_canonical_orders_async([retry], "sk")
         assert retry.create_result.success is True
-        assert retry.create_result.skipped is False  # 未被误拦（补全缺省键，2026-09-09 R5）
+        assert retry.create_result.skipped is False  # 未被误拦（补全缺省键，R5）
         assert retry.create_result.sn == "EX2"
         assert calls["addwork"] == 2  # 失败 1 次 + 修正后 1 次
 

@@ -112,7 +112,7 @@ def _default_cfg(threshold: int = 5) -> dict:
         "enabled": True,
         "threshold": threshold,
         "sn_prefix": {"client": "CLT", "factory": "FAC", "truck": "TRK", "driver": "DRV"},
-        # 司机端点已启用（2026-08-14 实证：/Car/CarDriver/AddCarDriver，与真实配置一致）
+        # 司机端点已启用（实证：/Car/CarDriver/AddCarDriver，与真实配置一致）
         "endpoints": dict(TEST_ENDPOINTS),
         "defaults": {
             "client": {"cg_id": "4", "cg_name": "同行", "sys_type": "1", "su_id": "15478"},
@@ -301,7 +301,7 @@ class TestDependencyOrder:
     async def test_factory_archives_via_ready_client_when_lead_low_freq(
         self, fake_create
     ):
-        """依赖委托（2026-09-03 止血）：同门点多客户合并一键，代表候选（首单）
+        """依赖委托（止血）：同门点多客户合并一键，代表候选（首单）
         客户永不达阈值（低频）不再拦死整键——任一所属客户就绪即建档，
         client_id 挂首个就绪客户（生产「工厂宜兴 764/5」同构案例复现）。"""
         fake_create(_default_cfg(threshold=3))
@@ -343,7 +343,7 @@ class TestDependencyOrder:
 
 
 class TestDriverArchived:
-    """司机建档（2026-08-14 实证启用：/Car/CarDriver/AddCarDriver——bailor_title/
+    """司机建档（实证启用：/Car/CarDriver/AddCarDriver——bailor_title/
     bailor_id 可空、响应带主键 data.id、必填 num 车牌，早前 AddDriverGroup 方案 A 作废）。
     依赖链：车辆 → 司机（带车牌先建车拿 truck_id）；无车牌 → skip_archive 终态不建档；
     司机档案 id 不回填订单 payload（driver[0] 走文本 d_name/d_num），只落库。"""
@@ -516,7 +516,7 @@ class TestDegradedEndpoints:
 
 
 class TestClientDirectURL:
-    """建档调用跨宿主直发（阶段三收尾 S2，2026-08-14）：endpoints 全量 URL（含
+    """建档调用跨宿主直发（阶段三收尾 S2）：endpoints 全量 URL（含
     s3.jxt56.com 不同宿主）原样使用、无 base_url 拼接；sk 鉴权头照带；URL 只从 config 读。"""
 
     async def test_create_archives_posts_full_url_as_is(
@@ -758,7 +758,7 @@ class TestPreviewReadOnly:
 
     async def test_preview_shows_current_pending(self, fake_create):
         fake_create()
-        # 2026-09 owner 化：建档状态按 sk 隔离；preview 带同 sk 才展示该用户计数
+        # owner 化：建档状态按 sk 隔离；preview 带同 sk 才展示该用户计数
         await run_master_data_async([_make_order()], create_order=True, sk="sk-preview")  # 计数 1
         report = await run_master_data_async([_make_order()], create_order=False, sk="sk-preview")
         pending = [p for p in report["pending_top"] if p["kind"] == KIND_CLIENT]
@@ -803,7 +803,7 @@ class TestGoldenIntegration:
         not (FAMILIES_DIR / "junyu").exists(), reason="样本未入库（表格文件不入库）"
     )
     async def test_junyu_create_report(self, monkeypatch):
-        # 2026-09-04 提单号缺失文件级连坐：2020-10 样本含 8 行缺号（整批拒），
+        # 提单号缺失文件级连坐：2020-10 样本含 8 行缺号（整批拒），
         # 建档集成改用同家族干净样本（2020 全年，无缺号行）承载 create 场景
         path = FAMILIES_DIR / "junyu" / "2020-01到2020-12上海军羽应收对账单.xls"
         if not path.exists():
@@ -855,7 +855,7 @@ class TestGoldenIntegration:
 
 
 class TestOwnerIsolation:
-    """2026-09 owner 化：建档状态按 sk 维度隔离（与去重注册表同口径）。
+    """owner 化：建档状态按 sk 维度隔离（与去重注册表同口径）。
 
     不同 sk（不同 TMS 用户）各自计数/建档/终态，互不串扰；旧版全局条目
     加载迁入 _legacy 槽保留审计、不再参与判定。

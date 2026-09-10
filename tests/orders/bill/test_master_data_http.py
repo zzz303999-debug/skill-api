@@ -32,7 +32,7 @@ from helpers import FakeResponse
 
 pytestmark = pytest.mark.asyncio
 
-# 本文件用例统一 sk（建档维度 owner = owner_key(sk)，2026-09 owner 化）
+# 本文件用例统一 sk（建档维度 owner = owner_key(sk)）
 _TEST_SK = "sk-token"
 _TEST_OWNER = owner_key(_TEST_SK)
 
@@ -222,8 +222,8 @@ class TestClientCreate:
     async def test_duplicate_branch_logging_extra_key_safe(
         self, md_config, fake_http, real_archives, monkeypatch
     ):
-        """「已存在」分支日志 extra 不得使用 LogRecord 保留键 message（2026-08-31
-        生产 500 回归：makeRecord 检查 extra 键直接 KeyError 冒泡到请求）。
+        """「已存在」分支日志 extra 不得使用 LogRecord 保留键 message（生产 500
+        回归：makeRecord 检查 extra 键直接 KeyError 冒泡到请求）。
 
         强制 INFO 生效路径：pytest 默认 root WARNING 会短路 INFO 日志（isEnabledFor
         为 False 不进入 makeRecord），不强制则该缺陷测不出来（历史假阴性）。
@@ -279,7 +279,7 @@ class TestFactoryCreate:
         self, md_config, fake_http, real_archives
     ):
         """客户 TMS 已存在（exists_external、无本地 id）→ 工厂不再本地拦截：
-        client_id 发空串照常尝试（2026-09-03 修复）；TMS 接受 → 建档成功。"""
+        client_id 发空串照常尝试（修复）；TMS 接受 → 建档成功。"""
         md_config(_md_cfg(threshold=1))
         fake_http(
             lambda url, **kw: FakeResponse(
@@ -441,7 +441,7 @@ class TestSkPassthroughAllKinds:
     """sk 透传防回归：客户/工厂/车辆/司机四类建档请求头一律携带调用方 sk。
 
     既有用例仅客户类断言过 headers（TestClientCreate），工厂/车辆/司机只断言
-    请求体字段（2026-08-19 review 发现的覆盖缺口）；漏传 sk 时下游 203 拒单，
+    请求体字段（review 发现的覆盖缺口）；漏传 sk 时下游 203 拒单，
     且 create_archives 不校验 sk 非空——靠本断言守住透传链不回归。
     """
 

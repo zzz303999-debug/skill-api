@@ -1,4 +1,4 @@
-"""费用对账（T14，2026-09-09 P2 自 service.py 下沉）：price_id 回填 + 降级口径调整。
+"""费用对账（T14，P2 自 service.py 下沉）：price_id 回填 + 降级口径调整。
 
 只报告不拦截：逐单 apply_price_map（回填 tms_name/price_id，均限当前 sk 的
 owner 槽）、merged_to_other（动态码归并其它费保底）仅报告不调整对账、恒等复算
@@ -26,7 +26,7 @@ def reconcile_order_fees(
     自动建档 → registry 登记 → 下方 apply_price_map 经 registry 命中回填
     （当批正常录入；preview 零副作用只出 planned 清单不发请求）。
     merged_to_other（动态码归并其它费保底）仅报告不调整对账——金额已并入桶
-    条目正常发射，仍在 recorded 口径内（2026-09-08 拍板）。
+    条目正常发射，仍在 recorded 口径内（拍板）。
     """
     dropped: list[dict] = []
     mismatch: list[dict] = []
@@ -107,7 +107,7 @@ def build_fee_reports(
     """费用对账报告（T14，只报告不拦截）：price_id 回填 + 恒等校验 + 报告清单。
 
     - 先对全部订单 apply_price_map（回填 tms_name/price_id，均限当前 sk 的
-      owner 槽——订单费用只挂自己账号名下的档案，2026-09-08 费目隔离拍板；
+      owner 槽——订单费用只挂自己账号名下的档案，费目隔离拍板；
       price_id null 降级 excluded 并同步调整对账口径 recorded → excluded）；
       merged_to_other（动态码归并其它费保底）仅报告不调整对账——金额已并入
       桶条目正常发射，仍在 recorded 口径内；

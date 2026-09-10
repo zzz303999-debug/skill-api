@@ -1,4 +1,4 @@
-"""真实 master_data 配置文件结构断言（2026-09-03 生产事故防回归）。
+"""真实 master_data 配置文件结构断言（生产事故防回归）。
 
 事故：defaults.client.su_id / defaults.truck.remind_id 曾死写 15478（章家俊），
 多用户各自上传建档全部归属错账号。修复：归属键从 defaults 移除，建档请求省略

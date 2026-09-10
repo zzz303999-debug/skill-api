@@ -1,6 +1,6 @@
 """成功单注册表测试：register/lookup/snapshot/clear、损坏容错、键规范化
 （strip + upper）、组合键去重（提单号+箱号，行序号兜底）、per-key 锁同键
-互斥异键并行（重复上传去重方案一，2026-08-31 起按 (组合键, sk) 维度：
+互斥异键并行（重复上传去重方案一，按 (组合键, sk) 维度：
 同 owner 幂等、异 owner 放行、旧版全局条目迁移 legacy 槽位不再拦截）。"""
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ class TestRegistry:
         assert registry.lookup("OOLU1", OWNER_A)["sn"] == "EX1"
 
     def test_different_owner_same_bl_allowed(self, registry):
-        """同提单号异 owner 各自独立登记/查询（2026-08-31 起：不同操作员可各导一次）。"""
+        """同提单号异 owner 各自独立登记/查询（不同操作员可各导一次）。"""
         registry.register("OOLU1", OWNER_A, sn="EX1")
         assert registry.lookup("OOLU1", OWNER_B) is None  # 异 owner 不命中
         rec_b = registry.register("OOLU1", OWNER_B, sn="EX2")
@@ -153,7 +153,7 @@ class TestRegistry:
 
 
 class TestDedupKey:
-    """一行一票组合键（2026-08-31）：提单号+箱号；行序号兜底；末档纯提单号。"""
+    """一行一票组合键：提单号+箱号；行序号兜底；末档纯提单号。"""
 
     def test_container_segment(self):
         """有箱号 → 提单号|箱号（两段各自规范化）。"""

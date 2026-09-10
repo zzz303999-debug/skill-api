@@ -1,6 +1,6 @@
 """建档域常量与配置加载（config/master_data.{env}.yaml）。
 
-从 orchestrator 拆出（2026-09）：KIND 常量/档案类展示名/候选 dataclass 被
+从 orchestrator 拆出：KIND 常量/档案类展示名/候选 dataclass 被
 下游封装（client.py）与编排（orchestrator.py）共同依赖，下沉本模块后
 依赖方向单向：orchestrator → client → config ← store（config/store 互不依赖）。
 """

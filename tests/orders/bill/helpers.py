@@ -18,12 +18,12 @@ REBUILT_XLSX = GOLDEN_DIR / "2015-01到2015-12上海通寰应收对账单-rebuil
 PERIOD_2015 = BillPeriod(start="2015-01-01", end="2015-12-31")
 
 # 测试常用 sk 与对应 owner 槽（owner 化后断言口径：带 sk 的建档登记在该槽，
-# lookup/register/exists_external 断言须同槽——2026-09-08 费目隔离）
+# lookup/register/exists_external 断言须同槽——费目隔离）
 TEST_SK = "sk"
 TEST_SK_OWNER = owner_key(TEST_SK)
 
-# 真实账单基线（2026-08 探查确认）：1094 原始行 → 尾部 4 行过滤 → 1090 数据行；
-# 一行一票（2026-08-31 业务拍板）：单数 = 数据行数
+# 真实账单基线（探查确认）：1094 原始行 → 尾部 4 行过滤 → 1090 数据行；
+# 一行一票（业务拍板）：单数 = 数据行数
 REAL_RAW_ROWS = 1094
 REAL_TOTAL_ROWS = 1090
 REAL_ORDER_COUNT = REAL_TOTAL_ROWS
@@ -107,7 +107,7 @@ def go(rows, period):
 def inject_price_map(monkeypatch, overrides: dict[str, int | None]) -> None:
     """注入临时费目显式 id（真实表 deepcopy + 覆盖指定码，对全部 owner 槽生效）。
 
-    锁定「null → 自举建档 / 降级」场景：owner 化（2026-09-08）后条目级
+    锁定「null → 自举建档 / 降级」场景：owner 化后条目级
     price_id 废弃，price_id 来源 = owner_price_ids 显式段 → registry；本工具
     monkeypatch explicit_price_ids（任意 owner 槽同值——测试语境的「无 id」
     不区分槽，链路无 sk/带 sk 行为一致），覆盖语义：id 值 → 置值；None →

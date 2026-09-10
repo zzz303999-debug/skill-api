@@ -128,7 +128,7 @@ class TestOverview:
             "create_result",
         }
         assert all(o["create_result"] is None for o in dumped["orders"])
-        # R2（2026-09-09）：BillRow 源响应只回 orders——canonical_orders 空数组
+        # R2：BillRow 源响应只回 orders——canonical_orders 空数组
         # （to_canonical 副本仅内部建档管线用）；转换正确性下方直调锁定（同源输入）
         assert dumped["canonical_orders"] == []
         from app.orders.bill import to_canonical
@@ -138,7 +138,7 @@ class TestOverview:
         assert canon.source_template == "jinxin_v1"
         assert canon.box_groups and canon.box_groups[0].b_type
         assert canon.missing_fields == []
-        # 客户字段（2026-08-13 实证）：c_title=客户名称（旧链路 AddWork 实证 dump），
+        # 客户字段（实证）：c_title=客户名称（旧链路 AddWork 实证 dump），
         # c_name=客户联系人；金科信经转换后同样适用（表单键断言见 test_payload）
         assert canon.customer_name
         assert canon.unmapped_note is None  # 客户字段已有 c_title 落点，无未映射字段
@@ -196,7 +196,7 @@ class TestCreateMode:
 
     async def test_canonical_create_mode_uses_addwork(self, monkeypatch):
         """标准字段家族（canonical 语义）create_order=True → create_canonical_orders
-        （AddWork 端点 + sk 头 + create_order=true，2026-08-13 实测定论）。"""
+        （AddWork 端点 + sk 头 + create_order=true，实测定论）。"""
         responses = iter(
             [
                 FakeResponse({"code": "200", "data": [{"sn": "EX1", "o_id": "2101"}]}),
@@ -324,7 +324,7 @@ class TestCreateMode:
         assert second.upstream is None
 
     async def test_dedup_different_sk_not_skipped(self, monkeypatch):
-        """异 sk（不同操作员）导入同一账单：不命中注册表，照常创建（2026-08-31 起）。
+        """异 sk（不同操作员）导入同一账单：不命中注册表，照常创建。
 
         去重维度从提单号全局改为 (提单号, sk)：A 创建后 B 导入不再被误拦，
         各自真实下单、各自登记。

@@ -94,14 +94,14 @@ _FIELD_CATALOG: dict[str, str] = {
 def _ai_targets() -> list[str]:
     """target 合法取值（json_schema enum 强约束）：字段名 + 应收费用名 + ignore。
 
-    费用目标动态化（2026-09-04）：以模板库应收费用声明为源（collect_fee_names），
+    费用目标动态化：以模板库应收费用声明为源（collect_fee_names），
     模板新增费目 AI 池自动扩，不再依赖代码常量。
     """
     return [*_FIELD_CATALOG, *(f"fee:{name}" for name in collect_fee_names()), "ignore"]
 
 # json_schema：AI 输出结构强约束（achat_json 优先走 structured output）。
 # 输出即模板配置片段的输入：mapping（columns 段）+ two_row/fee_boundary 判定。
-# 2026-09-04：target enum 不在此冻结——费用目标池随模板库变化（save_yaml_template
+# target enum 不在此冻结——费用目标池随模板库变化（save_yaml_template
 # 固化后 reload_templates），schema 必须在每次请求时与 prompt/白名单同刻构建
 # （_ai_schema 函数；模块级常量会成 import 时快照，模板热更新后 enum 过期）。
 

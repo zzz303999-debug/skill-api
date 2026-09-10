@@ -1,6 +1,6 @@
 """aggregator 测试：真实账单一行一票基线 + 构造用例（清洗/分组/box/driver/日期/c_note）。
 
-2026-08-31 业务拍板：一行一票（每条数据行独立成单，不再按提单号合并）。
+业务拍板：一行一票（每条数据行独立成单，不再按提单号合并）。
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class TestRealBill:
         assert all(o.order_data["box"] == [{"b_type": "40HQ", "box_num": 1}] for o in group)
 
     def test_45hq_pure_tickets(self, real_orders):
-        """纯 45HQ 票：45HQ 合法（业务确认 2026-08-12），正常归集无缺失。"""
+        """纯 45HQ 票：45HQ 合法（业务确认 ），正常归集无缺失。"""
         o = next(o for o in real_orders if o.order_num1 == "SHSO56743700")
         assert o.order_data["box"] == [{"b_type": "45HQ", "box_num": 1}]
         assert "box" not in o.missing_fields
@@ -255,7 +255,7 @@ class TestConstructed:
 
     def test_work_time_priority_over_date(self):
         """「日期」列（结算/对账日）与「做箱时间」列并存 → 做箱时间优先
-        （2026-09-03 用户拍板：导入 TMS 的做箱时间以表格「做箱时间」列为准）。"""
+        （用户拍板：导入 TMS 的做箱时间以表格「做箱时间」列为准）。"""
         row = BillRow(
             seq="1",
             c_title="甲",

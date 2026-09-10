@@ -88,7 +88,7 @@ class ParseOutput:
 def _column_lookup() -> tuple[dict[str, str], dict[str, str]]:
     """归一化表头 → (BillRow 字段名, 费用标准名) 两个查找表（含列名变体）。
 
-    费用名集 = 模板库旧式 fees 声明（2026-09-04 动态化：不再依赖代码常量，
+    费用名集 = 模板库旧式 fees 声明（动态化：不再依赖代码常量，
     jinxin_v1 模板加费目即自动扩展——兜底链与 jinxin 同语义）。
     """
     data = dict(HEADER_COLUMN_MAP)
@@ -190,7 +190,7 @@ def _dynamic_fee_cols(
     header_row: int,
     unmatched_cols: dict[int, str],
 ) -> tuple[dict[int, str], dict[int, str]]:
-    """未知列动态费用收录判定（2026-09-04 用户拍板：费用项不写死、不要求先
+    """未知列动态费用收录判定（用户拍板：费用项不写死、不要求先
     声明模板——账单新增费用列自动收录）。
 
     判据：未知列数据区出现任一可转金额（_to_money）的单元格 → 整列按费用
@@ -234,11 +234,11 @@ def read_data_rows(
     表头行按归一化列名匹配（默认 HEADER_COLUMN_MAP + 费用列 + 别名；可注入
     模板/AI 列名映射）；数据区直接读单元格原生值，合并单元格只有左上角有值
     （真实账单尾部「合计:」行为整行合并，其余字段应保持空，不做左上角值填充）。
-    未知列动态收录（2026-09-04）：数据区含金额的未知列自动转费用列，金额进
+    未知列动态收录：数据区含金额的未知列自动转费用列，金额进
     费用、非数字原文保留（与声明费用列同口径）；未收录列仅在其数据区至少有
     一个非空单元格时上报（全空装饰列/间距列不报；AI 明确 ignore 的列不报）。
-    B1/B1'（忽略列金额判据二次收录，2026-09-07 小王费实证）已迁移收口至
-    _parse_with_template（2026-09-08）：本路径仅服务旧指纹库/精确回退（无 AI
+    B1/B1'（忽略列金额判据二次收录，小王费实证）已迁移收口至
+    _parse_with_template：本路径仅服务旧指纹库/精确回退（无 AI
     ignored 输入），忽略列收录/两段 new_fee 兑底上报统一在模板路径承载。
     """
     data_cols, fee_cols, unmatched_cols = _header_columns(
@@ -484,7 +484,7 @@ def _layout_from_template(
 def _discover_dynamic_fee_cols(
     view: _SheetView, header_row: int, template: dict, layout: RowParseLayout, sections
 ) -> None:
-    """未知列动态费用收录候选（B1/B1'，2026-09-07 用户拍板）。
+    """未知列动态费用收录候选（B1/B1'，用户拍板）。
 
     数据区含金额的未知列自动转费用列（列名去空白归一作费用名），金额进费用、
     非数字原文保留，与声明费用列同口径；纯文本未知列保持上报。
@@ -548,7 +548,7 @@ def _discover_dynamic_fee_cols(
                     unmatched_raw.pop(col, None)
                     break
     elif candidates:
-        # two_row 区块表头（2026-09-07 审查 W3）：区块外列语义无保证不收录
+        # two_row 区块表头（审查 W3）：区块外列语义无保证不收录
         # （区块外收录打破对账恒等），但金额型候选（含 AI 降级 ignore 的费用列）
         # 不能沉默——以上报兑底（new_fee: 前缀，与 L3 白名单外同口径），提示
         # 人工确认后固化模板 fees 段；防误收判据与单行收录同口径。
@@ -652,7 +652,7 @@ def _parse_with_template(
         for col in range(1, view.ncols + 1)
         if col in layout.unmatched_hits and layout.unmatched_hits[col] > 0
     ]
-    # two_row 兑底上报（2026-09-07 审查 W3）：区块外金额列不收录但不沉默
+    # two_row 兑底上报（审查 W3）：区块外金额列不收录但不沉默
     if layout.pending_two_row_fees:
         unmatched = [
             *unmatched,
@@ -872,7 +872,7 @@ def _parse_with_ai_result(
         template_id=candidate["template_id"],
     )
     out = _parse_with_template(view, match, engine, filename)
-    # 费用列上报（new_fee: 前缀，2026-09-04 审查修复）：L3 候选模板不携带费用
+    # 费用列上报（new_fee: 前缀，审查修复）：L3 候选模板不携带费用
     # 段（build_template_config 仅 columns），白名单内命中的费用列同样不落地——
     # 若只报白名单外，落入 33 费目池的新家族费目会静默丢失；统一以 new_fee:
     # 上报，提示人工确认后在固化模板 fees 段补映射
@@ -906,7 +906,7 @@ def _parse_sheet(view: _SheetView, engine: str, filename: str = "") -> ParseOutp
 
     L3 AI 表头映射只走生产两段式编排（open_and_identify + achat_json +
     parse_ai_header，见 _parse_stage_async）；同步 parse_bill 为测试/纯 CPU
-    语义基准，不再内联 LLM（2026-09 第二波同步链清理）。"""
+    语义基准，不再内联 LLM（第二波同步链清理）。"""
     out = _match_template_and_parse(view, engine, filename)
     if out is not None:
         return out

@@ -34,7 +34,7 @@ from helpers import TEST_SK_OWNER, inject_price_map
 
 pytestmark = pytest.mark.asyncio
 
-# 旧版（2026-09-01 补值前）真实表中无 id 的费目码全集：注入 None 锁定自举场景
+# 旧版（补值前）真实表中无 id 的费目码全集：注入 None 锁定自举场景
 _LEGACY_NULL_CODES = [
     "amend", "damage_box", "deduction", "drop_box", "inspect", "lift",
     "move", "other", "overdue", "overweight", "port_misc", "pre_inport",
@@ -69,7 +69,7 @@ BS_CFG = {
 
 # 费目映射表测试体：已实证码 freight（owner_price_ids default 槽显式 id）+
 # 待建码 waiting/yangshan + 其它费 other + 税金 tax。条目级 price_id 已废弃
-# （owner 隔离，2026-09-08）。
+# （owner 隔离）。
 _FEE_MAP = {
     "freight": {"tms_name": "运费"},
     "waiting": {"tms_name": "待时费"},
@@ -632,7 +632,7 @@ class TestGoldenBootstrap:
     """golden 集成：志驿 2020 全量——preview 零副作用（planned 清单）/ create 真实
     建档后 dropped 归零（mock 建档固定 id）。
 
-    用志驿 2020 样本（无缺提单号行、无非法箱型——2026-09-04 提单号缺失文件级
+    用志驿 2020 样本（无缺提单号行、无非法箱型——提单号缺失文件级
     连坐拍板后，自举/建档集成改用干净样本；缺行家族样本（秋怡 2017 等）已整批
     拒绝语义，不承载自举场景）。
     使用仓库真实配置（test 环境 enabled=true + 全量码映射）；建档调用由 conftest
@@ -645,7 +645,7 @@ class TestGoldenBootstrap:
     async def test_zhiyi_preview_planned_only(self, monkeypatch):
         """preview：只输出 planned 清单（零副作用）——dropped 保持现状（非零）。
 
-        注入旧版 null 费目（2026-09-01 真实表已全量补 id）以触发自举场景。
+        注入旧版 null 费目（真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
         path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
@@ -668,8 +668,8 @@ class TestGoldenBootstrap:
     async def test_zhiyi_create_dropped_to_zero(self, monkeypatch):
         """create（真实导入）：建档成功 → dropped 归零 + 费用全部回填。
 
-        志驿 2020 无缺提单号行（2026-09-04 连坐口径下全批可录）；注入旧版 null
-        费目（2026-09-01 真实表已全量补 id）以触发自举场景。
+        志驿 2020 无缺提单号行（连坐口径下全批可录）；注入旧版 null
+        费目（真实表已全量补 id）以触发自举场景。
         """
         inject_price_map(monkeypatch, {code: None for code in _LEGACY_NULL_CODES})
         path = FAMILIES_DIR / "zhiyi" / "志驿2020对账单.xls"
@@ -726,7 +726,7 @@ def _make_billrow_order(order_num1: str, fee_names: list[str]) -> BillOrder:
 
 
 class TestBillrowNamedBootstrap:
-    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 用户拍板）：
+    """BillRow 链（jinxin 直传名）模板外费用建档（用户拍板）：
 
     - 候选 = shou 名中无已建档档案者（运费等别名命中且 registry/YAML 有 id → 跳过）；
     - 模板外新名（加班费等）→ 动态码（x+sha1 前 8）+ tms_name=原名建档；
@@ -841,7 +841,7 @@ class TestBillrowNamedBootstrap:
 
 
 class TestDynamicFallbackToOther:
-    """模板外动态码建档失败/未触发的降级保底（2026-09-08 拍板：不丢费不
+    """模板外动态码建档失败/未触发的降级保底（拍板：不丢费不
     excluded，归并本通道其它费以其它费名义录入——与旧版 to_other 等价；
     registry 建档成功后下次上传自动转独立发射）。"""
 
@@ -983,7 +983,7 @@ class TestDynamicFallbackToOther:
 
     async def test_standard_code_without_yaml_not_merged(self, price_cfg):
         """别名字典标准码（如 crane 吊机费，YAML 刻意无条目）→ 维持旧语义：
-        不并入其它费、不建档案，excluded+dropped 进对账报告（2026-09-08 审查
+        不并入其它费、不建档案，excluded+dropped 进对账报告（审查
         修复：归并保底仅限 is_dynamic_code 动态码）。"""
         from decimal import Decimal
 
@@ -1000,7 +1000,7 @@ class TestDynamicFallbackToOther:
 
     async def test_collect_missing_skips_standard_without_yaml(self, price_cfg, md_endpoint):
         """crane 类标准码（YAML 无条目）不构成建档候选——避免 TMS 档案意外复活
-        （_collect_missing 的 note 命名回退仅限动态码，2026-09-08 审查修复）。"""
+        （_collect_missing 的 note 命名回退仅限动态码，审查修复）。"""
 
         price_cfg(_fee_map_yaml(BS_CFG))
         md_endpoint()
@@ -1029,7 +1029,7 @@ class TestDynamicFallbackToOther:
 
 
 class TestNamedBootstrapExtraNames:
-    """BillRow 链模板外费名建档 + extra_names 直传（2026-09-08 后 canonical
+    """BillRow 链模板外费名建档 + extra_names 直传（后 canonical
     动态码建档并入 run_fee_bootstrap 提前闭环；本类锁定直传链建档/幂等/preview
     零副作用）。"""
 
@@ -1082,7 +1082,7 @@ class TestNamedBootstrapExtraNames:
 
 
 class TestOwnerIsolation:
-    """owner 隔离（2026-09-08 用户拍板：费目全链按 sk，废除首个触发者全局共享）。
+    """owner 隔离（用户拍板：费目全链按 sk，废除首个触发者全局共享）。
 
     生产实证驱动：test1/test2 首个触发者建档后全局复用 price_id，其他账号
     订单费用挂别人名下档案（15599 订单挂 15478 档案）。锁定编排层三要素：

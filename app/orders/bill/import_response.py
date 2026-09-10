@@ -1,4 +1,4 @@
-"""账单导入成功路径的响应外壳判定（2026-09-09 自路由下沉，路由薄壳化）。
+"""账单导入成功路径的响应外壳判定（自路由下沉，路由薄壳化）。
 
 统一响应外壳 {code, msg, data} 的业务语义归 orders 域（纯函数零 IO、零 HTTP
 依赖；路由只按 outcome 落地 status_code / request.state 审计 / 响应对象）：
@@ -21,7 +21,7 @@ from typing import Any
 
 from .schema import BillParseResult
 
-# 本地拦截文案扫描优先级（文件级连坐口径，2026-09-04 提单号缺失对齐箱型）
+# 本地拦截文案扫描优先级（文件级连坐口径，提单号缺失对齐箱型）
 _MSG_CODES: tuple[str, ...] = ("unknown_box_type", "missing_bl_no")
 
 

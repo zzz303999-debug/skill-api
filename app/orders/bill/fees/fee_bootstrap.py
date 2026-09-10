@@ -32,7 +32,7 @@ log = get_logger(__name__)
 
 
 def _owner_for(sk: str) -> str:
-    """费目建档维度键（与 master_data 同口径，2026-09-08 费目隔离拍板）：
+    """费目建档维度键（与 master_data 同口径，费目隔离拍板）：
     有 sk → owner_key(sk)（sha256 前 16 hex）；无 sk（测试直调/异常路径）→
     DEFAULT_OWNER 槽（preview planned 同槽只读判定，preview 仍零副作用）。"""
     return owner_key(sk) if sk else DEFAULT_OWNER
@@ -119,7 +119,7 @@ def build_price_form(code: str, tms_name: str) -> dict[str, str]:
 
 
 def _pending_orders(orders: list) -> list:
-    """未决单过滤（2026-08-26 防御）：跳过已标记单（去重 skipped/箱型拒绝）——
+    """未决单过滤（防御）：跳过已标记单（去重 skipped/箱型拒绝）——
     被拒单不参与费目自举（避免被拒文件仍触发 AddCarPrice 建档）。"""
     return [o for o in orders if getattr(o, "create_result", None) is None]
 
@@ -139,7 +139,7 @@ def _collect_missing(orders, owner: str) -> list[tuple[str, str]]:
     判定：解析（显式段+registry）仍无 price_id、非 excluded（import:false 如
     税金不建档）、有 tms_name 可命名；同批同码只收集一次，保持出现顺序。
     命名来源两级：标准码取 YAML 条目 tms_name；模板外动态码（fee_map 按列名
-    判定产出，2026-09-08 拍板）YAML 无条目 → 取 fee.note 原名。
+    判定产出，拍板）YAML 无条目 → 取 fee.note 原名。
     """
     price_map = load_price_map()
     seen: set[str] = set()
@@ -173,8 +173,7 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
 
 
 async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:
-    """canonical 链费目自举（建档提交段 _create_price_archives 共享；2026-09
-    异步化改造后为生产唯一入口）。
+    """canonical 链费目自举（建档提交段 _create_price_archives 共享）。
 
     **preview 零副作用**：create_order=false 只出 planned 计划清单（不发请求/
     查端点/写 registry）；建档失败不阻塞下单（降级 skip_report，下批重试）。
@@ -286,7 +285,7 @@ async def _create_price_archives(
             log.info(
                 "fee_bootstrap_exists_external",
                 # 键名不能用 message（logging LogRecord 保留字，extra 冲突直接
-                # KeyError 使 204 已存在场景整请求 500——2026-09-08 实弹发现）
+                # KeyError 使 204 已存在场景整请求 500——实弹发现）
                 extra={
                     "code": code,
                     "tms_message": (outcome.get("error") or {}).get("message"),
@@ -351,7 +350,7 @@ def _collect_billrow_missing(orders, owner: str) -> list[tuple[str, str]]:
 async def run_billrow_fee_bootstrap_async(
     orders, *, create_order: bool, sk: str = "", extra_names: list[str] | None = None
 ) -> dict[str, Any] | None:
-    """BillRow 链（jinxin 直传名）模板外费用建档（2026-09-04 拍板；建档提交段共享）。
+    """BillRow 链（jinxin 直传名）模板外费用建档（拍板；建档提交段共享）。
 
     背景：jinxin 链费用以中文名直传 AddWork（订单可录），但 TMS「费用管理」只有
     AddCarPrice 建档过的费目——模板外新费目（加班费/报关费等）订单有、费用管理

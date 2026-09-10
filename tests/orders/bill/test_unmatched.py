@@ -21,7 +21,7 @@ class TestConstructed:
     HEADERS = {"A": "序号", "B": "客户编号", "C": "提单号", "D": "箱型"}
 
     def test_unknown_column_with_data(self, tmp_path):
-        """数字未知列（含金额）→ 动态收录为费用，不再上报（2026-09-04：
+        """数字未知列（含金额）→ 动态收录为费用，不再上报（
         费用项不写死、账单新增费用列自动收录，无需先声明模板）。"""
         path = tmp_path / "unknown.xlsx"
         path.write_bytes(

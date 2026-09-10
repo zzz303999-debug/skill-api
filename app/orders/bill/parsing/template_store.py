@@ -1,6 +1,6 @@
 """模板库：YAML 模板加载 + 三级识别（L1 指纹精确 / L2 族级近似 / 未命中触发 L3）。
 
-层级关系（2026-09 命名统一）：本模块是**现役** YAML 模板库
+层级关系（命名统一）：本模块是**现役** YAML 模板库
 + 三级识别（L1/L2/L3）；template.py 是旧版单模板持久化（内置模板 +
 历史固化 JSON），仅作为本库未命中时的回退读取——两套指纹算法
 （本模块 md5-8 / template.py sha1-16 经 compute_legacy_fingerprint）
@@ -38,7 +38,7 @@ from .columns import normalize_header
 log = get_logger(__name__)
 
 # 模板配置目录（settings.templates_dir：相对路径按项目根解析 → 项目根
-# templates/，与 storage 运行时数据分离；2026-09-09 收敛 5 层 parent 魔法）
+# templates/，与 storage 运行时数据分离；收敛 5 层 parent 魔法）
 _TEMPLATES_DIR = settings.templates_dir
 
 # 列名消歧后缀：配置源列名「车牌号#1」→ 参与指纹/重合度比较时取「车牌号」
@@ -52,7 +52,7 @@ def _source_col_names(template: dict) -> set[str]:
     因为 L2 扫描的是列名行；「列名#N」取 # 前部分（同名列消歧不影响列名集合）。
     fees 段仅旧 schema（费目名 → 源列名，jinxin_v1 既有语义）参与；新 schema
     （T10 费用通道配置，含 channels 键）费用列自动发现/配置声明，不参与 L2。
-    2026-09-03：match.optional_headers（识别可选列，如新式样手机号/车牌——抽取
+    match.optional_headers（识别可选列，如新式样手机号/车牌——抽取
     需要但缺列不应降重合度）从期望集合剔除，避免加列挤掉精简/旧式样文件的 L2 命中。
     """
     names: set[str] = set()
@@ -260,11 +260,11 @@ def alias_dictionary() -> dict[str, list[str]]:
     return _ALIAS_CACHE
 
 
-# ---- 费目名动态收集（2026-09-04：费用项不写死，以模板库为唯一声明源） ----
+# ---- 费目名动态收集（费用项不写死，以模板库为唯一声明源） ----
 # 模板 fees 段两种 schema：旧式（费目名 → 源列名，全应收）与 T10 channels
 # （mapping 键「区块.费目名」→ 码）。两函数皆按模板文件序去重保序。
 
-# legacy 池空兜底（2026-09-04 审查修复）：模板库空/全为 channels schema 时，
+# legacy 池空兜底（审查修复）：模板库空/全为 channels schema 时，
 # 内置/精确兜底链的费用识别不能静默归零（会丢 shou/金额且无告警）——回退
 # 金科信基线六费目并显式告警，保证兜底链恒可识别
 _LEGACY_FALLBACK_FEES: tuple[str, ...] = (

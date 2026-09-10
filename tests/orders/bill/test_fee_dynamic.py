@@ -1,4 +1,4 @@
-"""费用项动态化专项测试（2026-09-04：费用项以模板库 fees 声明为唯一源）。
+"""费用项动态化专项测试（费用项以模板库 fees 声明为唯一源）。
 
 锁定验收语义：
 - collect_fee_names：旧式模板 fees 键 + channels 应收(shou) mapping 费目名并集；
@@ -89,7 +89,7 @@ class TestCollectFeeNames:
 
 
 class TestFeeEntriesDynamic:
-    """单行费用条目（一行一票：2026-08-31 拍板后每行独立成单，签名收单行）。"""
+    """单行费用条目（一行一票：拍板后每行独立成单，签名收单行）。"""
 
     def test_new_fee_name_auto_collected(self):
         """模板扩展费目（税金）→ 归集自动收录（fees 键序即列发现序）。"""
@@ -139,7 +139,7 @@ class TestAiTargetsDynamic:
 
 
 class TestDynamicFeeColGuards:
-    """动态收录防误收判据（_dynamic_fee_cols，2026-09-07 审查 W3）：
+    """动态收录防误收判据（_dynamic_fee_cols，审查 W3）：
     锚点/备注/业务列（数据区含金额也不收）→ 保持上报；正常金额列收录。"""
 
     @staticmethod
@@ -230,7 +230,7 @@ class TestDynamicCodePredicate:
 
 
 class TestIgnoredColsTemplatePath:
-    """B1' 补丁（2026-09-07 小王费实证）：_parse_with_template 路径收录
+    """B1' 补丁（小王费实证）：_parse_with_template 路径收录
     _ignored_cols（AI 降级 ignore 固化列）——canonical 家族金额列进 _fees。"""
 
     HEADERS = ["序号", "客户名称", "提单号", "箱型箱量", "小王费"]
@@ -298,7 +298,7 @@ class TestIgnoredColsTemplatePath:
 
     def test_ignored_fee_col_recovered_dynamic(self, monkeypatch):
         """AI 降级 ignore 的费用列（小王费，金额 77）→ 收进 _fees 为动态码独立
-        费目（按列名判定，2026-09-08 拍板），建档经 fee_bootstrap 自举闭环。"""
+        费目（按列名判定，拍板），建档经 fee_bootstrap 自举闭环。"""
         out, fees = self._parse(monkeypatch, ignored_cols=[5], fee_value=77.0)
         dyn = [f for f in fees if f.code == _dynamic_fee_code("小王费")]
         assert dyn and dyn[0].money == 77.0
@@ -306,7 +306,7 @@ class TestIgnoredColsTemplatePath:
 
     def test_ignored_anchor_col_not_recovered(self, monkeypatch):
         """ignored 的锚点特征列（未付金额，表头即锚点名）数据区全金额 →
-        不收（防重复计费，2026-09-07 审查 W2：原用例表头固定小王费，断言恒真）。"""
+        不收（防重复计费，审查 W2：原用例表头固定小王费，断言恒真）。"""
         anchor_headers = ["序号", "客户名称", "提单号", "箱型箱量", "未付金额"]
         out, fees = self._parse(
             monkeypatch, ignored_cols=[5], fee_value=15.0, headers=anchor_headers

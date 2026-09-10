@@ -1,6 +1,6 @@
 """阶段三：基础资料阈值建档（T17-T21）——配置/归一键/候选收集/阈值编排。
 
-口径（2026-08-14 用户拍板，见 docs/竞品/阶段三-基础资料阈值录入设计.md）：
+口径（用户拍板，见 docs/竞品/阶段三-基础资料阈值录入设计.md）：
 - N 默认 5（config/master_data.{env}.yaml `master_data.threshold`），不进代码；
 - 计数键：客户=归一名；工厂=「名+地址」复合键；司机+车辆=「司机名+车牌」组合键；
 - 计数范围：跨全部模板家族全局累计（master_data_store 单文件持久化）；
@@ -20,7 +20,7 @@ from typing import Any
 from app.core.logging_conf import get_logger
 
 # 本模块 import 仅自用；跨包引用 config/store/keys 符号请直引定义模块，此处不做转口
-# （2026-09-07 P-A 口径：防止“定义在 A、引用从 B 转口”再生）
+# （P-A 口径：防止“定义在 A、引用从 B 转口”再生）
 from ..schema import CanonicalOrder
 from ..submission.imported_registry import owner_key
 from .config import (
@@ -61,7 +61,7 @@ def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate
     - 工厂：door_point 名 + load_address 地址（复合键；名缺失不构成候选）；
     - 司机+车辆：driver_name + plate_no（组合键；司机名缺失不构成候选）。
     已标记的单（create_result 非 None：去重 skipped / 箱型拒绝等）不构成候选
-    （2026-08-26 防御：即使调用方误传被拒单也不建档）。
+    （防御：即使调用方误传被拒单也不建档）。
     """
     candidates: list[MasterDataCandidate] = []
     for order in orders:
@@ -115,7 +115,7 @@ def collect_candidates(orders: list[CanonicalOrder]) -> list[MasterDataCandidate
 # ---- 阈值编排（service 管线挂点入口） ----
 
 def _owner_for(sk: str, create_order: bool) -> str | None:
-    """建档维度键（2026-09 统一按 sk 判断，与去重注册表同口径）：
+    """建档维度键（统一按 sk 判断，与去重注册表同口径）：
     create 有 sk → owner_key(sk)；无 sk（测试直调）→ DEFAULT_OWNER 槽；
     preview 无 sk → None（只读探测无归属：不标注、不列 pending）。"""
     if sk:
@@ -175,7 +175,7 @@ def _factory_dependency_candidate(
     store,
     owner: str,
 ) -> MasterDataCandidate:
-    """工厂依赖委托（2026-09-03 止血修复）：同键任一所属客户就绪即可建档。
+    """工厂依赖委托（止血修复）：同键任一所属客户就绪即可建档。
 
     工厂键按「名+地址」聚合（地址缺失退化按名）→ 跨客户同名门点合并一键；
     若仅以代表候选（首单）的客户判依赖，该客户永不达阈值（低频）时整键每批
@@ -213,7 +213,7 @@ def _pending_top(store, threshold: int, owner: str) -> list[dict[str, Any]]:
     """未达阈值 TOP 清单（count 降序，上限 PENDING_TOP_N；预览与创建共用；
     T27b：exists_external 已存在外部，不列入 pending）。
 
-    按 owner 过滤：只列当前 sk 维度记录（owner 化，2026-09）。"""
+    按 owner 过滤：只列当前 sk 维度记录（owner 化）。"""
     rows: list[dict[str, Any]] = []
     for kind, entries in store.snapshot().items():
         for key, owners in entries.items():
@@ -232,7 +232,7 @@ def _pending_top(store, threshold: int, owner: str) -> list[dict[str, Any]]:
 
 
 class _ArchiveSession:
-    """单批建档会话（M1a，2026-09-09）：收集器（attempted/archived/failed/
+    """单批建档会话（M1a）：收集器（attempted/archived/failed/
     exists_external）与 store/owner/sk/建档网络注入收口——单键建档与车辆前置
     子流程共用同一批内去重与报告收集，消除跨函数手工传递。"""
 
@@ -285,7 +285,7 @@ async def _ensure_truck_archive_async(
         if truck_rec.get("archive_id"):
             return str(truck_rec["archive_id"])
         if truck_rec.get("exists_external"):
-            # M5（2026-09-09）：TMS 已存在（无查询接口取 id）→ 不再重发建车
+            # M5：TMS 已存在（无查询接口取 id）→ 不再重发建车
             # 请求，司机照常建档（truck_id 可空，不阻塞）
             return ""
     if (
@@ -311,7 +311,7 @@ async def _ensure_truck_archive_async(
         session.record_archive(KIND_TRUCK, plate_key_, plate, truck_archive_id)
         return truck_archive_id
     if truck_out.get("duplicate") or truck_out.get("no_id_created"):
-        # M5（2026-09-09）：TMS 已存在拒单/无主键回值 → 登记 exists_external
+        # M5：TMS 已存在拒单/无主键回值 → 登记 exists_external
         # 终态（此前只进 failed，存量车牌跨批每批重发注定被拒的建车请求——
         # 对齐主建档路径 _create_one_async 三态处理）
         session.store.mark_exists_external(KIND_TRUCK, plate_key_, session.owner)
@@ -361,7 +361,7 @@ async def _create_one_async(
                 "所属客户未建档（依赖前置：客户 → 工厂）",
             )
             return None
-        # 2026-09-03 修复：客户 exists_external（TMS 已存在、无本地 id）不再本地
+        # 修复：客户 exists_external（TMS 已存在、无本地 id）不再本地
         # 拦截——工厂照常尝试（client_id 空值省略键，仅带 client_name；TMS 是否
         # 接受由响应登记：成功→archive；已存在→exists_external；其余拒绝→
         # skip_archive 防每批重发，见下）
@@ -374,7 +374,7 @@ async def _create_one_async(
         from .client import build_driver_form
 
         if not candidate.plate:
-            # TMS AddCarDriver 必填 num（车牌），无车牌司机永久无法建档（2026-08-14
+            # TMS AddCarDriver 必填 num（车牌），无车牌司机永久无法建档（
             # live 实证拒单「请重新选择车牌」）→ 登记 skip_archive 终态不再重试
             # （避免每批都发注定被拒的请求）；订单保留「未建档」标注，计数照常
             # （后续订单带车牌 → 新计数键 → 恢复正常建档）
@@ -387,7 +387,7 @@ async def _create_one_async(
             )
             return None
         if not candidate.phone:
-            # TMS CarDriver.php 校验 phone 必填（缺键 500 / 空串 no: phone，2026-08-14
+            # TMS CarDriver.php 校验 phone 必填（缺键 500 / 空串 no: phone，
             # live 实证）——无手机号司机同样永久无法建档 → skip_archive 终态
             session.store.mark_skip_archive(kind, candidate.key, session.owner)
             session.record_fail(
@@ -471,7 +471,7 @@ async def run_master_data_async(
 
     if not create_order:
         # 只读探测：标注基于当前累计计数（不含本批），不写存储；
-        # 无 sk → 无归属维度，不标注不列 pending（2026-09 owner 化）
+        # 无 sk → 无归属维度，不标注不列 pending（owner 化）
         if owner is not None:
             _annotate_pending(candidates, store, threshold, owner)
             report["pending_top"] = _pending_top(store, threshold, owner)
@@ -502,7 +502,7 @@ async def run_master_data_async(
             if url is None:
                 continue  # 端点 TODO → 只计数不建档（degraded 已在报告）
             if kind == KIND_FACTORY:
-                # 依赖委托（2026-09-03 止血）：代表候选（首单）所属客户未达终态
+                # 依赖委托（止血）：代表候选（首单）所属客户未达终态
                 # 时换同键首个已就绪客户候选建档——防低频客户代表永久拦死整键
                 candidate = _factory_dependency_candidate(
                     candidate, candidates, store, owner

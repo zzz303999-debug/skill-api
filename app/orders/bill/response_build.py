@@ -1,11 +1,11 @@
-"""账单导入响应 data 组装（2026-09-09 P3 自 service.py 下沉）。
+"""账单导入响应 data 组装（P3 自 service.py 下沉）。
 
 与 import_response.py（外壳 code/msg/data 语义判定 + 409 精简 + 审计元数据）
 形成「判定 / 组装」分工：本模块只产 data 内部结构——去重键段（导入去重预判
 用）、create 结果统计 summary、成功单上游回显明细；路由与外壳判定不感知。
 
 create 模式全部预判/回填完成后由编排方调用；failed_details/upstream 均不
-伪造失败回显（2026-09-09 B 案/R3：前端只消费顶层 code/msg/data）。
+伪造失败回显（B 案/R3：前端只消费顶层 code/msg/data）。
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def order_dedup_parts(order) -> tuple[str | None, str | None]:
 def build_failed_details(created: list) -> list[dict]:
     """失败单明细（summary.failed_details）：单号/错误码/消息。
 
-    本地拦截不再模拟上游回显（2026-09-09 B 案：前端只消费顶层 code/msg/data，
+    本地拦截不再模拟上游回显（B 案：前端只消费顶层 code/msg/data，
     删除 error_upstream 透传与单级 details.upstream 模拟壳）。
     error 为模型（OrderError），键名与单级 error 对齐（R4 收敛）。"""
     return [
@@ -66,7 +66,7 @@ def build_upstream(created: list) -> dict | None:
 
     无新建成功单（全部失败/全部 skipped/空）→ None——失败不伪造上游回显
     （本地拦截或上游拒绝均无成功回显可透传；前端按外壳 code/msg 分流，
-    2026-09-09 R3 去伪）。"""
+    R3 去伪）。"""
     if not created:
         return None
     upstream_data = [

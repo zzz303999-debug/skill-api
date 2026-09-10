@@ -17,7 +17,7 @@ from helpers import REAL_ORDER_COUNT, REAL_TOTAL_ROWS, REAL_XLS, FakeResponse
 AUTH_HEADERS = {"X-API-Key": "test-secret-key"}
 
 # 提单号缺失文件级连坐的统一拦截文案（与 service._MISSING_BL_NO_MSG 同口径，
-# 2026-09-04 用户指定 msg 只出此条说明）
+# 用户指定 msg 只出此条说明）
 _MISSING_BL_MSG = "提单号为必填项；文件存在提单号缺失行时整批不录入，请补全提单号后重新导入"
 
 
@@ -153,7 +153,7 @@ class TestCreateMode:
         assert all(o["create_result"]["sn"] == "EX26080042" for o in data["orders"])
         # 每单一次下单（建档调用不计入：端点已配后达阈值候选会建档）
         assert calls["addwork"] == REAL_ORDER_COUNT
-        # sk 原样透传下游（2026-08-19 起：调用方请求头 → AddWork 请求头）
+        # sk 原样透传下游（调用方请求头 → AddWork 请求头）
         assert sk_seen and all(s == "sk-1" for s in sk_seen)
 
     def test_missing_sk_400_not_per_order(self, monkeypatch):
@@ -317,7 +317,7 @@ class TestCreateMode:
     def test_all_missing_bl_no_msg_specific(self, monkeypatch):
         """整批提单号缺失（missing_bl_no）→ 外层 msg 给出具体原因，而非笼统「添加失败」。
 
-        2026-09-03 扩展：全部失败分支的本地拦截文案从箱型白名单推广到提单号缺失。
+        扩展：全部失败分支的本地拦截文案从箱型白名单推广到提单号缺失。
         """
         import app.api.routes.bill_import as main_module
         from app.orders.bill import BillParseResult
@@ -423,7 +423,7 @@ class TestCreateMode:
 def test_unknown_box_type_zero_downstream(monkeypatch):
     """箱型不符（40GOH）create 模式 → 零下游副作用：AddWork/建档/费目自举均不调。
 
-    2026-08-26 修正（方案 A+B）：校验被拒单排除出 pending，被拒文件不再触发
+    修正（方案 A+B）：校验被拒单排除出 pending，被拒文件不再触发
     建档（修复前实测 AddCarClient 被误调，假 token 报「请重新登录」）；
     费目自举走建档族 /Car/CarPrice，同计入 archive 计数。
     """
@@ -519,7 +519,7 @@ def _two_row_bill_bytes() -> bytes:
 
 
 def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
-    """提单号缺失文件级连坐（2026-09-04 拍板，对齐箱型）：任一单缺提单号 →
+    """提单号缺失文件级连坐（拍板，对齐箱型）：任一单缺提单号 →
     整批拒绝一单不录；msg 给文件级文案；零下游（AddWork/建档均不调）。"""
     calls = {"addwork": 0, "archive": 0}
 
@@ -548,7 +548,7 @@ def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
     assert summary["created"] == 0 and summary["failed"] == 2
     msgs = {d["message"] for d in summary["failed_details"]}
     assert msgs == {_MISSING_BL_MSG}
-    # details 契约（2026-09-04 用户拍板）：仅 missing_bl_no_count，无 missing_rows
+    # details 契约（用户拍板）：仅 missing_bl_no_count，无 missing_rows
     d0 = body["data"]["orders"][0]["create_result"]["error"]["details"]
     assert d0 == {"missing_bl_no_count": 1}
     assert "missing_rows" not in d0
@@ -558,7 +558,7 @@ def test_missing_bl_no_file_level_reject_zero_downstream(monkeypatch):
 
 
 def test_missing_bl_no_preview_rejected_msg(monkeypatch):
-    """preview 同样文件级拒绝并提示（与箱型一致，2026-09-04）：缺提单号文件
+    """preview 同样文件级拒绝并提示（与箱型一致）：缺提单号文件
     preview 不再报「请求成功」，msg 给具体原因，code 保持 200（零下游动作）。"""
     async def fake_post(url, **_kwargs):
         return _ok_chain_post(url)
@@ -585,8 +585,7 @@ def test_missing_bl_no_preview_rejected_msg(monkeypatch):
 
 def test_invalid_format_bl_no_jinxin_chain_rejected(monkeypatch):
     """jinxin（BillRow）链：提单号列填非法值（纯字母，非空）→ 归集层
-    clean_order_num 判「格式不合法」清空 → 连坐视同缺失整批拒（2026-09-04
-    口径锁定：两链差异设计——canonical 链仅存在性判定放行，见
+    clean_order_num 判「格式不合法」清空 → 连坐视同缺失整批拒（口径锁定：两链差异设计——canonical 链仅存在性判定放行，见
     test_dedup_integration.test_invalid_format_bl_no_canonical_chain_allowed）。"""
     from io import BytesIO
 
@@ -698,7 +697,7 @@ _QIYU_2019 = Path("tests/golden/bill/families/qiuyi/2019-01到2019-12上海秋�
     not _QIYU_2019.exists(), reason="golden 样本未入库（表格文件不入库），本地放置后自动启用"
 )
 def test_qiuyi_20hq_whole_file_rejected(monkeypatch):
-    """秋怡 2019（含 20HQ，2026-08-26 用户确认非法）→ 整批拒绝、零下游。"""
+    """秋怡 2019（含 20HQ，用户确认非法）→ 整批拒绝、零下游。"""
     calls = {"addwork": 0, "archive": 0}
 
     async def fake_post(url, **_kwargs):
@@ -955,7 +954,7 @@ class TestAuth:
     def test_import_unified_401_when_not_exempt(self, monkeypatch):
         """豁免移除后 /orders/bill/import 无凭证 → 401 统一外壳三字段。
 
-        审查修正 2026-08-27：默认 _AUTH_FREE_PATHS 豁免该路径使统一 401 分支
+        审查修正：默认 _AUTH_FREE_PATHS 豁免该路径使统一 401 分支
         不可达零测试，此处清空豁免验证分支行为（对外开放部署移出豁免时生效）。
         """
         import app.api.middleware.auth as main_module
@@ -989,7 +988,7 @@ class TestAuth:
 def test_error_envelope_trailing_slash_413(monkeypatch):
     """尾斜杠路径 /orders/bill/import/ 错误响应同样套统一外壳。
 
-    审查修正 2026-08-27：中间件/422 处理器先于路由执行（307 重定向前），
+    审查修正：中间件/422 处理器先于路由执行（307 重定向前），
     去尾斜杠归一前该路径会回退旧 {error:...} 结构，同接口两种结构并存。
     """
     monkeypatch.setattr(settings, "api_max_upload_bytes", 1024)
