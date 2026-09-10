@@ -1,4 +1,4 @@
-.PHONY: install dev run docker-build docker-up docker-down docker-logs test test-golden test-mineru-golden lint smoke
+.PHONY: install dev run docker-build docker-up docker-down docker-logs test test-golden test-mineru-golden lint check smoke
 
 install:
 	uv venv --python 3.12 && uv pip install -e ".[dev]"
@@ -32,3 +32,6 @@ test-mineru-golden:
 
 lint:
 	uv run ruff check app tests
+
+check: lint test
+	uv run python scripts/dep_check.py --assert-rules
