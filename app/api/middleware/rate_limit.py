@@ -1,6 +1,6 @@
-"""请求限流中间件（内存滑动窗口，按客户端 IP）与客户端 IP 解析。
+"""请求限流中间件（内存滑动窗口，按客户端 IP）。
 
-本文件同时承载限流算法（SlidingWindowLimiter，2026-09 结构整理并入）：
+本文件同时承载限流算法（SlidingWindowLimiter）：
 算法为中间件私有实现，同文件同居消除根级同名歧义。
 
 设计约束：
@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from app.api.middleware._client_ip import _resolve_client_ip
 from app.api.response_shell import _unified_error_body, _use_unified_response
 from app.core.config import settings
 from app.core.errors import ERROR_CODE_DESCRIPTIONS
@@ -129,33 +130,11 @@ _light_limiter = SlidingWindowLimiter(
 )
 _LIMITERS = {"heavy": _heavy_limiter, "light": _light_limiter}
 
-# 免限流 IP 白名单（P1 起定义归位本模块，不经 app.main；settings 逗号分隔解析）。
+# 免限流 IP 白名单（定义在本模块，不经 app.main；settings 逗号分隔解析）。
 # 测试接缝：setattr(middleware.rate_limit, "_rate_limit_whitelist", ...) 注入替身。
 _rate_limit_whitelist = frozenset(
     ip.strip() for ip in settings.rate_limit_whitelist.split(",") if ip.strip()
 )
-
-
-def _resolve_client_ip(request: Request) -> tuple[str | None, str | None]:
-    """解析客户端 IP，返回 (客户端IP, 原始X-Forwarded-For头)。
-
-    云服务前面通常有 nginx/负载均衡，access_log_trust_proxy 开启时：
-    - X-Forwarded-For 存在时取**最后一个**地址（nginx `$proxy_add_x_forwarded_for`
-      是追加语义，最后一个即离本服务最近的代理看到的真实客户端 IP）；
-      客户端自行伪造的前缀地址被忽略，限流与审计 IP 不可被污染；
-    - 其次 X-Real-IP；均不存在或未开启信任时回退到直连地址。
-    """
-    forwarded = request.headers.get("x-forwarded-for")
-    if settings.access_log_trust_proxy:
-        if forwarded:
-            parts = [part.strip() for part in forwarded.split(",") if part.strip()]
-            if parts:
-                return parts[-1], forwarded
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            return real_ip.strip(), forwarded
-    host = request.client.host if request.client else None
-    return host, forwarded
 
 
 async def _rate_limit_middleware(request: Request, call_next: Callable) -> Any:

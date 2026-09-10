@@ -8,7 +8,7 @@ from typing import Annotated, Any
 from fastapi import FastAPI, File, Request, UploadFile
 from pydantic import BaseModel, Field, create_model
 
-from app.api.response_shell import _UNIFIED_RESPONSE_PATHS, _use_unified_response
+from app.api.response_shell import _use_unified_response
 from app.api.uploads import _read_upload
 from app.core import skill_registry
 from app.core.config import settings
@@ -34,7 +34,7 @@ def _typed_response_model(skill: SkillBase) -> type[BaseModel]:
     """
     data_type: Any = skill.output_model if skill.output_model else dict
     model_name = f"{skill.name.title().replace('-', '')}Response"
-    if f"/skills/{skill.name}/extract" in _UNIFIED_RESPONSE_PATHS:
+    if _use_unified_response(f"/skills/{skill.name}/extract"):
         inner_fields: dict[str, Any] = {
             "skill": (str, skill.name),
             "version": (str, skill.version),

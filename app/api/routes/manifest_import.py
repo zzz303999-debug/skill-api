@@ -30,13 +30,13 @@ async def import_manifest(
     create_order 缺省 false（只预览不触达 TMS）；显式传 true 时创建舱单
     （sk 由调用方登录 TMS 后经请求头透传，addBill 端点鉴权，见
     app/orders/manifest/client.py），响应附 orders[].create_result 与 summary。
-    v1.9 起放开本地去重：重复上传不再拦截，照常重新提交（重复风险调用方自负）。
+    放开本地去重：重复上传不再拦截，照常重新提交（重复风险调用方自负）。
     家族识别/格式校验/坏文件等由 parse_manifest 覆盖，错误统一走全局异常处理；
     箱型白名单复用账单导入同一份配置（config/box_type_whitelist.yaml）：
     任一单含白名单外标准码箱型 → 全部未决单拒绝（unknown_box_type），
     preview 亦拒绝、不调下游（对齐账单导入 v1.3 语义）。
 
-    响应统一外壳 {code, msg, data}（2026-09-01 适配，对齐账单录入口径）：
+    响应统一外壳 {code, msg, data}（对齐账单录入口径）：
     - code="200" msg="请求成功"：preview 成功（整批被拒时 msg 为具体原因）
     - code="200" msg="添加成功"：create 创建成功
     - code="204" msg="添加失败"：create 全部失败（msg 优先为具体拦截原因）
@@ -66,6 +66,6 @@ async def import_manifest(
         sk=sk,
     )
     # 成功路径外壳语义（200/204/失败文案）由 orders 域判定（manifest/
-    # import_response.py，2026-09-09 与账单导入对称下沉）：路由只组装响应对象
+    # import_response.py，与账单导入对称下沉）：路由只组装响应对象
     outcome = manifest_import_outcome(result, create_order)
     return ManifestImportResponse(code=outcome.code, msg=outcome.msg, data=result)

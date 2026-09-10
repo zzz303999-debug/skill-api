@@ -40,7 +40,7 @@ async def create_order_from_text(body: CreateOrderFromTextRequest) -> dict[str, 
 
     extracted, meta = await extract_order_text(text)
     order_data = build_order_data(extracted)
-    # 下单编排经本模块命名空间解析（P1 起不经 app.main）：测试以
+    # 下单编排经本模块命名空间解析（不经 app.main）：测试以
     # setattr(routes.orders, "publish_order", ...) 注入替身
     upstream = await publish_order(
         order_data,
@@ -81,6 +81,6 @@ async def parse_order_document(
     request.state.file_size = len(content)
 
     async with _inflight_guard():
-        # 编排入口经本模块命名空间解析（P1 起不经 app.main）：测试以
+        # 编排入口经本模块命名空间解析（不经 app.main）：测试以
         # setattr(routes.orders, "parse_document_to_order", ...) 注入替身
         return await parse_document_to_order(content, file.filename or "unnamed")

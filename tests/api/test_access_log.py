@@ -153,7 +153,7 @@ def test_ip_and_user_agent_recorded():
 
 def test_xff_spoofed_prefix_ignored_for_rate_limit():
     """客户端伪造的 XFF 前缀不影响限流 key：取最后一个地址。"""
-    from app.api.middleware.rate_limit import _resolve_client_ip
+    from app.api.middleware._client_ip import _resolve_client_ip
 
     client = TestClient(app)
     response = client.get(
@@ -342,7 +342,7 @@ def test_bill_import_response_summarized_for_log():
 
 def test_bill_import_409_summarized_for_log(monkeypatch):
     """409（create 全 skipped）同样走日志摘要：code=409 保留、明细不入摘要、
-    审计 error_code 保持旧口径 duplicate_bill（审查修正 2026-08-27 补测）。"""
+    审计 error_code 保持旧口径 duplicate_bill（审查修正补测）。"""
     import json
 
     import app.api.routes.bill_import as main_module

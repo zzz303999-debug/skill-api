@@ -4,7 +4,7 @@
 1. 中间件注册顺序即层级契约（后注册者为外层）：
    rate_limit → auth → access_log，执行序 access_log → auth → rate_limit——
    被限流/鉴权拒绝的请求仍经外层 access_log 审计留痕（各中间件 docstring 有说明）；
-2. 路由挂载顺序保持拆分前 main.py 的定义顺序（OpenAPI paths 顺序不变）；
+2. 路由挂载顺序保持既有定义顺序（OpenAPI paths 顺序不变）；
 3. skill 动态路由最后注册（registry.discover() 扫描 app.skills 子包）。
 
 仅 app.main 应调用本工厂（路由/中间件在调用时经 app.main 命名空间解析
@@ -45,7 +45,7 @@ def create_app() -> FastAPI:
     app.exception_handler(RequestValidationError)(error_handlers._validation_error_handler)
     app.exception_handler(Exception)(error_handlers._generic_error_handler)
 
-    # 路由：挂载顺序保持拆分前定义顺序（OpenAPI paths 顺序不变）
+    # 路由：挂载顺序保持既有定义顺序（OpenAPI paths 顺序不变）
     app.include_router(health_router)
     app.include_router(meta.router)
     app.include_router(orders.router)

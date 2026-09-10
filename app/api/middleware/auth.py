@@ -13,7 +13,7 @@ from app.api.response_shell import _unified_error_body, _use_unified_response
 from app.core.config import settings
 from app.core.errors import ERROR_CODE_DESCRIPTIONS
 
-# 鉴权豁免路径（P1 起定义归位本模块，不经 app.main）：健康检查、OpenAPI 文档
+# 鉴权豁免路径（定义在本模块，不经 app.main）：健康检查、OpenAPI 文档
 # 与日志/账单上传页面本身（页面无数据）；/api/logs 日志数据接口含 PII，
 # 不在豁免内，必须鉴权才能查看。/orders/bill/import 为内网免 key 使用场景
 # 豁免（与上传页面配套使用场景），仅限可信内网部署；对外开放部署时应移出豁免。
@@ -39,7 +39,7 @@ async def _auth_middleware(request: Request, call_next: Callable) -> Any:
     """
     if not settings.api_key:
         return await call_next(request)
-    # 去尾斜杠匹配（2026-08-27 审查修正）：尾斜杠请求（307 重定向前经中间件）
+    # 去尾斜杠匹配（审查修正）：尾斜杠请求（307 重定向前经中间件）
     # 若不归一会被误判为非豁免路径 → 401；与错误外壳归一口径一致
     if request.url.path.rstrip("/") in _AUTH_FREE_PATHS:
         return await call_next(request)

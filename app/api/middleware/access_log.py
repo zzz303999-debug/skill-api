@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
-from app.api.middleware.rate_limit import _resolve_client_ip
+from app.api.middleware._client_ip import _resolve_client_ip
 from app.api.response_shell import _unified_error_body, _use_unified_response
 from app.core import access_log_store
 from app.core.config import settings
@@ -20,7 +20,7 @@ from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
 
-# 不记录日志接口自身，避免自动轮询刷屏日志（静态页面已随 2026-09 结构整理移除）
+# 不记录日志接口自身，避免自动轮询刷屏日志（静态页面已移除）
 _SKIP_ACCESS_LOG_PATHS = {
     "/api/logs",
     "/api/third-party-logs",
@@ -278,7 +278,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
         response_full = None
         response_full_truncated = False
         # 409 统一外壳响应（重复上传）同样走摘要：保留 code/msg/summary/meta，
-        # 避免全量 orders 明细落日志（2026-08-26 审查修正）
+        # 避免全量 orders 明细落日志（审查修正）
         if response_text is not None and (status_code < 400 or status_code == 409):
             summarized = _summarize_response_for_log(request.url.path, response_text)
             if summarized is not None:

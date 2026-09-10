@@ -67,7 +67,7 @@ async def _validation_error_handler(
 
 
 async def _generic_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    """未包装异常兜底（审查修正 2026-08-27）：统一外壳路径（_UNIFIED_RESPONSE_PATHS
+    """未包装异常兜底（审查修正）：统一外壳路径（_UNIFIED_RESPONSE_PATHS
     内接口）返回 {code, msg, data}（msg 可直接展示），避免调用方在意外异常（httpx
     超时/解析器内部错误等）下拿到 FastAPI 默认 {"detail": ...} 破坏三字段契约；
     其余路径保持默认 {"detail": "Internal Server Error"} 行为不变。路由级

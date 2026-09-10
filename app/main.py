@@ -1,4 +1,4 @@
-"""FastAPI 入口（纯组装，2026-09 P1 去上帝化）。
+"""FastAPI 入口（纯组装）。
 
 应用组装见 app/api/app_factory.py（分层：middleware / routes / bridges /
 response_shell），启动时 create_app() 完成：
@@ -7,7 +7,7 @@ response_shell），启动时 create_app() 完成：
 3. discover() 自动扫描 app.skills 下所有子包并注册，动态挂
    `POST /skills/{name}/extract` 与 batch-extract 路由
 
-本模块不再承载测试接缝与 re-export（P1 起归位各宿主模块）：
+本模块不承载测试接缝与 re-export（由各宿主模块承载）：
 - 鉴权豁免 / 限流白名单：app/api/middleware/{auth,rate_limit}.py
 - 路由编排入口（publish_order / parse_document_to_order / build_result_async）：
   路由模块自身命名空间，测试以 setattr(路由模块, 符号名, ...) 注入替身

@@ -1,11 +1,11 @@
-"""路由→编排适配层（api 表现层内部，2026-09 结构整理自 api/executor 拆分）。
+"""路由→编排适配层（api 表现层内部，拆分自 api/executor）。
 
 收敛表现层与 orders 业务域的适配点（原 api/executor.py 的"路由异步包装"部分）：
 - publish_order / parse_document_to_order / extract_order_text 三个路由入口，
   直连 orders 域 async 编排；
-- 测试接缝（2026-09 P1 起）：路由模块级 import 本模块符号并在自身命名空间
+- 测试接缝：路由模块级 import 本模块符号并在自身命名空间
   调用，测试以 setattr(路由模块, 符号名, ...) 注入替身，不经 app.main 中转；
-- 并发控制（_inflight_semaphore / _run_skill）已随结构整理迁至 app/core/executor.py
+- 并发控制（_inflight_semaphore / _run_skill）已迁至 app/core/executor.py
   （core 不依赖业务域，skill 框架职责与业务适配分离）。
 """
 
@@ -26,7 +26,7 @@ async def publish_order(
     room_id: str,
     user_id: str,
 ) -> dict[str, Any]:
-    """下单直连异步下游（Phase 3 起不再占用线程；错误分类）。"""
+    """下单直连异步下游（不再占用线程；错误分类）。"""
     return await publish_create_order_async(order_data, room_id=room_id, user_id=user_id)
 
 
