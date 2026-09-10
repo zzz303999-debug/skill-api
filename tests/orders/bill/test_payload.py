@@ -215,6 +215,17 @@ class TestSubmitCanonical:
         assert result.success is True and result.skipped is False
         assert result.sn == "EX1" and result.error is None
 
+    async def test_numeric_sn_normalized_to_str(self, monkeypatch):
+        """下游回数字型 sn → 归一为字符串（严格模型下防校验异常冒泡整批）。"""
+
+        async def fake_post(*_a, **_k):
+            return FakeResponse({"code": "200", "data": [{"sn": 12345}]})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        result = await client_module.submit_canonical_async("sk", _sample_order())
+        assert result.success is True
+        assert result.sn == "12345"
+
     async def test_rejected_code_not_200(self, monkeypatch):
         """code 非 "200" → 该单 error（不抛异常，调用方按单处理）。"""
 

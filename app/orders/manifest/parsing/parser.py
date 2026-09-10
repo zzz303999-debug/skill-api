@@ -17,7 +17,7 @@
 - 原文保真：公司名/品名/提单号逐字复制（仅 strip 首尾空白）
 - 多提单号（v1.8）：全工作簿所有舱单 sheet 的提单号标签值收集进
   ManifestParseOutput.bl_nos，服务层去重后 ≥2 → 文件级拒绝；MBL NO 斜杠
-  双号（参考号/船司号）视为两个提单号计入（2026-08-21 用户拍板）
+  双号（参考号/船司号）视为两个提单号计入（用户拍板）
 
 一文件一票：parse_manifest 返回 ManifestParseOutput（order + engine + family）。
 """
@@ -215,7 +215,7 @@ def _parse_pieces(text: str) -> float | None:
 
 
 # 品名块内可识别的元数据行（INVOICE No. / HS CODE : …；剔除后余下即品名，
-# 2026-08-20 TMS 实测 goodsEname ≤ 100 字符，剔除元数据行替代硬截断）
+# TMS 实测 goodsEname ≤ 100 字符，剔除元数据行替代硬截断）
 _GOODS_METADATA_LINE_RE = re.compile(
     r"^\s*(invoice\s*(no|number)?\.?|hs\s*code)\s*[:：]", re.IGNORECASE
 )
@@ -237,7 +237,7 @@ def _clean_goods_name(text: str | None) -> str | None:
 def _mbl_no_slash(text: str | None) -> str | None:
     """托书 MBL 双号（参考号/船司号）→ 取斜杠后段（船司 MBL）。
 
-    2026-08-20 TMS 实测 bOrderNum 含斜杠 → 下游 500；后段与其余舱单
+    TMS 实测 bOrderNum 含斜杠 → 下游 500；后段与其余舱单
     SITGB 号段一致（SITGBASH006434 vs SITGBAYP006017/SITGBAQI005920）。
     仅用于主提取 bl_no 的展示口径；v1.8 起斜杠双号已按两个提单号计入
     多提单号拒绝（被拒文件不提交，TMS 无斜杠约束不再可达）。
@@ -249,7 +249,7 @@ def _mbl_no_slash(text: str | None) -> str | None:
     return tail or text
 
 
-# 三栏合并大格拆分标记（2026-08-20 TMS 实测三栏 Tel/Address 空值核查：
+# 三栏合并大格拆分标记（TMS 实测三栏 Tel/Address 空值核查：
 # 名称/地址/电话糊在同一格 → 按标记拆分归位，未匹配标记的部分原文保真）
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _TEL_LABEL_RE = re.compile(
@@ -335,7 +335,7 @@ def _parse_authorization(sheet: _SheetView) -> ManifestOrder:
     """托书家族提取（label 定位；区块值在 label 下方合并大格）。"""
     order = ManifestOrder(family="authorization")
 
-    # 提单号：MBL NO（双号斜杠 → 取后段船司 MBL，2026-08-20 TMS 实测口径）
+    # 提单号：MBL NO（双号斜杠 → 取后段船司 MBL，TMS 实测口径）
     pos = _find_label(sheet, ("mblno",))
     if pos:
         order.bl_no = _mbl_no_slash(_label_value_right(sheet, *pos)) or None
@@ -705,7 +705,7 @@ def parse_manifest(file_bytes: bytes) -> ManifestParseOutput:
         raise BadRequestError(
             "manifest is not a .xlsx file (magic bytes mismatch)",
             code="file_format_mismatch",
-            # 显式 description（2026-08-27 审查修正）：覆盖全局码的账单专属文案
+            # 显式 description（审查修正）：覆盖全局码的账单专属文案
             description="附件格式不匹配，请上传 .xlsx 格式的舱单文件",
             details={"expected": ".xlsx", "magic": file_bytes[:4].hex()},
         )

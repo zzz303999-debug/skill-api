@@ -1,4 +1,4 @@
-"""舱单导入成功路径的响应外壳判定（2026-09-09 自 api/response_shell 下沉）。
+"""舱单导入成功路径的响应外壳判定（自 api/response_shell 下沉）。
 
 与账单导入（app/orders/bill/import_response.py）同构的域侧判定：统一响应
 外壳 {code, msg, data} 的成功路径业务语义归 orders 域（纯函数零 IO、零 HTTP
@@ -7,7 +7,7 @@
 舱单口径（无账单式重复上传 409 语义：v1.9 起重复上传照常 200 重新提交，
 重复风险调用方自负）：
 - create 有新建（含部分失败）→ "200/添加成功"；全部失败 → "204"（msg 取
-  首个非空 error_message，兜底「添加失败」）
+  首个非空 message，兜底「添加失败」）
 - preview（或 create 无 summary 退化路径）→ "200"（整批文件级被拒时 msg
   给首个错误文案，code 保持 "200"——未产生下游动作，语义不冲突）
 """
@@ -33,7 +33,7 @@ def manifest_import_outcome(
     """成功路径 code/msg 判定（逻辑 1:1 迁移自 api/response_shell，行为零变更）。
 
     判定输入仅 result 与模式开关：summary（create 填充）的 created 计数定
-    200/204，orders 的 create_result 错误定失败文案（无 error_code 优先级，
+    200/204，orders 的 create_result 错误定失败文案（无错误码优先级，
     取首个非空错误文案的舱单口径）。
     """
     summary = result.summary
@@ -43,9 +43,9 @@ def manifest_import_outcome(
             return ManifestImportOutcome(code="200", msg="添加成功")
         failed_msg = next(
             (
-                d.get("error_message")
+                d.get("message")
                 for d in (summary.get("failed_details") or [])
-                if d.get("error_message")
+                if d.get("message")
             ),
             None,
         )
@@ -54,9 +54,9 @@ def manifest_import_outcome(
     # msg 给首个错误文案，其余成功文案
     msg = next(
         (
-            (o.create_result or {}).get("error", {}).get("message")
+            o.create_result.error.message
             for o in result.orders
-            if (o.create_result or {}).get("error")
+            if o.create_result and o.create_result.error
         ),
         None,
     )

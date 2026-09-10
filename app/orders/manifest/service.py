@@ -5,7 +5,7 @@
 - 箱型白名单：复用账单导入同一份 `config/box_type_whitelist.yaml` 与
   check_unknown_box_types（用户确认「箱型复用账单录入的」）；文件级拒绝
   对齐账单语义——任一单含白名单外标准码箱型 → 全部未决单 create_result
-  标记 unknown_box_type（preview 亦拒绝，不调下游，upstream 204 口径）；
+  标记 unknown_box_type（preview 亦拒绝，不调下游，不伪造上游回显）；
 - 箱型整体缺失（v1.7）：解析未提取到箱型 → 文件级拒绝 manifest_box_missing
   （preview 亦拒绝；形态对齐 unknown_box_type；空列表不触发白名单，互斥）；
 - 多提单号（v1.8）：全工作簿提取到 ≥2 个不同提单号（strip+大写去重）→
@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from app.core.logging_conf import get_logger
 
 from .parsing.parser import parse_manifest
-from .schema import MANIFEST_REQUIRED, ManifestParseResult
+from .schema import MANIFEST_REQUIRED, CreateResult, ManifestParseResult, OrderError
 from .submission.client import submit_manifest_async
 from .submission.payload import build_order_data, to_submit_payload
 
@@ -53,18 +53,15 @@ def _mark_box_type_rejection(order) -> bool:
     unknown = check_unknown_box_types([g.b_type for g in order.box_groups])
     if not unknown:
         return False
-    order.create_result = {
-        "success": False,
-        "sn": None,
-        "error": {
-            "code": "unknown_box_type",
-            "message": f"系统没有此箱型：{'、'.join(unknown)}，请联系客服",
-            "description": "箱型不在 TMS 支持清单中，请联系客服",
-            "details": {
-                "unknown_box_types": unknown,
-            },
-        },
-    }
+    order.create_result = CreateResult(
+        success=False,
+        sn=None,
+        error=OrderError(
+            code="unknown_box_type",
+            message=f"系统没有此箱型：{'、'.join(unknown)}，请联系客服",
+            details={"unknown_box_types": unknown},
+        ),
+    )
     return True
 
 
@@ -73,25 +70,22 @@ def _mark_multi_bl_no_rejection(order, bl_nos: list[str]) -> bool:
 
     全工作簿提取到 ≥2 个不同提单号（strip + 大写规范化去重）→ preview 与
     create 统一拒绝（manifest_multi_bl_no，不调下游），形态对齐 manifest_box_missing
-    （create_result 标记 + upstream 204 口径）。同一提单号重复出现（如表单区与
+    （create_result 标记，不伪造上游回显）。同一提单号重复出现（如表单区与
     明细表同号）、托书斜杠双号（取后段计 1 个）不算多票；HBL NO 分单不参与计数。
     返回是否命中（调用方跳过后续提交）。
     """
     unique = {bl.upper() for bl in bl_nos if bl and bl.strip()}
     if len(unique) < 2:
         return False
-    order.create_result = {
-        "success": False,
-        "sn": None,
-        "error": {
-            "code": "manifest_multi_bl_no",
-            "message": "舱单文件包含多个提单号，一文件仅支持一票，请拆分文件后重试",
-            "description": "舱单文件包含多个提单号，无法录入，请拆分文件后重试",
-            "details": {
-                "bl_nos": sorted(unique),
-            },
-        },
-    }
+    order.create_result = CreateResult(
+        success=False,
+        sn=None,
+        error=OrderError(
+            code="manifest_multi_bl_no",
+            message="舱单文件包含多个提单号，一文件仅支持一票，请拆分文件后重试",
+            details={"bl_nos": sorted(unique)},
+        ),
+    )
     return True
 
 
@@ -100,44 +94,42 @@ def _mark_box_missing_rejection(order) -> bool:
 
     解析未提取到任何箱型（SI 变体 1 无箱型来源、箱型无箱量变体）→ preview 与
     create 统一拒绝（manifest_box_missing，不调下游），形态对齐 unknown_box_type
-    （create_result 标记 + upstream 204 口径）。box_groups 为空不触发白名单校验
+    （create_result 标记，不伪造上游回显）。box_groups 为空不触发白名单校验
     （空列表全放行），两者互斥。返回是否命中（调用方跳过后续提交）。
     """
     if order.box_groups:
         return False
     missing = {f: order.missing_reasons.get(f, "原文未找到") for f in ("box_groups",)}
-    order.create_result = {
-        "success": False,
-        "sn": None,
-        "error": {
-            "code": "manifest_box_missing",
-            "message": "舱单未识别到箱型箱量（box_groups），请检查文件后重试",
-            "description": "舱单未提取到箱型箱量，无法录入，请检查文件后重试",
-            "details": {
+    order.create_result = CreateResult(
+        success=False,
+        sn=None,
+        error=OrderError(
+            code="manifest_box_missing",
+            message="舱单未识别到箱型箱量（box_groups），请检查文件后重试",
+            details={
                 "missing_fields": ["box_groups"],
                 "missing_reasons": missing,
             },
-        },
-    }
+        ),
+    )
     return True
 
 
 def _mark_not_ready(order) -> None:
     """必填缺失拦截（create 模式；preview 只报告 missing_fields）。"""
     missing = {f: order.missing_reasons.get(f, "原文未找到") for f in MANIFEST_REQUIRED if f in order.missing_fields}
-    order.create_result = {
-        "success": False,
-        "sn": None,
-        "error": {
-            "code": "manifest_order_not_ready",
-            "message": f"舱单必填信息不完整：{'、'.join(missing)}，请补充后重试",
-            "description": "舱单必填信息不完整，无法录入，请补充后重试",
-            "details": {
+    order.create_result = CreateResult(
+        success=False,
+        sn=None,
+        error=OrderError(
+            code="manifest_order_not_ready",
+            message=f"舱单必填信息不完整：{'、'.join(missing)}，请补充后重试",
+            details={
                 "missing_fields": list(missing),
                 "missing_reasons": missing,
             },
-        },
-    }
+        ),
+    )
 
 async def build_manifest_result_async(
     filename: str,
@@ -145,7 +137,7 @@ async def build_manifest_result_async(
     create_order: bool = False,
     sk: str = "",
 ) -> ManifestParseResult:
-    """build_manifest_result（2026-09 异步化改造后为生产唯一入口）：解析段（openpyxl CPU 密集）入线程池，
+    """build_manifest_result（异步化改造后为生产唯一入口）：解析段（openpyxl CPU 密集）入线程池，
     提交段走 submit_manifest_async（模块级绑定，测试可 patch），校验/响应组装
     语义。"""
     import asyncio
@@ -174,23 +166,24 @@ async def build_manifest_result_async(
     summary = None
     upstream = None
     if create_order:
-        result = order.create_result or {}
-        is_success = bool(result.get("success"))
+        result = order.create_result
+        is_success = bool(result and result.success)
+        error = result.error if result else None
         summary = {
             "total": 1,
             "success": 1 if is_success else 0,
             "failed": 0 if is_success else 1,
             "skipped": 0,
             "created": 1 if is_success else 0,
-            "success_sns": [result["sn"]] if is_success and result.get("sn") else [],
+            "success_sns": [result.sn] if is_success and result.sn else [],
             "failed_details": (
                 []
                 if is_success
                 else [
                     {
-                        "bl_no": order.bl_no,
-                        "error_code": (result.get("error") or {}).get("code"),
-                        "error_message": (result.get("error") or {}).get("message"),
+                        "order_num": order.bl_no,
+                        "code": error.code if error else None,
+                        "message": error.message if error else None,
                     }
                 ]
             ),
@@ -198,11 +191,10 @@ async def build_manifest_result_async(
         if is_success:
             upstream = {
                 "code": "200",
-                "msg": "成功",
-                "data": [result.get("upstream")] if result.get("upstream") else [],
+                "msg": "添加成功",
+                "data": [result.upstream] if result.upstream else [],
             }
-        elif result:
-            upstream = {"code": "204", "msg": "添加失败", "data": []}
+        # 失败/拦截 → upstream 保持 None（不伪造上游回显）
 
     return ManifestParseResult(
         file=filename,

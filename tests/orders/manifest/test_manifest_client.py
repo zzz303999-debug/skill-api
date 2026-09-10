@@ -39,45 +39,42 @@ class TestSubmitManifest:
         assert captured["url"] == _TEST_ADDBILL_URL
         assert captured["json"] is payload
         assert captured["headers"]["sk"] == "tk-1"
-        assert result == {
-            "success": True,
-            "sn": "11801",
-            "error": None,
-            "upstream": {"bId": 11801, "bOrderNum": "111"},
-        }
+        assert result.success is True and result.sn == "11801" and result.error is None
+        assert result.upstream == {"bId": 11801, "bOrderNum": "111"}
 
     async def test_string_code_200_also_accepted(self, monkeypatch):
         """防御性兼容字符串 "200"（勿与 AddWork 判定混用，兼容无伤）。"""
         _fake_post(monkeypatch, {"code": "200", "msg": "成功", "data": [{"bId": 7}]})
         result = await client_module.submit_manifest_async({}, "tk")
-        assert result["success"] is True
-        assert result["sn"] == "7"
+        assert result.success is True
+        assert result.sn == "7"
 
     async def test_200_with_null_data_still_created(self, monkeypatch):
-        """live 实证（2026-08-20）：服务端通道 200 + data null 仍真实创建 → 成功，sn 空串。"""
+        """live 实证：服务端通道 200 + data null 仍真实创建 → 成功，sn 空串。"""
         _fake_post(
             monkeypatch,
             {"code": 200, "msg": "成功", "data": None, "errorCode": 0, "errorMsg": None},
         )
         result = await client_module.submit_manifest_async({}, "tk")
-        assert result == {"success": True, "sn": "", "error": None, "upstream": None}
+        assert result.success is True and result.sn == "" and result.error is None
+        assert result.upstream is None
 
     async def test_rejection_passthrough(self, monkeypatch):
-        """code 204 → 失败；msg/data 透传 details.upstream（204 口径）。"""
+        """code 204 → 失败；msg/data 透传 details.upstream（上游拒绝样本）。"""
         _fake_post(
             monkeypatch, {"code": 204, "msg": "添加失败", "data": [], "errorMsg": "缺少参数"}
         )
         result = await client_module.submit_manifest_async({}, "tk")
-        assert result["success"] is False
-        assert result["sn"] is None
-        assert result["error"]["code"] == "order_upstream_error"
-        assert result["error"]["details"]["upstream"] == {
+        assert result.success is False
+        assert result.sn is None
+        assert result.error.code == "order_upstream_error"
+        assert result.error.details["upstream"] == {
             "code": "204",
             "msg": "添加失败",
             "data": [],
         }
-        assert result["error"]["details"]["upstream_error_msg"] == "缺少参数"
-        assert "添加失败" in result["error"]["message"]
+        assert result.error.details["upstream_error_msg"] == "缺少参数"
+        assert "添加失败" in result.error.message
 
     async def test_network_error_isolated(self, monkeypatch):
         """超时/网络错误按单记 error（不抛，调用方隔离失败单）。"""
@@ -87,5 +84,5 @@ class TestSubmitManifest:
 
         monkeypatch.setattr(http_client_module, "_post_async", fake_post)
         result = await client_module.submit_manifest_async({}, "tk")
-        assert result["success"] is False
-        assert result["error"]["details"]["error_type"] == "TimeoutException"
+        assert result.success is False
+        assert result.error.details["error_type"] == "TimeoutException"

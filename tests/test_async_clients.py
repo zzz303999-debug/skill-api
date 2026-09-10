@@ -288,8 +288,8 @@ async def test_submit_manifest_async_success(monkeypatch):
     monkeypatch.setattr(manifest_client, "post_json_async", fake_post)
     result = await manifest_client.submit_manifest_async({"bId": 1}, "sk-token")
     # code 数字 200 即成功（data null 时订单已落库，bId 缺席 sn 记空串）
-    assert result["success"] is True
-    assert result["sn"] == ""
+    assert result.success is True
+    assert result.sn == ""
 
 
 async def test_submit_manifest_async_network_error(monkeypatch):
@@ -300,8 +300,8 @@ async def test_submit_manifest_async_network_error(monkeypatch):
 
     monkeypatch.setattr(manifest_client, "post_json_async", fake_post)
     result = await manifest_client.submit_manifest_async({}, "sk-token")
-    assert result["success"] is False
-    assert "addBill network error" in result["error"]["message"]
+    assert result.success is False
+    assert "addBill network error" in result.error.message
 
 
 # ---------- create_archives_async ----------

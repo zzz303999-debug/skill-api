@@ -104,7 +104,7 @@ class TestBadFile:
 
 
 class TestSplitPartyBlock:
-    """三栏合并大格拆分：名称/地址/电话归位（2026-08-20 TMS 三栏空值核查）。"""
+    """三栏合并大格拆分：名称/地址/电话归位（TMS 三栏空值核查）。"""
 
     def test_si_v2_shipper_labeled_lines(self):
         from app.orders.manifest.parsing.parser import _split_party_block

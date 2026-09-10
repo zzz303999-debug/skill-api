@@ -15,6 +15,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
+from ..order_result import CreateResult
+from ..order_result import OrderError as OrderError
+
 # 识别有效账单必需的列：表头需同时包含「客户编号」「提单号」两列
 REQUIRED_HEADERS: tuple[str, ...] = ("客户编号", "提单号")
 
@@ -81,40 +84,6 @@ MISSING_BOX = "box"
 # 未提取到原因取值
 REASON_NOT_FOUND = "原文未找到"
 REASON_INVALID_FORMAT = "格式不合法"
-
-
-class OrderError(BaseModel):
-    """单条订单创建失败详情（create_result.error，R4/R5 模型化）。
-
-    固定三字段，无 description（本地零消费的冗余双轨已删除，message 为唯一
-    可读文案）：code 机器可读（unknown_box_type/missing_bl_no/order_upstream_
-    error）；message 单条失败说明；details 结构化补充，无补充为 {}。
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    code: str = Field(description="机器可读错误码")
-    message: str = Field(description="单条失败说明（可读文案/上游原文）")
-    details: dict[str, Any] = Field(default_factory=dict, description="结构化补充（上游回显/清单等），无补充为 {}")
-
-
-class CreateResult(BaseModel):
-    """单条订单创建结果（create_result，R5 模型化，对齐接口文档 §3.2.1）。
-
-    固定六键，缺省键恒输出不省略（skipped 默认 False、o_id/upstream/error 默认
-    null）：success 成功（含去重 skipped）；skipped 去重跳过；sn 下游订单号；
-    o_id TMS 通道业务编号（canonical 成功回显）；upstream 下游成功回显原样
-    保留（溯源）；error 失败详情（成功/跳过为 null）。
-    """
-
-    model_config = ConfigDict(extra="ignore")
-
-    success: bool = Field(description="是否成功（skipped 去重命中亦算成功）")
-    skipped: bool = Field(default=False, description="是否去重跳过（同 sk 已创建成功过该键）")
-    sn: str | None = Field(None, description="下游订单号；失败为 null")
-    o_id: str | int | None = Field(None, description="TMS 通道业务编号；仅 canonical 成功且有回显时非 null")
-    upstream: dict[str, Any] | None = Field(None, description="下游成功回显原样保留（溯源用）；无回显为 null")
-    error: OrderError | None = Field(None, description="失败详情；成功/跳过为 null")
 
 
 class BillPeriod(BaseModel):

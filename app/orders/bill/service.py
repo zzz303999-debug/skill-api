@@ -41,8 +41,12 @@ from .parsing.opener import (
 )
 from .parsing.parser import ParseOutput
 from .response_build import build_summary, build_upstream, order_dedup_parts
-from .schema import BillParseResult, CreateResult
-from .submission.client import create_canonical_orders_async, create_orders_async
+from .schema import BillParseResult
+from .submission.client import (
+    _skipped_result,
+    create_canonical_orders_async,
+    create_orders_async,
+)
 from .validation import reject_missing_bl_no, reject_unknown_box_types
 
 
@@ -145,9 +149,7 @@ def _aggregate_stage(output, create_order: bool, sk: str):
                 continue  # 无键不查重；文件级 missing_bl_no 校验统一拒绝
             box, seq = order_dedup_parts(order)
             if rec := _imported.lookup(bl, _owner, container_no=box, fallback=seq):
-                order.create_result = CreateResult(
-                    success=True, skipped=True, sn=rec.get("sn")
-                )
+                order.create_result = _skipped_result(rec.get("sn"))
 
     all_pending = [o for o in (*canonical_orders, *orders) if o.create_result is None]
     reject_unknown_box_types(all_pending)

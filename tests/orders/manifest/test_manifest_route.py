@@ -1,6 +1,6 @@
 """路由层测试：preview/create 语义、sk 校验、重复上传照常 200、错误码。
 
-2026-09-01 起响应统一外壳 {code, msg, data}（对齐账单录入口径）：业务数据
+响应统一外壳 {code, msg, data}（对齐账单录入口径）：业务数据
 在 data 内，错误场景 msg 为可直接展示的中文错误信息。
 """
 
@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 
 import app.orders.manifest.service as service_module
 from app.main import app
+from app.orders.manifest.schema import CreateResult, OrderError
 
 CREATE_HEADERS = {"sk": "tk-test"}
 
@@ -40,7 +41,7 @@ class TestRoutePreview:
         r = _post(client, auth_bytes)
         assert r.status_code == 200
         body = r.json()
-        # 统一外壳：code/msg/data（2026-09-01 起对齐账单录入口径）
+        # 统一外壳：code/msg/data（对齐账单录入口径）
         assert body["code"] == "200"
         assert body["msg"] == "请求成功"
         data = body["data"]
@@ -100,7 +101,7 @@ class TestRouteCreate:
 
     def test_create_success(self, auth_bytes, monkeypatch):
         async def fake(_payload, _sk):
-            return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
+            return CreateResult(success=True, sn="11801", upstream={"bId": 11801})
 
         monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
@@ -117,12 +118,12 @@ class TestRouteCreate:
         data = body["data"]
         assert data["summary"]["created"] == 1
         assert data["summary"]["success_sns"] == ["11801"]
-        assert data["upstream"] == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
+        assert data["upstream"] == {"code": "200", "msg": "添加成功", "data": [{"bId": 11801}]}
 
     def test_duplicate_upload_returns_200(self, auth_bytes, monkeypatch):
         """v1.9 放开本地去重：同一文件重复上传照常重新创建，不再 409。"""
         async def fake(_payload, _sk):
-            return {"success": True, "sn": "11801", "error": None, "upstream": {"bId": 11801}}
+            return CreateResult(success=True, sn="11801", upstream={"bId": 11801})
 
         monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
@@ -137,12 +138,12 @@ class TestRouteCreate:
         data = body["data"]
         assert data["summary"]["created"] == 1
         assert data["summary"]["skipped"] == 0
-        assert data["upstream"] == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
+        assert data["upstream"] == {"code": "200", "msg": "添加成功", "data": [{"bId": 11801}]}
 
     def test_create_all_failed_204_upstream(self, auth_bytes, monkeypatch):
         """下游全拒 → 200 + 外壳 204 + 具体失败原因（非 HTTP 错误）。"""
         async def fake(_payload, _sk):
-            return {"success": False, "sn": None, "error": {"code": "x", "message": "rejected"}}
+            return CreateResult(success=False, sn=None, error=OrderError(code="x", message="rejected"))
 
         monkeypatch.setattr(service_module, "submit_manifest_async", fake)
         client = TestClient(app)
@@ -154,4 +155,4 @@ class TestRouteCreate:
         assert body["msg"] == "rejected"
         data = body["data"]
         assert data["summary"]["failed"] == 1
-        assert data["upstream"] == {"code": "204", "msg": "添加失败", "data": []}
+        assert data["upstream"] is None

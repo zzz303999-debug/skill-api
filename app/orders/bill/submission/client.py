@@ -57,6 +57,11 @@ def _error_result(message: str, *, details: dict[str, Any]) -> CreateResult:
     )
 
 
+def _sn_str(sn: Any) -> str | None:
+    """下游 sn 归一为 str（模型 sn 为严格 str；下游/注册表回数字时防校验
+    异常冒泡整批——单失败隔离优先）。"""
+    return str(sn) if sn is not None else None
+
 
 def _parse_downstream_response(
     response: httpx.Response,
@@ -118,7 +123,7 @@ def _parse_downstream_response(
     sn = None
     o_id = None
     if isinstance(data_list, list) and data_list and isinstance(data_list[0], dict):
-        sn = data_list[0].get("sn")
+        sn = _sn_str(data_list[0].get("sn"))
         if want_o_id:
             o_id = data_list[0].get("o_id")
     if want_o_id:
@@ -162,7 +167,7 @@ def _register_imported(
 
 def _skipped_result(sn: str | None) -> CreateResult:
     """去重命中（已成功创建过）的 create_result：success=True + skipped 标记。"""
-    return CreateResult(success=True, skipped=True, sn=sn)
+    return CreateResult(success=True, skipped=True, sn=_sn_str(sn))
 
 
 # ---- 下游提交入口（网络段异步；表单/判定/登记复用纯函数）----

@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 
 import app.orders.manifest.service as service_module
 from app.orders.manifest import build_manifest_result_async
+from app.orders.manifest.schema import CreateResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -17,10 +18,11 @@ pytestmark = pytest.mark.asyncio
 def _patch_submit(monkeypatch, payload):
     """mock service.submit_manifest → 固定响应（失败隔离：不抛异常）。"""
     calls = {"n": 0}
+    result = CreateResult.model_validate(payload)
 
     async def fake(_payload, _sk):
         calls["n"] += 1
-        return payload
+        return result
 
     monkeypatch.setattr(service_module, "submit_manifest_async", fake)
     return calls
@@ -67,8 +69,8 @@ class TestCreate:
         )
         result = await build_manifest_result_async("a.xlsx", auth_bytes, create_order=True, sk="tk")
         order = result.orders[0]
-        assert order.create_result["success"] is True
-        assert order.create_result["sn"] == "11801"
+        assert order.create_result.success is True
+        assert order.create_result.sn == "11801"
         assert result.summary == {
             "total": 1,
             "success": 1,
@@ -78,7 +80,7 @@ class TestCreate:
             "success_sns": ["11801"],
             "failed_details": [],
         }
-        assert result.upstream == {"code": "200", "msg": "成功", "data": [{"bId": 11801}]}
+        assert result.upstream == {"code": "200", "msg": "添加成功", "data": [{"bId": 11801}]}
         # 实际提交体回显：None→空串已转换
         assert order.order_data["orderInfos"][0]["bDate"] == ""
 
@@ -92,11 +94,11 @@ class TestCreate:
         result = await build_manifest_result_async("a.xlsx", buf.getvalue(), create_order=True, sk="tk")
         order = result.orders[0]
         assert calls["n"] == 0
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "manifest_order_not_ready"
-        assert order.create_result["error"]["details"]["missing_fields"] == ["pol"]
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "manifest_order_not_ready"
+        assert order.create_result.error.details["missing_fields"] == ["pol"]
         assert result.summary["failed"] == 1
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.upstream is None
 
     async def test_duplicate_upload_submits_again(self, auth_bytes, monkeypatch):
         """v1.9 放开本地去重：同一文件重复上传照常重新提交，不再 skipped。"""
@@ -109,18 +111,18 @@ class TestCreate:
         result = await build_manifest_result_async("a.xlsx", auth_bytes, create_order=True, sk="tk")
         order = result.orders[0]
         assert calls["n"] == 1  # 重复上传仍提交
-        assert order.create_result["success"] is True
-        assert order.create_result.get("skipped") is None
+        assert order.create_result.success is True
+        assert order.create_result.skipped is False
         assert result.summary["skipped"] == 0
         assert result.summary["created"] == 1
-        assert result.upstream == {"code": "200", "msg": "成功", "data": []}
+        assert result.upstream == {"code": "200", "msg": "添加成功", "data": []}
 
     async def test_upstream_rejection_failed_not_registered(self, auth_bytes, monkeypatch):
         """下游 204 拒绝 → 失败单不登记，可重导重试。"""
         _patch_submit(monkeypatch, {"success": False, "sn": None, "error": {"code": "x", "message": "m"}})
         result = await build_manifest_result_async("a.xlsx", auth_bytes, create_order=True, sk="tk")
-        assert result.orders[0].create_result["success"] is False
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.orders[0].create_result.success is False
+        assert result.upstream is None
         from app.orders.manifest.submission import imported_registry
 
         assert imported_registry.get_manifest_registry().snapshot() == {}
@@ -139,9 +141,9 @@ class TestBoxWhitelist:
     async def test_unknown_box_type_rejected_preview(self, auth_bytes):
         result = await build_manifest_result_async("a.xlsx", self._illegal_box_bytes(auth_bytes))
         order = result.orders[0]
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "unknown_box_type"
-        assert "40GOH" in order.create_result["error"]["message"]
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "unknown_box_type"
+        assert "40GOH" in order.create_result.error.message
         assert result.summary is None  # preview：summary 仍为 null（对齐账单）
 
     async def test_unknown_box_type_not_submitted_create(self, auth_bytes, monkeypatch):
@@ -151,7 +153,7 @@ class TestBoxWhitelist:
         )
         assert calls["n"] == 0
         assert result.summary["failed"] == 1
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.upstream is None
 
 class TestBoxMissing:
     """箱型整体缺失文件级拒绝（v1.7：preview 亦拒绝；不调下游；与白名单互斥）。"""
@@ -168,25 +170,25 @@ class TestBoxMissing:
         """preview 亦拒绝：create_result 标记 manifest_box_missing，summary 仍 null。"""
         result = await build_manifest_result_async("a.xlsx", self._no_box_bytes(auth_bytes))
         order = result.orders[0]
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "manifest_box_missing"
-        assert "box_groups" in order.create_result["error"]["message"]
-        details = order.create_result["error"]["details"]
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "manifest_box_missing"
+        assert "box_groups" in order.create_result.error.message
+        details = order.create_result.error.details
         assert details["missing_fields"] == ["box_groups"]
         assert details["missing_reasons"]["box_groups"] == "原文未找到"
         assert result.summary is None  # preview：summary 仍为 null（对齐账单）
 
     async def test_box_missing_not_submitted_create(self, auth_bytes, monkeypatch):
-        """create：不调下游、不登记注册表；summary failed=1；upstream 204。"""
+        """create：不调下游、不登记注册表；summary failed=1；upstream 为 null。"""
         calls = _patch_submit(monkeypatch, {"success": True, "sn": "1"})
         result = await build_manifest_result_async(
             "a.xlsx", self._no_box_bytes(auth_bytes), create_order=True, sk="tk"
         )
         assert calls["n"] == 0
         order = result.orders[0]
-        assert order.create_result["error"]["code"] == "manifest_box_missing"
+        assert order.create_result.error.code == "manifest_box_missing"
         assert result.summary["failed"] == 1
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.upstream is None
         from app.orders.manifest.submission import imported_registry
 
         assert imported_registry.get_manifest_registry().snapshot() == {}
@@ -196,7 +198,7 @@ class TestBoxMissing:
         result = await build_manifest_result_async("a.xlsx", si_bytes)
         order = result.orders[0]
         assert order.box_groups == []
-        assert order.create_result["error"]["code"] == "manifest_box_missing"
+        assert order.create_result.error.code == "manifest_box_missing"
 
     async def test_whitelist_unknown_still_takes_precedence(self, auth_bytes):
         """有箱型但白名单外 → 仍走 unknown_box_type（box_missing 不触发，互斥）。"""
@@ -206,10 +208,10 @@ class TestBoxMissing:
         wb.save(buf)
         result = await build_manifest_result_async("a.xlsx", buf.getvalue())
         order = result.orders[0]
-        assert order.create_result["error"]["code"] == "unknown_box_type"
+        assert order.create_result.error.code == "unknown_box_type"
 
 class TestMultiBlNo:
-    """多提单号文件级拒绝（v1.8：preview 亦拒绝；不调下游；upstream 204 口径）。"""
+    """多提单号文件级拒绝（v1.8：preview 亦拒绝；不调下游；不伪造上游回显）。"""
 
     def _two_sheet_si_bytes(self, si_bytes) -> bytes:
         """双舱单 sheet 各一提单号（多票文件）。"""
@@ -224,23 +226,23 @@ class TestMultiBlNo:
         """preview 亦拒绝：create_result 标记 manifest_multi_bl_no，summary 仍 null。"""
         result = await build_manifest_result_async("a.xlsx", self._two_sheet_si_bytes(si_bytes))
         order = result.orders[0]
-        assert order.create_result["success"] is False
-        error = order.create_result["error"]
-        assert error["code"] == "manifest_multi_bl_no"
-        assert "拆分文件" in error["message"]
-        assert error["details"]["bl_nos"] == ["SITGBAQI005920", "SITGBAYP006017"]
+        assert order.create_result.success is False
+        error = order.create_result.error
+        assert error.code == "manifest_multi_bl_no"
+        assert "拆分文件" in error.message
+        assert error.details["bl_nos"] == ["SITGBAQI005920", "SITGBAYP006017"]
         assert result.summary is None
 
     async def test_multi_bl_no_not_submitted_create(self, si_bytes, monkeypatch):
-        """create：不调下游；summary failed=1；upstream 204。"""
+        """create：不调下游；summary failed=1；upstream 为 null。"""
         calls = _patch_submit(monkeypatch, {"success": True, "sn": "1"})
         result = await build_manifest_result_async(
             "a.xlsx", self._two_sheet_si_bytes(si_bytes), create_order=True, sk="tk"
         )
         assert calls["n"] == 0
-        assert result.orders[0].create_result["error"]["code"] == "manifest_multi_bl_no"
+        assert result.orders[0].create_result.error.code == "manifest_multi_bl_no"
         assert result.summary["failed"] == 1
-        assert result.upstream == {"code": "204", "msg": "添加失败", "data": []}
+        assert result.upstream is None
 
     async def test_slash_double_no_rejected(self, auth_bytes):
         """MBL NO 斜杠双号（参考号/船司号）视为两个提单号（v1.8 用户拍板）→ 拒绝。"""
@@ -250,9 +252,9 @@ class TestMultiBlNo:
         wb.save(buf)
         result = await build_manifest_result_async("a.xlsx", buf.getvalue())
         order = result.orders[0]
-        assert order.create_result["success"] is False
-        assert order.create_result["error"]["code"] == "manifest_multi_bl_no"
-        assert order.create_result["error"]["details"]["bl_nos"] == [
+        assert order.create_result.success is False
+        assert order.create_result.error.code == "manifest_multi_bl_no"
+        assert order.create_result.error.details["bl_nos"] == [
             "SIT0807BASH591",
             "SITGBASH006434",
         ]
@@ -265,5 +267,6 @@ class TestMultiBlNo:
         buf = io.BytesIO()
         wb.save(buf)
         result = await build_manifest_result_async("a.xlsx", buf.getvalue())
-        error_code = (result.orders[0].create_result or {}).get("error", {}).get("code")
+        cr = result.orders[0].create_result
+        error_code = cr.error.code if cr and cr.error else None
         assert error_code != "manifest_multi_bl_no"

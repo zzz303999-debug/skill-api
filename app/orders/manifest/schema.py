@@ -20,11 +20,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..order_result import CreateResult
+from ..order_result import OrderError as OrderError
+
 # create 模式必填（缺失 → 拦截该单不提交，preview 只报告）：
 # 提单号 / 起运港（POL 原文）
 # （box_groups 自 v1.7 起升级为文件级拒绝 manifest_box_missing（preview 亦拒绝），
 #   不在 _mark_not_ready 按单拦截；保留于元组供解析层 missing 标记与防御）
-# （每箱运价已移出必填：TMS 误设必填 + 模版无运价字段 → 恒 0，2026-08-20）
+# （每箱运价已移出必填：TMS 误设必填 + 模版无运价字段 → 恒 0）
 MANIFEST_REQUIRED: tuple[str, ...] = ("bl_no", "box_groups", "pol")
 
 # 未提取到原因取值（对齐账单导入惯例）
@@ -103,8 +106,8 @@ class ManifestOrder(BaseModel):
         None,
         description="上游 addBill 请求体回显（preview=待提交，create=实际提交；必填缺失键置 null）",
     )
-    create_result: dict[str, Any] | None = Field(
-        None, description="创建结果 {success, sn(bId), error, upstream}；preview 为 null"
+    create_result: CreateResult | None = Field(
+        None, description="创建结果（固定六键 + error 三元组，对齐账单口径）；preview 为 null"
     )
 
     def add_missing(self, field: str, reason: str = REASON_NOT_FOUND) -> None:
@@ -141,7 +144,7 @@ class ManifestImportResponse(BaseModel):
       （400/401/413/422/429/503 等）为机器可读错误码（bad_request 等）
     - msg：业务信息（成功/失败描述；错误场景为可直接展示的中文说明）
     - data：业务数据（原 ManifestParseResult 全部字段原样放入；错误场景为原 details）
-    HTTP 错误场景同样套本外壳（2026-09-01 起），不再返回 error 结构。
+    HTTP 错误场景同样套本外壳，不再返回 error 结构。
     """
 
     model_config = ConfigDict(extra="ignore")
