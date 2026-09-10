@@ -18,12 +18,11 @@ import pytest
 import app.core.http_client as http_client_module
 import app.orders.bill.submission.client as client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
+from app.orders.bill.submission.addwork_form import build_add_work_form, flatten_order
 from app.orders.bill.submission.client import (
     add_work_async,
-    build_add_work_form,
     create_canonical_orders_async,
     create_orders_async,
-    flatten_order,
 )
 from helpers import FakeResponse
 
@@ -46,7 +45,7 @@ ORDER_DATA = {
     "factory_name": "安吉洁美",
     "factory_bei": "安吉",
     "month": "2018-01",
-    # data 收敛为 1 条货物明细（2026-08-26 实测修正：N 条相同 b_order_num 导致
+    # data 收敛为 1 条货物明细（实测修正：N 条相同 b_order_num 导致
     # TMS 按明细重复计入费用总额；row_count 由 aggregator 保留原始行数）
     "data": [{"b_order_num": "OOLU4044379500"}],
     "box": [{"b_type": "40GP", "box_num": 6}],
@@ -62,7 +61,7 @@ ORDER_DATA = {
     "shou": [{"运费": {"money": 2100.0}}, {"其它费": {"money": 400.0}}],
 }
 
-# §2.2 实测（2026-08-12）+ 抓包（2026-08-11）展平基准：超集键集 + 值填充——
+# §2.2 实测 + 抓包展平基准：超集键集 + 值填充——
 # 顶层 25 键、data[N] 7 子键、driver[0] 14 键全部恒发（无值空串）；shou 单条目
 # 多费用名（全挂 shou[0]，每费用名 6 属性键）；note 下沉到全部嵌套条目；
 # multiple_tare 与 duo_get/cost 合计键恒发。
@@ -104,7 +103,7 @@ EXPECTED_FLAT = {
     "b_factory_not": "",
     "b_tare": "",
     # 明细（data 7 子键：b_order_num 实际值，j/m/t/hh/mt/note 恒空；
-    # data 恒 1 条货物明细契约，2026-08-26 修正）
+    # data 恒 1 条货物明细契约，修正后）
     "data[0][b_order_num]": "OOLU4044379500",
     "data[0][j]": "",
     "data[0][m]": "",
@@ -132,7 +131,7 @@ EXPECTED_FLAT = {
     "driver[0][note]": "",
     # 应收费用（抓包形态：单条目多费用名，全挂 shou[0]；money 实际金额，
     # price_id/price_type/is_profit/dai_dian/note 恒空；有费用时补发通道级
-    # shou[0][note]——2026-08-25 测试环境实证：缺键 204 拒单 Undefined index: note）
+    # shou[0][note]——测试环境实证：缺键 204 拒单 Undefined index: note）
     "shou[0][note]": "",
     "shou[0][运费][money]": "2100.0",
     "shou[0][运费][price_id]": "",
@@ -202,7 +201,7 @@ class TestFlatten:
 
     async def test_null_to_empty_string_fixed_keys_always_sent(self):
         """超集键集：必填项缺失（null）→ 空字符串；缺失键也发送（空串）；
-        空 box 不产生键；c_id/note 恒发空串（2026-08-12 实测缺键即拒单）。"""
+        空 box 不产生键；c_id/note 恒发空串（实测缺键即拒单）。"""
         order_data = {
             "order_num1": None,
             "type": 1,
@@ -262,12 +261,12 @@ class TestFlatten:
         assert flat["box[0][box_num]"] == "2"
         assert flat["shou[0][运费][money]"] == "100.0"
         assert flat["shou[0][待时费][money]"] == "50.0"
-        # 有费用时补发通道级 note（2026-08-25 测试环境实证：缺键 204 拒单）
+        # 有费用时补发通道级 note（测试环境实证：缺键 204 拒单）
         assert flat["shou[0][note]"] == ""
 
     async def test_shou_attribute_keys(self):
         """shou[0] 单条目属性键：money 实际金额，price_id/price_type/is_profit/
-        dai_dian/note 恒空（抓包 2026-08-11 属性清单）。"""
+        dai_dian/note 恒空（抓包属性清单）。"""
         order_data = {
             "order_num1": "OOLU12345678",
             "type": 1,
@@ -313,12 +312,60 @@ class TestFlatten:
         assert "driver[0][secret_key]" not in flat
 
 
+class TestParseLogParity:
+    """判定合并保真：日志键与 extra 按通道分叉保持。
+
+    AddWork：jxt_order_rejected/_ok 带 step extra；canonical：
+    jxt_canonical_order_rejected/_ok 不带 step（rejected 仅 upstream_code，
+    ok 带 sn+o_id）。
+    """
+
+    async def test_rejected_log_keys_and_extra(self, urls, monkeypatch):
+        """双通道 rejected 日志：键名与 extra 分叉保真。"""
+        warned: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            client_module.log,
+            "warning",
+            lambda *a, **kw: warned.append((a[0], kw.get("extra") or {})),
+        )
+
+        async def fake_post(*_a, **_k):
+            return FakeResponse({"code": "204", "msg": "添加失败"})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        await client_module.add_work_async("sk", ORDER_DATA)
+        assert warned[-1] == (
+            "jxt_order_rejected",
+            {"step": "AddWork", "upstream_code": "204"},
+        )
+        await client_module.submit_canonical_async("sk", CanonicalOrder(bl_no="B1"))
+        assert warned[-1] == ("jxt_canonical_order_rejected", {"upstream_code": "204"})
+
+    async def test_ok_log_keys_and_extra(self, urls, monkeypatch):
+        """双通道成功日志：AddWork 带 step，canonical 带 sn+o_id 无 step。"""
+        logged: list[tuple[str, dict]] = []
+        monkeypatch.setattr(
+            client_module.log,
+            "info",
+            lambda *a, **kw: logged.append((a[0], kw.get("extra") or {})),
+        )
+
+        async def fake_post(*_a, **_k):
+            return FakeResponse({"code": "200", "data": [{"sn": "EX1", "o_id": 9}]})
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        await client_module.add_work_async("sk", ORDER_DATA)
+        assert logged[-1] == ("jxt_order_ok", {"step": "AddWork", "sn": "EX1"})
+        await client_module.submit_canonical_async("sk", CanonicalOrder(bl_no="B1"))
+        assert logged[-1] == ("jxt_canonical_order_ok", {"sn": "EX1", "o_id": 9})
+
+
 class TestAddWork:
     """AddWork：表单形态、成功取 sn、失败 error、不自动重试。"""
 
     async def test_empty_value_keys_present_in_body(self):
         """防空值过滤回归：urlencode 后的最终 body 必须含 note=/c_id= 等空值键
-        （2026-08-12 live 报 Undefined index: note，锁定为缺键而非空值）；
+        （live 报 Undefined index: note，锁定为缺键而非空值）；
         note 下沉到全部嵌套条目（data/box/driver/shou）；抓包键 multiple_tare
         与 duo_get/cost 合计键恒发。"""
         form = build_add_work_form(ORDER_DATA)
@@ -337,7 +384,7 @@ class TestAddWork:
             "box%5B0%5D%5Bnote%5D=",
             "driver%5B0%5D%5Bnote%5D=",
             "shou%5B0%5D%5B%E8%BF%90%E8%B4%B9%5D%5Bnote%5D=",
-            # shou 单条目属性键（抓包 2026-08-11）
+            # shou 单条目属性键（抓包）
             "shou%5B0%5D%5B%E8%BF%90%E8%B4%B9%5D%5Bprice_id%5D=",
             "shou%5B0%5D%5B%E8%BF%90%E8%B4%B9%5D%5Bdai_dian%5D=",
         ):
@@ -482,7 +529,7 @@ class TestCreateOrders:
         assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
     async def test_sk_passthrough_to_addwork(self, urls, monkeypatch):
-        """sk 原样透传：AddWork 请求头 sk == 调用方传入值（2026-08-19 起）。"""
+        """sk 原样透传：AddWork 请求头 sk == 调用方传入值。"""
         captured = {}
 
         async def fake_post(url, **kwargs):
@@ -534,7 +581,7 @@ class TestCreateOrders:
         assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
     async def test_missing_bl_no_blocked(self, urls, monkeypatch):
-        """提单号缺失 → missing_bl_no 拦截不提交（2026-09-01 拍板，client 层防御）。"""
+        """提单号缺失 → missing_bl_no 拦截不提交（用户拍板，client 层防御）。"""
         calls = {"addwork": 0}
 
         async def fake_post(url, **kwargs):
@@ -616,7 +663,7 @@ class TestCreateOrders:
         assert second[0].create_result.error is None
 
     async def test_dedup_different_sk_submits_again(self, urls, monkeypatch):
-        """异 sk（不同操作员）重导同一提单号 → 不命中注册表，照常提交（2026-08-31 起）。"""
+        """异 sk（不同操作员）重导同一提单号 → 不命中注册表，照常提交。"""
         calls = self._patch_chain(
             monkeypatch,
             [
@@ -631,7 +678,7 @@ class TestCreateOrders:
         await create_orders_async(second, "sk-b")
         assert calls["addwork"] == 2
         assert second[0].create_result.success is True
-        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，2026-09-09 R5）
+        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，R5）
 
     async def test_dedup_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """失败单不登记：修正后重导照常再次提交（不被误拦）。"""
@@ -652,7 +699,7 @@ class TestCreateOrders:
         assert calls["addwork"] == 2  # 失败单重导不受去重影响
 
     async def test_dedup_no_bl_not_registered(self, urls, monkeypatch):
-        """无提单号单：missing_bl_no 拦截不提交（2026-09-01 拍板），不写注册表。"""
+        """无提单号单：missing_bl_no 拦截不提交（用户拍板），不写注册表。"""
         calls = self._patch_chain(
             monkeypatch, [{"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]}]
         )
@@ -769,7 +816,7 @@ class TestCreateCanonicalOrdersDedup:
         assert second[0].create_result.error is None
 
     async def test_different_sk_same_bl_submits_again(self, urls, monkeypatch):
-        """TMS 通道：异 sk 重导同一提单号 → 照常提交、各自登记（2026-08-31 起）。"""
+        """TMS 通道：异 sk 重导同一提单号 → 照常提交、各自登记。"""
         calls = self._patch_chain(
             monkeypatch,
             [
@@ -784,7 +831,7 @@ class TestCreateCanonicalOrdersDedup:
         await create_canonical_orders_async(second, "sk-b")
         assert calls["submit"] == 2
         assert second[0].create_result.success is True
-        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，2026-09-09 R5）
+        assert second[0].create_result.skipped is False  # 真实新建，非 skipped（补全缺省键，R5）
 
     async def test_failed_not_registered_retry_submits(self, urls, monkeypatch):
         """TMS 通道：失败单不登记，重导照常提交。"""
@@ -805,7 +852,7 @@ class TestCreateCanonicalOrdersDedup:
         assert calls["submit"] == 2
 
     async def test_no_bl_submitted_not_registered(self, urls, monkeypatch):
-        """TMS 通道：无提单号单 missing_bl_no 拦截不提交（2026-09-01 拍板）。"""
+        """TMS 通道：无提单号单 missing_bl_no 拦截不提交（用户拍板）。"""
         calls = self._patch_chain(
             monkeypatch, [{"code": "200", "data": [{"sn": "EX1"}]}]
         )
@@ -818,7 +865,7 @@ class TestCreateCanonicalOrdersDedup:
 
 
 class TestProcessSharedCreateSlots:
-    """进程级共享下游槽（2026-09 用户拍板）：修复"每请求新建 Semaphore 致 N×C 放大"。
+    """进程级共享下游槽（用户拍板）：修复"每请求新建 Semaphore 致 N×C 放大"。
 
     两批并发 create（各 4 单、互异提单号）共享 _create_downstream_slots（4 槽）：
     同时进入下游 fake_post 的任务峰值 ≤ bill_create_concurrency，而非 8 路全放。

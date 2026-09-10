@@ -1,18 +1,16 @@
 """CanonicalOrder → TMS 业务订单新增接口 form-data（《逆推规范》§4 映射表）。
 
-接口怪癖全部封装在本层，不外泄：
-- form-data 扁平括号记法（group[idx][field]）；
-- `create_order=true` 触发下单、`o_id` 留空 = 新增；
-- 端点实测（2026-08-13）：TMS 直连走 AddWork 端点 + sk 头 + create_order=true
-  （publishCreateOrder 强制要求有效 userId+roomId，不可行）；b 字段（JSON 双写）
-  实测非必需，不再发送；
-- `type` 枚举：目前仅确认 1=出口，其余值留 TODO（《逆推规范》§6-5）默认 1；
-- 多箱号 `b_num`：实测首箱可正确写入（VRCU000001），第二箱号无落点
-  （《逆推规范》§6-3 待界面确认），配置位 `split_per_container` 预留（默认 false）；
-- 费用四通道（T13）：shou/pay/cost/duo_get 键位严格按《逆推规范》§2.7，
-  合计由我方计算回写（EX26080031 实测 b_totle_ys/yf 回显可为 0.00，不可信）。
+接口怪癖封装在本层，不外泄：
+- form-data 扁平括号记法（group[idx][field]）；create_order=true 触发下单，
+  o_id 留空 = 新增；
+- 直连走 AddWork 端点 + sk 头（publishCreateOrder 不可行）；b 字段 JSON
+  双写实测非必需，不再发送；
+- type 枚举仅确认 1=出口（其余留 TODO，默认 1）；多箱号 b_num 只写首箱
+  （第二箱号无落点，split_per_container 配置位预留）；
+- 费用四通道（T13）：键位按《逆推规范》§2.7，合计由我方计算回写（TMS
+  汇总回显不可信）。
 
-build_order_form 为纯函数，返回 (form 字段字典, 警告清单)；客户端与
+build_order_payload 为纯函数，返回 (form 字段字典, 警告清单)；客户端与
 测试共用同一实现（保证 live 与生产一致）。
 """
 
@@ -20,7 +18,7 @@ from __future__ import annotations
 
 from ..schema import CanonicalOrder, FeeItem
 
-# type 枚举：1=出口（2026-08-13 抓包确认）；其余值待实测补全（TODO），暂默认 1
+# type 枚举：1=出口（抓包确认）；其余值待实测补全（TODO），暂默认 1
 _TYPE_EXPORT = "1"
 
 # 多箱号拆分调用配置位（《逆推规范》§6-3 待验证）：true 时逐箱拆单，本轮默认 false
@@ -61,8 +59,8 @@ def _pick_month(order: CanonicalOrder) -> str | None:
 def _build_note(order: CanonicalOrder) -> str | None:
     """备注 + 业务编号/业务类型备查（竞品编号 TMS 无直接字段，拼入备注）。
 
-    结果同时发 b_note 与 c_note（2026-08-31 用户拍板双发）：TMS 界面「业务备注」
-    落点未实证，双发零风险（PHP 控制器硬读键名，多余键无害、缺键才 204）。
+    结果同时发 b_note 与 c_note（用户拍板）：TMS 界面「业务备注」落点未实证，
+    双发零风险（PHP 控制器硬读键名，缺键才 204）。
     """
     segments: list[str] = []
     remark = _first(order.remark)
@@ -78,7 +76,7 @@ def _build_note(order: CanonicalOrder) -> str | None:
 def collect_unmapped_note(order: CanonicalOrder) -> str | None:
     """收集无 TMS 表单落点的标准字段 → 报告说明（预览/对账报告可见）。
 
-    当前客户字段已由 `c_title` 承接（旧链路 AddWork 实测 2026-08-12 dump：
+    当前客户字段已由 `c_title` 承接（旧链路 AddWork 实测 dump：
     c_title=小王），其余标准字段均有落点（《逆推规范》§4）；本函数为扩展点，
     未来 F3 档案匹配策略（客户未命中报告）在此扩展。
     """
@@ -87,17 +85,14 @@ def collect_unmapped_note(order: CanonicalOrder) -> str | None:
 
 
 def _emit_fees(form: dict[str, str], order: CanonicalOrder) -> None:
-    """费用四通道发射（T13，键位严格按《逆推规范》§2.7）。
+    """费用四通道发射（T13，键位按《逆推规范》§2.7）。
 
-    - 每通道每费目：`{channel}[0][{tms_name}][money]`=两位小数字符串、`[price_id]`、
-      `[price_type]`/`[is_profit]`/`[dai_dian]` 取模板 fees.fee_defaults（默认 "1"）；
-    - 合计回写（我方计算，不依赖 TMS 汇总）：`driver[0][get_ys_zj]`=Σshou、
-      `driver[0][pay_yf_zj]`=Σpay、`cost[0][supplier_hj_zj]`=Σcost（键位按抓包原样）；
-      duo_get 合计 `duo_get_hj_zj` 预留、默认不出（公司成本通道默认不启用）；
-    - to_other 原名进**通道级** note（`{channel}[0][note]`，拼接「原名 ¥金额」列表）
-      ——2026-08-13 live 实证：控制器硬读该键，**有费用的通道 note 必须恒发**
-      （无 to_other 项时发空串，缺键 204 拒单 Undefined index: note）；
-      per-费目 note 键未实证，先用通道级，实测后再细化；
+    - 每通道每费目：`{channel}[0][{tms_name}][money]` 两位小数 + `[price_id]` +
+      `price_type`/`is_profit`/`dai_dian`（模板 fees.fee_defaults，默认 "1"）；
+    - 合计由我方计算回写：`driver[0][get_ys_zj]`=Σshou、`[pay_yf_zj]`=Σpay、
+      `cost[0][supplier_hj_zj]`=Σcost（键位按抓包原样）；duo_get 合计预留不出口；
+    - **有费用的通道 note 必须恒发**（控制器硬读该键，缺键 204 拒单
+      Undefined index: note）：to_other 原名拼「原名 ¥金额」列表，无则空串；
     - 空通道整段省略；excluded 项（税金/price_id 待补）不录入、不进合计。
     """
     defaults = getattr(order, "_fee_defaults", {}) or {}
@@ -122,14 +117,13 @@ def _emit_fees(form: dict[str, str], order: CanonicalOrder) -> None:
             form[f"{prefix}[is_profit]"] = is_profit
             form[f"{prefix}[dai_dian]"] = dai_dian
             if channel == "cost":
-                # cost 费目条目硬读 driver_name（《逆推规范》§2.7 + 2026-08-13 live
-                # 实证：缺键 204 拒单 Undefined index: driver_name，层级为费目条目内）
+                # cost 费目条目硬读 driver_name（《逆推规范》§2.7；缺键 204 拒单）
                 form[f"{prefix}[driver_name]"] = ""
             totals[channel] = totals.get(channel, 0.0) + float(fee.money)
             if fee.code == "other" and fee.note:
                 notes.setdefault(channel, []).append(f"{fee.note} ¥{fee.money:.2f}")
     for channel in by_channel:
-        # 通道级 note 恒发（live 实证：缺键 204 拒单 Undefined index: note）
+        # 通道级 note 恒发（控制器硬读，缺键 204 拒单）
         form[f"{channel}[0][note]"] = "；".join(notes.get(channel, []))
 
     # 合计回写（键位按抓包原样）：应收/应付进 driver[0]，成本进 cost[0]
@@ -150,21 +144,16 @@ def _archive_id(order: CanonicalOrder, kind: str) -> str:
     return str((refs.get(kind) or {}).get("archive_id") or "")
 
 
-def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
+def build_order_payload(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
     """CanonicalOrder → (form-data 字段字典, 警告清单)。
 
-    字段布局（《逆推规范》§2/§4）：单头业务字段（顶层）+ 客户（c_title/c_name/c_sn）+
-    货物明细 data[0]（b_order_num/j/m/hh）+ 箱信息（box[N] + 顶层 b_num/b_lock）+
-    门点（factory_name）+ 派车段 driver[0]。费用四通道省略。
+    字段布局（《逆推规范》§2/§4）：单头业务字段 + 客户（c_title/c_name/c_sn）+
+    货物明细 data[0] + 箱信息（box[N] + 顶层 b_num/b_lock）+ 门点 + 派车段
+    driver[0]；费用四通道见 _emit_fees。
 
-    客户字段口径（2026-08-13 实测确认，见《逆推规范》§4）：
-    - `c_title`=客户名称：响应回显确认（EX26081037/38 回显 c_title=测试客户204），
-      TMS「客户」字段正确落点，自由文本可保存；
-    - `c_name`=客户联系人：实证渲染为 UI「联系人」；
-    - `c_id` 恒发空串：PHP 控制器硬读（c_title 非空即读 c_id，缺键 204 拒单，
-      Undefined index: c_id，2026-08-13 实测）；c_phone 同旧链路超集恒发；
-    - `c_note` 与 `b_note` 双发同内容（2026-08-31 用户拍板：TMS 界面「业务备注」
-      落点未实证，双发零风险——PHP 控制器硬读键名，多余键无害）
+    客户字段口径（实测，见《逆推规范》§4）：c_title=客户名称（自由文本落点）；
+    c_name=客户联系人（UI「联系人」）；c_id 已建档回填 id、未建档空串（控制器
+    硬读，缺键 204 拒单）；c_note 与 b_note 双发同内容（用户拍板）。
     """
     warnings: list[str] = []
     month = _pick_month(order)
@@ -196,20 +185,17 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
         # 单头业务字段
         "type": _type_value(order),
         "b_note": note or "",
-        # 客户：c_title=客户名称（2026-08-13 实测响应回显确认，TMS「客户」字段落点）；
-        # c_name=客户联系人（实证渲染为 UI「联系人」，勿填客户名称）；
-        # c_id：已建档客户回填档案 id（T20，EX26080031 实证键）；未建档恒发空串
-        # （PHP 控制器硬读：c_title 非空即读 c_id，缺键 204 拒单）
+        # 客户：c_title=客户名称；c_name=客户联系人（勿填客户名称）；
+        # c_id：已建档回填档案 id（T20）；未建档恒发空串（控制器硬读，缺键 204）
         "c_title": order.customer_name or "",
         "c_name": order.customer_contact or "",
         "c_phone": order.contact_phone or "",
         "c_sn": order.customer_no or "",
-        # c_note 与 b_note 双发同内容（2026-08-31 用户拍板：TMS 界面「业务备注」
-        # 落点未实证，双发零风险——PHP 控制器硬读键名，多余键无害）
+        # c_note 与 b_note 双发同内容（用户拍板：落点未实证，双发零风险）
         "c_note": note or "",
         "c_id": _archive_id(order, "client"),
-        # 门点：已建档工厂回填 factory_id + b_factory_address_msg（T20；请求侧键位
-        # 未实证，先按同键发，验证单确认——多发键安全，缺键才 204）；未建档维持文本
+        # 门点：已建档回填 factory_id + b_factory_address_msg（T20；键位未实证，
+        # 先按同键发，多发键安全）；未建档维持文本
         "factory_name": order.door_point or "",
         "factory_id": _archive_id(order, "factory"),
         "b_factory_address_msg": (
@@ -259,11 +245,3 @@ def build_order_form(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
         _emit_fees(form, order)
 
     return form, warnings
-
-
-def build_order_payload(order: CanonicalOrder) -> tuple[dict[str, str], list[str]]:
-    """TMS 直连完整表单：扁平字段 + create_order=true（b 双写实测非必需，不再发送）。
-
-    返回 (form 字段字典, 警告清单)。
-    """
-    return build_order_form(order)
