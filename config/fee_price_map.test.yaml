@@ -1,18 +1,15 @@
-# 标准费目码 → TMS 费目映射表（测试环境，2026-08-13 起建）
-# 条目级只保留业务定义（tms_name/import，全局共享无归属语义）；price_id 是
-# 归属敏感的 TMS 档案主键，按账号配在 owner_price_ids 段（2026-09-08 用户拍板：
-# 费目全链按 sk 隔离，废除全局显式 id——订单费用只挂自己账号名下的档案）。
-# owner_price_ids 键 = owner_key(sk) = sha256(sk) 前 16 hex（查询：python
-# scripts/fee_owner_key.py <sk>）；环境切换只换文件（config/fee_price_map.{env}.yaml），
-# 代码零环境名。
+# 标准费目码 → TMS 费目映射表（测试环境）。
+# price_id 归属敏感，按账号配在 owner_price_ids：键 = sha256(sk) 前 16 hex
+# （查询：python scripts/fee_owner_key.py <sk>）。
+# 环境切换只换文件（config/fee_price_map.{env}.yaml），代码零环境名。
 freight:     { tms_name: 运费 }
 pre_pick:    { tms_name: 预提费 }
 fuel:        { tms_name: 油费 }
 trip:        { tms_name: 出车费 }
-hijack:      { tms_name: 打劫费 }   # 竞品样本中未出现，先登记防长尾撞上
+hijack:      { tms_name: 打劫费 }
 waiting:     { tms_name: 待时费 }
 pre_inport:  { tms_name: 预进港 }
-drop_box:    { tms_name: 落箱费 }   # 落/还箱费同目
+drop_box:    { tms_name: 落箱费 }
 amend:       { tms_name: 打单费 }
 yangshan:    { tms_name: 洋山费 }
 damage_box:  { tms_name: 坏污箱费 }
@@ -24,16 +21,14 @@ tally:       { tms_name: 理货费 }
 move:        { tms_name: 搬移费 }
 lift:        { tms_name: 上下车费 }
 port_misc:   { tms_name: 港杂费 }
-tax:         { tms_name: 税金 }     # 2026-09-01 与 prod 对齐：税金照录
+tax:         { tms_name: 税金 }     # 账单税金照录
 other:       { tms_name: 其它费 }   # to_other 长尾归并目标（sn=AUTO_OTHER）
-deduction:   { tms_name: 扣除费 }   # T27a 负向扣减项（赢辉应付区）
+deduction:   { tms_name: 扣除费 }   # 负向扣减项（应付区）
 
-# per-owner 显式 price_id（原条目级全局 id 迁移，2026-09-08 owner 化）：
-# b221a427a2fec0b0 = 测试环境登录 sk（.tmp/sk_token.txt，2026-09-03）——
-# 2026-08-14 起测试期自举建档的档案挂该会话账号名下。预置后其首传直接命中，
-# 不重建不撞名；sk 重新登录后 owner_key 变化需同步迁移本段键。
-# default = 无 sk 直调槽（测试直调/pytest 路径）：测试环境预置全套 id 保持
-# 旧版全局语义下的测试行为（生产**不配** default——无 sk 是异常路径，降级不建）。
+# per-owner 显式 price_id；预置后该账号首传直接命中，不重建；
+# sk 重新登录后 owner_key 变化需同步迁移本段键。
+# default = 无 sk 直调槽（测试直调/pytest 路径）：预置全套 id 保持既有测试行为；
+# 生产不配 default（无 sk 是异常路径，降级不建）。
 owner_price_ids:
   "default":
     freight: 820
@@ -82,7 +77,7 @@ owner_price_ids:
     other: 124832
     deduction: 124850
 
-# 费目自举（T24/T25）：缺失费目码在导入命中时懒创建并登记 id（按 owner 槽）；
+# 费目自举：缺失费目码在导入命中时懒创建并登记 id（按 owner 槽）；
 # 显式段已预置存量账号，此段为新增未知费目时的兜底。
 fee_bootstrap:
   enabled: true
@@ -100,5 +95,5 @@ fee_bootstrap:
     od: "0"
     use_imprest: "0"
     expense_rate: "5"
-    class_id: "4612"           # 费类=运费（测试环境实证）；其它类待费类表到位后细分
+    class_id: "4612"           # 费类=运费（其它类待费类表到位后细分）
     classification_name: 运费

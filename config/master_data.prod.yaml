@@ -1,36 +1,28 @@
-# 阶段三：基础资料阈值建档配置——生产环境（APP_ENV=prod 时加载）
-# 按环境拆分（2026-09-02）：config/master_data.{env}.yaml 双份随镜像分发，
-# APP_ENV 决定加载哪份（与 fee_price_map.{env}.yaml 同模式）——环境切换零 Git 改动，
-# 禁止再出现「本地联调改本文件、生产部署前改回」的手工切换提交。
-# 客户/工厂/司机+车辆累计出现次数 > threshold 才建档（订单与费用照常录入，不阻塞）；
-# 计数键：客户=归一名；工厂=「名+地址」复合键；司机+车辆=「司机名+车牌」组合键；
-# 计数范围：跨全部模板家族全局累计；达阈值当批建档、当批回填。
-# 任何档案类 endpoint 为 TODO/空 → 该档案类自动降级为只计数不建档（端点是运维补给，不 fail fast）。
-# 代码零竞品名零 TMS 值硬编码：分组/部门/业务员等默认值全部在本文件配置。
+# 基础资料阈值建档配置——生产环境（APP_ENV=prod 时加载）。
+# 与 test 双份随镜像分发，APP_ENV 决定加载哪份（环境切换零 Git 改动）。
+# 累计出现次数 > threshold 才建档（订单/费用照常录入，不阻塞）：
+# 客户=归一名；工厂=名+地址；司机+车辆=司机名+车牌；跨全部模板家族累计，
+# 达阈值当批建档、当批回填。
+# 档案类 endpoint 为 TODO/空 → 该档案类降级为只计数不建档（端点是运维补给，不 fail fast）。
+# 分组/部门/业务员等默认值全部在本文件配置，代码不硬编码。
 master_data:
   enabled: true
   threshold: 5
-  # T27b 建档重复语义：TMS 按 client_name 等唯一约束拒单时，msg 命中任一标记
-  # → 视为「外部已存在」（exists_external），登记后不再重试建档（无查询接口，
-  # 无法取 id，订单继续文本提交）；配置化匹配串，不写死单串。
+  # 建档撞唯一约束时 msg 命中任一标记 → 视为「外部已存在」（exists_external），
+  # 登记后不再重试建档（配置化匹配串，不写死单串）。
   duplicate_markers:
   - 已存在
   - Duplicate entry
   - 重复
-  # 建档编码前缀（sn 规则：{prefix}{5 位序号}，序号取该键累计计数；防存量撞名避让位）
+  # 建档编码前缀（sn = {prefix}{5 位序号}，序号取该键累计计数，防存量撞名）。
   sn_prefix:
     client: CLT
     factory: FAC
     bailor: BAL
     truck: TRK
     driver: DRV
-  # 建档端点（逆推规范 §14 端点表，2026-08-14 补齐 6/6）：建档族在 s3.jxt56.com，
-  # 与订单 tms.jxt56.com 不同宿主——client 按全量 URL 直发（不拼 base、不写死 host）。
-  # bailor_create 保持 TODO：委托人为本阶段只计数不建档。
-  # driver_create 2026-08-14 实证启用：正确端点是 /Car/CarDriver/AddCarDriver
-  # （与客户/工厂/车辆同族），抓包实测 bailor_title/bailor_id 可空（提交成功），
-  # 响应带主键 data.id（294329）——推翻早前 AddDriverGroup 端点方案 A 的三条缺陷
-  # （bailor_title 必填 / bailor_id 主键唯一 / 响应无主键），司机恢复正常建档。
+  # 建档端点按全量 URL 直发（建档族与订单不同宿主，不拼 base、不写死 host）。
+  # bailor_create 保持 TODO：委托人本阶段只计数不建档。
   endpoints:
     client_create: "https://s3.jxt56.com/Car/CarClient/AddCarClient"
     factory_create: "https://s3.jxt56.com/Car/CarFactory/AddCarFactory"
@@ -38,9 +30,7 @@ master_data:
     truck_create: "https://s3.jxt56.com/Car/CarTruck/AddCarTruck"
     driver_create: "https://s3.jxt56.com/Car/CarDriver/AddCarDriver"
     price_create: "https://s3.jxt56.com/Car/CarPrice/AddCarPrice"
-  # 建档默认值（逆推规范 §14 最小字段集之外的必要值；未配键不发送）
-  # 归属字段动态化
-  # 归属键，由 TMS 按 sk 会话自动分发
+  # 建档默认值（未配键不发送）；归属键（su_id/remind_id 等）由 TMS 按 sk 会话自动分发，不得写死。
   defaults:
     client:  { cg_id: "4", cg_name: 同行, sys_type: "1" }
     truck:   { section_id: "6987", sys_type: "1", type: bill }
