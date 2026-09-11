@@ -4,8 +4,6 @@
 access_log.py 写入、由 api/routes/meta.py 读取；本模块不含 HTTP 逻辑。
 
 - `record()` 由 FastAPI 中间件调用，按日志时间写入当日文件
-
-- `record()` 由 FastAPI 中间件调用，按日志时间写入当日文件
   `requests-YYYY-MM-DD.jsonl`（单日超限轮转归档为 `.1/.2/...`，编号递增不覆盖）；
 - `query()` 供 `GET /api/logs` 查询，只读内存缓冲（最新在前），避免每次读文件；
 - 服务重启后首次使用时回填各按天文件尾部进内存，保证近期历史可查；
@@ -27,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.core.log_support import entry_in_time_range, normalize_ts_bound
 from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -213,6 +212,23 @@ def record(entry: dict[str, Any]) -> None:
         _maybe_maintain(path)
 
 
+def _response_code(entry: dict[str, Any]) -> str | None:
+    """从审计条目的响应文本（JSON 字符串）提取业务码 code（统一外壳）。
+
+    非 JSON / 截断后不可解析 / 无 code 字段时返回 None（不匹配任何 code 过滤）。
+    """
+    text = entry.get("response")
+    if not isinstance(text, str) or not text:
+        return None
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get("code") is not None:
+        return str(data["code"])
+    return None
+
+
 def query(
     *,
     limit: int = 200,
@@ -220,13 +236,22 @@ def query(
     path: str | None = None,
     file: str | None = None,
     status: int | None = None,
+    status_min: int | None = None,
+    status_max: int | None = None,
+    code: str | None = None,
+    method: str | None = None,
+    min_duration_ms: float | None = None,
+    ts_from: datetime | None = None,
+    ts_to: datetime | None = None,
     request_id: str | None = None,
     ip: str | None = None,
     include_full: bool = False,
 ) -> dict[str, Any]:
     """查询请求日志，按时间倒序（最新在前）。
 
-    支持按路径、文件名（子串）、状态码、请求 ID、客户端 IP 过滤，返回分页结果。
+    支持按路径、文件名（子串）、HTTP 状态码（精确或范围）、统一外壳业务码
+    （response.code）、方法、最短耗时、时间范围（ts_from/ts_to，naive 边界
+    按 UTC 解释）、请求 ID、客户端 IP 过滤，返回分页结果。
     include_full=False（默认）时剥离 response_full 大字段，页面列表/内存
     占用最小；导出等需要完整响应体的场景传 include_full=True。
     """
@@ -234,14 +259,48 @@ def query(
     needle_path = path.strip().lower() if path else None
     needle_file = file.strip().lower() if file else None
     needle_ip = ip.strip().lower() if ip else None
+    needle_method = method.strip().upper() if method else None
+    needle_code = code.strip() if code else None
+    ts_from = normalize_ts_bound(ts_from)
+    ts_to = normalize_ts_bound(ts_to)
+    range_time = ts_from is not None or ts_to is not None
     items = list(_entries)  # 倒序展示
     items.reverse()
     if needle_path:
         items = [e for e in items if needle_path in str(e.get("path", "")).lower()]
     if needle_file:
         items = [e for e in items if needle_file in str(e.get("file", "")).lower()]
+    if range_time:
+        items = [e for e in items if entry_in_time_range(e.get("ts"), ts_from, ts_to)]
     if status is not None:
         items = [e for e in items if e.get("status") == status]
+    if status_min is not None:
+        items = [
+            e
+            for e in items
+            if isinstance(e.get("status"), int) and e["status"] >= status_min
+        ]
+    if status_max is not None:
+        items = [
+            e
+            for e in items
+            if isinstance(e.get("status"), int) and e["status"] <= status_max
+        ]
+    if needle_code:
+        items = [e for e in items if _response_code(e) == needle_code]
+    if needle_method:
+        items = [
+            e
+            for e in items
+            if str(e.get("method", "")).upper() == needle_method
+        ]
+    if min_duration_ms is not None:
+        items = [
+            e
+            for e in items
+            if isinstance(e.get("duration_ms"), (int, float))
+            and e["duration_ms"] >= min_duration_ms
+        ]
     if request_id:
         items = [e for e in items if request_id == e.get("request_id")]
     if needle_ip:

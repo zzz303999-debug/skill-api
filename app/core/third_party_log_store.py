@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import settings
+from app.core.log_support import (
+    entry_in_time_range,
+    get_request_id,
+    normalize_ts_bound,
+)
 from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -155,6 +160,9 @@ def record(
         "url": url,
         **extra,
     }
+    # 请求上下文透传：与 /api/logs 审计条同 request_id 串联（非请求上下文为 None；
+    # 调用方显式传入时尊重传入值）
+    entry.setdefault("request_id", get_request_id())
     _ensure_loaded()
     day = entry["ts"][:10]
     path = _daily_file(date.fromisoformat(day))
@@ -182,39 +190,51 @@ def query(
     status_min: int | None = None,
     status_max: int | None = None,
     level: str | None = None,
+    request_id: str | None = None,
+    ts_from: datetime | None = None,
+    ts_to: datetime | None = None,
 ) -> dict[str, Any]:
     """查询第三方调用日志，按时间倒序（最新在前）。
 
     支持按事件（third_party_request/response/error）、endpoint、状态码
-    （精确或范围）、级别过滤，返回分页结果。
+    （精确或范围）、级别、request_id（与 /api/logs 审计条串联）、时间范围
+    （ts_from/ts_to，naive 边界按 UTC 解释）过滤，返回分页结果。
     """
     _ensure_loaded()
     needle_message = message.strip().lower() if message else None
     needle_endpoint = endpoint.strip().lower() if endpoint else None
     needle_level = level.strip().lower() if level else None
+    ts_from = normalize_ts_bound(ts_from)
+    ts_to = normalize_ts_bound(ts_to)
+    range_time = ts_from is not None or ts_to is not None
     items = list(_entries)
     items.reverse()
     if needle_message:
         items = [e for e in items if needle_message in str(e.get("message", "")).lower()]
     if needle_endpoint:
         items = [e for e in items if needle_endpoint in str(e.get("endpoint", "")).lower()]
+    if range_time:
+        items = [e for e in items if entry_in_time_range(e.get("ts"), ts_from, ts_to)]
     if status is not None:
         items = [e for e in items if e.get("status_code") == status]
     if status_min is not None:
-        # 范围过滤只匹配有状态码的记录（request/error 事件无状态码不参与）
+        # 范围过滤只匹配有状态码的记录（request/error 事件无状态码不参与；
+        # isinstance 守卫防异常值 TypeError——与 access 侧同口径）
         items = [
             e
             for e in items
-            if e.get("status_code") is not None and e["status_code"] >= status_min
+            if isinstance(e.get("status_code"), int) and e["status_code"] >= status_min
         ]
     if status_max is not None:
         items = [
             e
             for e in items
-            if e.get("status_code") is not None and e["status_code"] <= status_max
+            if isinstance(e.get("status_code"), int) and e["status_code"] <= status_max
         ]
     if needle_level:
         items = [e for e in items if needle_level in str(e.get("level", "")).lower()]
+    if request_id:
+        items = [e for e in items if request_id == e.get("request_id")]
     total = len(items)
     return {
         "total": total,

@@ -16,6 +16,7 @@ from app.api.response_shell import _unified_error_body, _use_unified_response
 from app.core import access_log_store
 from app.core.config import settings
 from app.core.errors import ERROR_CODE_DESCRIPTIONS
+from app.core.log_support import reset_request_id, set_request_id
 from app.core.logging_conf import get_logger
 
 log = get_logger(__name__)
@@ -204,6 +205,9 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     if request.url.path in _SKIP_ACCESS_LOG_PATHS:
         return await call_next(request)
     request_id = request.headers.get("x-request-id") or uuid.uuid4().hex[:12]
+    # 请求上下文透传：下游 http_client 落盘第三方日志时读取，与审计条同
+    # request_id 串联（call_next 下游任务创建时复制当前 context，请求级隔离）
+    rid_token = set_request_id(request_id)
     client_ip, forwarded_for = _resolve_client_ip(request)
     body_text, body_truncated = None, False
     start = time.perf_counter()
@@ -271,6 +275,7 @@ async def _access_log_middleware(request: Request, call_next: Callable) -> Any:
     except Exception:
         raise
     finally:
+        reset_request_id(rid_token)
         # 竞品录入等大响应：按配置只落排查摘要（客户端响应不受影响，截断
         # 标记同步重置——摘要本身远小于截断上限）；完整响应体单独保留
         # response_full 供导出/取证，受独立上限截断（response_full_truncated）

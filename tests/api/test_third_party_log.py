@@ -120,3 +120,96 @@ def test_record_failure_does_not_raise(monkeypatch):
     monkeypatch.setattr(third_party_log, "_log_dir", lambda: BoomDir())
     _record(status_code=200)  # 不应抛异常
 
+
+def test_query_status_range_tolerates_bad_status_code():
+    """status_code 异常值（字符串，历史/外部写入）不参与范围过滤也不抛错。"""
+    _record(status_code=200, duration_ms=1)
+    third_party_log._entries.append(
+        {
+            "ts": "2026-09-11T00:00:00+00:00",
+            "level": "INFO",
+            "message": "third_party_response",
+            "endpoint": "bad",
+            "url": "u",
+            "status_code": "200",  # 异常落盘：字符串
+        }
+    )
+    assert third_party_log.query(status_min=100)["total"] == 1
+    assert third_party_log.query(status_max=300)["total"] == 1
+
+
+def test_record_carries_request_id_from_context():
+    """请求上下文内的 request_id 自动附加到条目（与 /api/logs 审计条串联）。"""
+    from app.core import log_support
+
+    token = log_support.set_request_id("rid-link-1")
+    try:
+        _record(status_code=200)
+    finally:
+        log_support.reset_request_id(token)
+    _record(status_code=204)  # 上下文外：request_id 为 None
+
+    result = third_party_log.query(request_id="rid-link-1")
+    assert result["total"] == 1
+    assert result["items"][0]["request_id"] == "rid-link-1"
+    # 无上下文条目：字段存在但为 None（不匹配任何 request_id 过滤）
+    assert third_party_log.query()["items"][0]["request_id"] is None
+
+
+def test_request_context_links_audit_and_third_party(monkeypatch):
+    """端到端串联：中间件 set 的 request_id 经 asyncio context 传播到请求处理中的
+    下游记录（call_next task 边界复制验证）——审计条与第三方条同 ID 可联查。"""
+    from fastapi.testclient import TestClient
+
+    from app.core import skill_registry
+    from app.main import app
+
+    skill = next(s for s in skill_registry.all_skills() if s.name == "tuoshu")
+
+    async def fake_run(*, file_bytes, filename, options):
+        # 模拟请求处理中的下游调用落盘（真实链路为 http_client 内部调用）
+        third_party_log.record(
+            "third_party_request",
+            "INFO",
+            endpoint="AddWork",
+            url="https://s3.jxt56.com/Car/WorkOut/AddWork",
+        )
+        return {"result": {"source": {"file": filename, "doc_format": "docx"}}, "meta": {}}
+
+    monkeypatch.setattr(skill, "run", fake_run)
+    client = TestClient(app)
+    resp = client.post(
+        "/skills/tuoshu/extract",
+        files={"file": ("a.docx", b"fake content", "application/octet-stream")},
+        headers={"x-request-id": "rid-e2e-1"},
+    )
+    assert resp.status_code == 200
+    audit = client.get("/api/logs", params={"request_id": "rid-e2e-1"}).json()
+    assert audit["total"] >= 1
+    linked = client.get(
+        "/api/third-party-logs", params={"request_id": "rid-e2e-1"}
+    ).json()
+    assert linked["total"] == 1
+    assert linked["items"][0]["endpoint"] == "AddWork"
+
+
+def test_query_ts_range():
+    """时间范围过滤：闭区间；naive 边界按 UTC 解释，坏 ts 不匹配。"""
+    from datetime import UTC, datetime, timedelta
+
+    _record(status_code=200)
+    now = datetime.now(UTC)
+    past = now - timedelta(hours=1)
+    future = now + timedelta(hours=1)
+
+    assert third_party_log.query(ts_from=past, ts_to=future)["total"] == 1
+    assert third_party_log.query(ts_from=future)["total"] == 0
+    assert third_party_log.query(ts_to=past)["total"] == 0
+    # naive 边界与 aware 同值等价（按 UTC 解释）
+    assert (
+        third_party_log.query(
+            ts_from=past.replace(tzinfo=None), ts_to=future.replace(tzinfo=None)
+        )["total"]
+        == 1
+    )
+
