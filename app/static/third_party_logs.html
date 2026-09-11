@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>skill-api 第三方接口日志</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --panel: #ffffff;
+    --border: #e2e5ea;
+    --text: #1f2329;
+    --muted: #8a919c;
+    --ok: #2f9e5f;
+    --warn: #b7791f;
+    --err: #d64545;
+    --accent: #3b6cf6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  header { padding: 16px 20px 12px; }
+  h1 { margin: 0 0 12px; font-size: 17px; font-weight: 600; }
+  .sub { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 8px; }
+
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .toolbar input, .toolbar select {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 5px;
+    padding: 5px 9px;
+    font-size: 12px;
+  }
+  .toolbar input { width: 128px; }
+  .toolbar input:focus, .toolbar select:focus { outline: none; border-color: var(--accent); }
+  .toolbar button {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    border-radius: 5px;
+    padding: 5px 12px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .toolbar button.secondary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  #count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #count b { color: var(--text); font-weight: 600; }
+
+  main { padding: 4px 20px 40px; }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 7px 12px; text-align: left; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; border-bottom: 1px solid var(--border); }
+  td { border-top: 1px solid #f0f1f4; }
+  tbody tr:first-child td { border-top: none; }
+  tbody tr.row:hover td { background: #f7f9fc; }
+  tr.row.expandable { cursor: pointer; }
+
+  td.url { font-family: ui-monospace, Menlo, monospace; white-space: normal; word-break: break-all; min-width: 260px; }
+  .badge { display: inline-block; padding: 0 8px; border-radius: 10px; font-weight: 500; }
+  .b-ok { background: #e6f4ec; color: var(--ok); }
+  .b-warn { background: #fdf3e3; color: var(--warn); }
+  .b-err { background: #fdeaea; color: var(--err); }
+  .muted { color: var(--muted); }
+  .code { font-family: ui-monospace, Menlo, monospace; }
+
+  .body-row td { background: #fafbfc; padding: 0; }
+  .body-row pre {
+    margin: 0; padding: 10px 14px;
+    white-space: pre-wrap; word-break: break-all;
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 12px; max-height: 320px; overflow: auto;
+  }
+  .error-box {
+    margin: 10px 14px;
+    border: 1px solid #f0c9c9;
+    border-left: 3px solid var(--err);
+    background: #fdf5f5;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--err);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>第三方接口调用日志 <span class="sub">third-party-*.jsonl · 仅记录下游 POST（下单/建档/舱单）</span></h1>
+  <div class="toolbar">
+    <select id="f-message">
+      <option value="">全部事件</option>
+      <option value="third_party_request">request（发出）</option>
+      <option value="third_party_response">response（响应）</option>
+      <option value="third_party_request_error">error（网络异常）</option>
+    </select>
+    <select id="f-endpoint">
+      <option value="">全部端点</option>
+      <option value="publishCreateOrder">publishCreateOrder</option>
+      <option value="AddWork">AddWork</option>
+      <option value="AddWork-canonical">AddWork-canonical</option>
+      <option value="archive">archive-*（建档）</option>
+      <option value="addBill">addBill（舱单）</option>
+    </select>
+    <select id="f-status">
+      <option value="">全部状态码</option>
+      <option value="200">200</option>
+      <option value="204">204</option>
+      <option value="4xx">4xx</option>
+      <option value="5xx">5xx</option>
+    </select>
+    <select id="f-level">
+      <option value="">全部级别</option>
+      <option value="INFO">INFO</option>
+      <option value="WARNING">WARNING</option>
+    </select>
+    <button id="btn-refresh">刷新</button>
+    <label><input type="checkbox" id="auto-refresh" checked> 自动刷新（5s）</label>
+    <span id="count">共 <b>0</b> 条</span>
+  </div>
+</header>
+<main>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>级别</th>
+          <th>事件</th>
+          <th>端点</th>
+          <th>状态</th>
+          <th>耗时</th>
+          <th>URL</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const API = "/api/third-party-logs";
+let autoTimer = null;
+
+function getApiToken() {
+  return localStorage.getItem("skill-api-token") || "";
+}
+
+async function apiFetch(url) {
+  let resp = await fetch(url, { headers: { "Authorization": "Bearer " + getApiToken() } });
+  if (resp.status === 401) {
+    const token = prompt("该接口需要 API Key，请输入：", getApiToken());
+    if (!token) throw new Error("HTTP 401");
+    localStorage.setItem("skill-api-token", token);
+    resp = await fetch(url, { headers: { "Authorization": "Bearer " + token } });
+  }
+  return resp;
+}
+
+function buildQuery() {
+  const p = new URLSearchParams({ limit: "200" });
+  const message = document.getElementById("f-message").value;
+  const endpoint = document.getElementById("f-endpoint").value;
+  const status = document.getElementById("f-status").value;
+  const level = document.getElementById("f-level").value;
+  if (message) p.set("message", message);
+  if (endpoint) p.set("endpoint", endpoint);
+  if (status === "4xx" || status === "5xx") {
+    const lo = status[0] + "00", hi = status[0] + "99";
+    p.set("status_min", lo);
+    p.set("status_max", hi);
+  } else if (status) {
+    p.set("status", status);
+  }
+  if (level) p.set("level", level);
+  return p;
+}
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function levelClass(level) {
+  return level === "WARNING" ? "b-warn" : level === "ERROR" ? "b-err" : "b-ok";
+}
+
+function statusText(e) {
+  if (e.message === "third_party_request") return "—";
+  if (e.message === "third_party_request_error") return "✕";
+  return e.status_code ?? "—";
+}
+
+function render(data) {
+  const rows = document.getElementById("rows");
+  rows.innerHTML = "";
+  document.querySelector("#count b").textContent = data.total;
+  for (const e of data.items) {
+    const tr = document.createElement("tr");
+    tr.className = "row expandable";
+    const isErr = e.message === "third_party_request_error";
+    const isReq = e.message === "third_party_request";
+    tr.innerHTML =
+      "<td class='code muted'>" + esc((e.ts || "").replace("T", " ").slice(0, 19)) + "</td>" +
+      "<td><span class='badge " + levelClass(e.level) + "'>" + esc(e.level) + "</span></td>" +
+      "<td class='code'>" + esc(e.message) + "</td>" +
+      "<td class='code'>" + esc(e.endpoint || "") + "</td>" +
+      "<td class='code'>" + statusText(e) + "</td>" +
+      "<td class='code muted'>" + (e.duration_ms != null ? e.duration_ms + "ms" : "—") + "</td>" +
+      "<td class='url'>" + esc(e.url || "") + "</td>";
+    const detail = document.createElement("tr");
+    detail.className = "body-row";
+    detail.style.display = "none";
+    const parts = [];
+    if (e.error_type) parts.push("error_type: " + e.error_type);
+    if (isReq) parts.push("payload_kind: " + (e.payload_kind || ""));
+    if (e.body_preview) {
+      parts.push((isReq ? "request body" : "response body") + " (截断 2000):");
+      parts.push(e.body_preview);
+    }
+    detail.innerHTML = "<td colspan='7'><pre>" + esc(parts.join("\n")) + "</pre></td>";
+    tr.addEventListener("click", () => {
+      detail.style.display = detail.style.display === "none" ? "" : "none";
+    });
+    rows.appendChild(tr);
+    rows.appendChild(detail);
+  }
+  if (!data.items.length) {
+    rows.innerHTML = "<tr><td colspan='7' class='muted'>暂无日志（请求过第三方接口后自动产生）</td></tr>";
+  }
+}
+
+async function load() {
+  try {
+    const resp = await apiFetch(API + "?" + buildQuery().toString());
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    render(data);
+  } catch (err) {
+    document.getElementById("rows").innerHTML =
+      "<tr><td colspan='7'><div class='error-box'>加载失败：" + esc(err.message) + "</div></td></tr>";
+  }
+}
+
+function scheduleAuto() {
+  clearInterval(autoTimer);
+  if (document.getElementById("auto-refresh").checked) {
+    autoTimer = setInterval(load, 5000);
+  }
+}
+
+document.getElementById("btn-refresh").addEventListener("click", load);
+document.getElementById("auto-refresh").addEventListener("change", scheduleAuto);
+["f-message", "f-endpoint", "f-status", "f-level"].forEach(id =>
+  document.getElementById(id).addEventListener("change", load));
+load();
+scheduleAuto();
+</script>
+</body>
+</html>

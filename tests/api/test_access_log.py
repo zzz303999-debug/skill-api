@@ -67,10 +67,19 @@ def test_log_endpoints_not_recorded():
     client = TestClient(app)
     client.get("/api/logs")
     client.get("/api/logs")
+    client.get("/logs")  # 页面本身也在 skip 清单
     client.get("/healthz")
     payload = client.get("/api/logs").json()
     paths = {entry["path"] for entry in _items(payload)}
     assert paths == {"/healthz"}
+
+
+def test_logs_page_returns_html():
+    """内置请求日志页面可访问（页面无数据免鉴权；数据接口 /api/logs 仍需 Key）。"""
+    resp = TestClient(app).get("/logs")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "请求日志" in resp.text
 
 
 def test_query_filters():

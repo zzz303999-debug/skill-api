@@ -121,6 +121,18 @@ def test_record_failure_does_not_raise(monkeypatch):
     _record(status_code=200)  # 不应抛异常
 
 
+def test_third_party_logs_page_returns_html():
+    """内置第三方日志页面可访问（页面无数据免鉴权；数据接口 /api/third-party-logs 仍需 Key）。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    resp = TestClient(app).get("/third-party-logs")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "第三方接口调用日志" in resp.text
+
+
 def test_query_status_range_tolerates_bad_status_code():
     """status_code 异常值（字符串，历史/外部写入）不参与范围过滤也不抛错。"""
     _record(status_code=200, duration_ms=1)
