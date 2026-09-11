@@ -52,16 +52,8 @@
     "factory_name": "江阴市信腾新颖地面材料有限公司",
     "c_note": "数据准确，箱单填好过去；1750"
   },
-  "review_issues": [
-    {
-      "code": "missing_shipper_company",
-      "field": "shipper_company",
-      "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
-      "source_values": [],
-      "blocking": true
-    }
-  ],
-  "ready_for_order": false,
+  "review_issues": [],
+  "ready_for_order": true,
   "source": {
     "file": "A26042709390557851.jpg",
     "doc_format": "jpeg",

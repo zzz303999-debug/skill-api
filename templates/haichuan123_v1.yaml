@@ -1,0 +1,77 @@
+# 存在同名重复列（车牌号×2、提箱场站×2，实测数据一致）；plate_no 用「车牌号#1」取首次出现；
+# order_date 别名列表按优先级取「时间」→「到厂时间」。
+template_id: haichuan123_v1
+family: haichuan123
+name: 利润明细表·123家族
+match:
+  fingerprints:
+  - 62d6b07d
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: true
+  section_fill: forward
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: section_header
+required:
+- bl_no
+- box_type_qty
+year_source:
+- filename
+- settlement_row
+columns:
+  seq: 序号  # 一行一票去重键行序号兜底段（无箱号行）
+  biz_no: 业务编号
+  order_date:
+  - 时间
+  - 到厂时间
+  customer_name: 客户简称
+  load_point: 装货地点
+  biz_type: 业务类型
+  work_date: 做柜日期(年-月-日)
+  pickup_point: 提箱场站
+  bl_no: 提单号
+  box_type_qty: 箱型
+  container_no: 箱号
+  plate_no: 车牌号#1
+  fleet: 车队
+  driver_name: 司机
+  driver_phone: 司机手机
+  remark: 大表备注
+normalizers:
+  order_date: date_flex
+  work_date: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse
+# 费用段（T15）：海川123 应收/应付/车辆成本按实测启用；公司成本仅司机工资（低频）
+# → 不启用；无标准码费目（测温费/挂机费/背箱费/堆存费/回空费/指定箱号费/代垫
+# 费用/过路费/路桥费/维修费/轮胎费等）走字典 → to_other
+fees:
+  channels:
+    应收: shou
+    应付: pay
+    车辆成本: cost
+    # 公司成本: duo_get
+  mapping:
+    应收.运费: freight
+    应收.待时费: waiting
+    应收.吊装费: lift
+    应收.其它费: other
+    应付.运费: freight
+    应付.待时费: waiting
+    应付.吊装费: lift
+    应付.其它费: other
+    应付.落箱费: drop_box
+    车辆成本.油费: fuel
+    车辆成本.打单费: amend
+    车辆成本.其它费: other
+  unmapped_fee: to_other
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"

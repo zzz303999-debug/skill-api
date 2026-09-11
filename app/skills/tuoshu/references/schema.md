@@ -27,6 +27,8 @@
   "customs_cutoff": null,
   "loading_time": "2021-03-19",
 
+  "customer": "江苏倍联",
+
   "containers": [
     {
       "type": "40HC",
@@ -100,8 +102,8 @@
 | `internal_ref` | string \| null | | 我司业务编号 / 我司编号；对应订单接口 `c_sn` |
 | `customs_declaration_no` | string \| null | | 海关报关单号 / 明确标注的关单号；不得填我司业务编号 |
 | `customer_ref` | string \| null | | 客户编号 / PO / 客户订单号 |
-| `mbl_no` | string \| null | | 主提单号（Master B/L） |
-| `hbl_no` | string \| null | | 子提单号 / 分提单号（House B/L）；不得回退到 `mbl_no` |
+| `mbl_no` | string \| null | | 主提单号（Master B/L）；至少 8 位，仅数字或英文字母数字 |
+| `hbl_no` | string \| null | | 子提单号 / 分提单号（House B/L）；至少 8 位，仅数字或英文字母数字，不得回退到 `mbl_no` |
 | `vessel` | string \| null | | 船名，全大写 |
 | `voyage` | string \| null | | 航次，如 `FI111A` / `006W` / `2210E` |
 | `carrier` | string \| null | | 原文明示船公司时保留完整值；缺失时才按 `carriers.md` 推断缩写 |
@@ -113,6 +115,7 @@
 | `si_cutoff` | datetime \| null | | 截 SI / 截单时间 |
 | `customs_cutoff` | datetime \| null | | 截关 / 截报关 |
 | `loading_time` | date \| datetime \| null | | 做箱/装箱时间 |
+| `customer` | string \| null | | 客户名称或简称；优先取 `FM` 后的值，缺失时取明确客户栏或正文抬头公司；仍缺失时添加 blocking `missing_customer` 说明 |
 | `containers` | array | ✓ | 见下方 |
 | `factory` | object \| null | | 做箱工厂信息 |
 | `shipper_company` | string \| null | | 托运人公司；对应订单 `c_title`，不得用收件货代或个人姓名代填 |
@@ -142,14 +145,14 @@
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `type` | string | 原文箱型代码，见 `container-types.md`；禁止把 `40HQ` 改成 `40HC` |
+| `type` | string | 原文箱型代码；标准短代码为 `20/25/40` 加两位字母，共 4 位；禁止把 `40HQ` 改成 `40HC` |
 | `qty` | int | 该类型/该行的箱数 |
 | `container_no` | string \| null | 集装箱号（如 `SEGU1234567`），托书阶段通常为空 |
 | `seal_no` | string \| null | 铅封号，托书阶段通常为空 |
 | `packages` | int \| null | 件数 |
 | `packages_unit` | string \| null | 件数单位，如 `CTNS`/`PACKAGES`/`PKGS` |
-| `gross_weight_kg` | number \| null | 毛重（KG） |
-| `volume_cbm` | number \| null | 体积（CBM） |
+| `gross_weight_kg` | number \| null | 毛重（KG），原文单位可省略，最多保留 3 位小数 |
+| `volume_cbm` | number \| null | 体积（CBM），原文单位可省略，最多保留 3 位小数 |
 | `po_no` | string \| null | 客户 PO 号 |
 | `mbl_no` | string \| null | 该柜对应的提单号（多柜可能各有单号） |
 | `remark` | string \| null | 该柜专属备注 |
@@ -159,7 +162,7 @@
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | string \| null | 工厂名称 |
-| `address` | string \| null | 详细地址 |
+| `address` | string \| null | 详细街道地址，保留道路、门牌和园区/楼栋，不含公司、联系人、电话 |
 | `contact` | string \| null | 联系人姓名 |
 | `phone` | string \| null | 联系电话 |
 

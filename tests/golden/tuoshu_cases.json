@@ -29,7 +29,7 @@
       "deterministic_mapper": false
     },
     "expected": "tests/golden/tuoshu/expected/kflse220216031.json",
-    "expected_sha256": "91c08e7d3f8e56ae70d2337f62d4185337b8126c616a0ce352d3d4b9bbcaaa58"
+    "expected_sha256": "150426f28d602d593187c2d7529b904c5b1fe397d2dc129c1768b45ba5d07aa0"
   },
   {
     "name": "bsse2105280058",
@@ -45,7 +45,7 @@
       "deterministic_mapper": true
     },
     "expected": "app/skills/tuoshu/references/examples/bingsheng_transport.json",
-    "expected_sha256": "71f43022819ef467f3657e17dbc44d4a19f82c4d0d5196240f85b3f9e7372384"
+    "expected_sha256": "14ceb3537cef9b149d5ded64d23fb6f7449c4045a38549a6fe95c3bd261c8b2f"
   },
   {
     "name": "weishi_A26042709390557851",
@@ -61,6 +61,6 @@
       "deterministic_mapper": false
     },
     "expected": "tests/golden/tuoshu/expected/A26042709390557851.json",
-    "expected_sha256": "09f61a49aa7bbbfbfb65d0db68f7563863629ac0c6a0cf3cb79191f50fb8577a"
+    "expected_sha256": "47d4dfa4d16ac00caaf5d15c30f7e966f536ce620dfdd044b6ece75578738701"
   }
 ]

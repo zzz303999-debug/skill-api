@@ -49,14 +49,20 @@ class OrderMapping(BaseModel):
 class ContainerItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    type: str | None = Field(None, description="原文箱型代码，禁止在 HQ/HC/DV/GP 等类型间改写")
+    type: str | None = Field(
+        None,
+        description=(
+            "原文箱型代码；标准短代码为 20/25/40 加两位字母（如 20GP、40HQ），"
+            "禁止在 HQ/HC/DV/GP 等类型间改写"
+        ),
+    )
     qty: int | None = 1
     container_no: str | None = Field(None, description="箱号，必须为 4 个大写字母加 7 位数字")
     seal_no: str | None = Field(None, description="封号，不得包含空格或 OCR 图片区域文字")
     packages: int | None = None
     packages_unit: str | None = None
-    gross_weight_kg: float | None = None
-    volume_cbm: float | None = None
+    gross_weight_kg: float | None = Field(None, description="毛重（KG），最多保留 3 位小数")
+    volume_cbm: float | None = Field(None, description="体积（CBM），最多保留 3 位小数")
     po_no: str | None = None
     mbl_no: str | None = None
     remark: str | None = None
@@ -89,8 +95,8 @@ class TuoshuOutput(BaseModel):
     internal_ref: str | None = Field(None, description="我司业务编号，对应订单 c_sn")
     customs_declaration_no: str | None = None
     customer_ref: str | None = None
-    mbl_no: str | None = None
-    hbl_no: str | None = None
+    mbl_no: str | None = Field(None, description="至少 8 位，仅由数字或英文字母数字组成")
+    hbl_no: str | None = Field(None, description="至少 8 位，仅由数字或英文字母数字组成")
 
     vessel: str | None = None
     voyage: str | None = None
@@ -109,8 +115,16 @@ class TuoshuOutput(BaseModel):
     containers: list[ContainerItem] = Field(default_factory=list)
 
     factory: Factory | None = None
+    customer: str | None = Field(
+        None,
+        description="客户名称或简称；优先取 FM 后的值，缺失时取明确客户栏或正文抬头公司",
+    )
     shipper_company: str | None = Field(
-        None, description="仅取正文明确发货人/托运人栏位，对应订单 c_title"
+        None,
+        description=(
+            "正文明确发货人/托运人栏位；zuoxiang_std_esff 模板取做箱工厂，"
+            "对应订单 c_title"
+        ),
     )
     shipper_agent: str | None = Field(None, description="文档正文抬头或落款中的委托公司")
 

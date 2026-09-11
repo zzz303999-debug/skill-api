@@ -1,0 +1,99 @@
+{
+  "case": "bsse2105280058",
+  "generated_at": "2026-08-05",
+  "model": "deepseek-v4-flash",
+  "expected_file": "app/skills/tuoshu/references/examples/bingsheng_transport.json",
+  "diff_fields": [],
+  "actual": {
+    "doc_type": "TRANSPORT_ORDER",
+    "internal_ref": "BSSE2105280058",
+    "customs_declaration_no": null,
+    "customer_ref": null,
+    "mbl_no": "1SHA044022",
+    "hbl_no": null,
+    "vessel": "MAERSK LAVRAS",
+    "voyage": "122W",
+    "carrier": "MSK",
+    "pol": "SHANGHAI",
+    "pod": "MONTEVIDEO",
+    "transit_port": null,
+    "terminal": null,
+    "etd": "2021-06-05",
+    "si_cutoff": null,
+    "customs_cutoff": null,
+    "loading_time": "2021-06-01T08:00:00",
+    "containers": [
+      {
+        "type": "40NOR",
+        "qty": 1,
+        "container_no": null,
+        "seal_no": null,
+        "packages": null,
+        "packages_unit": null,
+        "gross_weight_kg": null,
+        "volume_cbm": null,
+        "po_no": null,
+        "mbl_no": "1SHA044022",
+        "remark": null
+      }
+    ],
+    "factory": {
+      "name": null,
+      "address": "江苏省扬州市宝应县望直港汽配工业园",
+      "contact": "杨会计",
+      "phone": "13921910878"
+    },
+    "customer": "上海秉晟国际物流有限公司",
+    "shipper_company": "上海秉晟国际物流有限公司",
+    "shipper_agent": "上海秉晟国际物流有限公司",
+    "recipient": "上海运嘉货运代理有限公司",
+    "doc_date": "2021-05-28",
+    "sender": null,
+    "sender_contact": null,
+    "remark": "海运出口",
+    "order_mapping": {
+      "c_sn": "BSSE2105280058",
+      "mbl_no": "1SHA044022",
+      "hbl_no": null,
+      "c_title": "上海秉晟国际物流有限公司",
+      "factory_name": null,
+      "c_note": "海运出口"
+    },
+    "review_issues": [
+      {
+        "code": "missing_container_measurements",
+        "field": "containers[0]",
+        "message": "集装箱件数和体积为空，需人工确认",
+        "source_values": [
+          "packages=0",
+          "gross_weight_kg=0",
+          "volume_cbm=0",
+          "gross_weight_kg=0.0",
+          "volume_cbm=0.0"
+        ],
+        "blocking": true
+      },
+      {
+        "code": "carrier_by_vessel",
+        "field": "carrier",
+        "message": "承运人并非原文明示值，而是由船名推断，需人工确认",
+        "source_values": [
+          "MAERSK LAVRAS",
+          "MSK"
+        ],
+        "blocking": true
+      },
+      {
+        "code": "unknown_container_type",
+        "field": "containers[0].type",
+        "message": "箱型不在已知识别表中，已逐字保留原文并提示人工确认",
+        "source_values": [
+          "40NOR"
+        ],
+        "blocking": false
+      }
+    ],
+    "ready_for_order": false,
+    "raw_text_snippet": "# 运输委托书\n\n上海秉晟国际物流有限公司\n\n| _row/col_ | A | B | C | D |\n| --- | --- | --- | --- | --- |\n| 1 | 订单编号： | BSSE2105280058 | 日期：20 | 21.5.28 |\n| 2 | TO： | 上海运嘉货运代理有限公司 | 海运出口 | |\n\n| _row/col_ | A | B | C |\n| -"
+  }
+}

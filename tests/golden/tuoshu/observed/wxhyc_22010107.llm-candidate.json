@@ -1,0 +1,113 @@
+{
+  "case": "wxhyc_22010107",
+  "generated_at": "2026-08-05",
+  "model": "deepseek-v4-flash",
+  "expected_file": "tests/golden/tuoshu/expected/wxhyc-22010107.json",
+  "diff_fields": [],
+  "actual": {
+    "doc_type": "TRANSPORT_ORDER",
+    "internal_ref": "WXHYC22010107",
+    "customs_declaration_no": null,
+    "customer_ref": null,
+    "mbl_no": "HLCUSHA2111JWDA1",
+    "hbl_no": null,
+    "vessel": "HYUNDAI HOPE",
+    "voyage": "046E",
+    "carrier": "HLC",
+    "pol": null,
+    "pod": "SAVANNAH",
+    "transit_port": "见设备交接单",
+    "terminal": null,
+    "etd": null,
+    "si_cutoff": null,
+    "customs_cutoff": null,
+    "loading_time": "2022-01-02",
+    "containers": [
+      {
+        "type": "40HC",
+        "qty": 1,
+        "container_no": null,
+        "seal_no": null,
+        "packages": 809,
+        "packages_unit": "CTNS",
+        "gross_weight_kg": 3300.9,
+        "volume_cbm": 33.277,
+        "po_no": "D0483/0908",
+        "mbl_no": "HLCUSHA2111JWDA1",
+        "remark": "博特装柜"
+      },
+      {
+        "type": "40HC",
+        "qty": 1,
+        "container_no": null,
+        "seal_no": null,
+        "packages": 927,
+        "packages_unit": "CTNS",
+        "gross_weight_kg": 3337.5,
+        "volume_cbm": 31.679,
+        "po_no": null,
+        "mbl_no": "HLCUSHA2111JWDA1A",
+        "remark": "合本内装；进仓编号HLCUSHA2111JWDA1A"
+      },
+      {
+        "type": "40HC",
+        "qty": 1,
+        "container_no": null,
+        "seal_no": null,
+        "packages": 2150,
+        "packages_unit": "CTNS",
+        "gross_weight_kg": 5375.0,
+        "volume_cbm": 64.518,
+        "po_no": null,
+        "mbl_no": "HLCUSHA2111JWDA1B",
+        "remark": "博特装柜"
+      }
+    ],
+    "factory": {
+      "name": null,
+      "address": "无锡市惠山区玉祁配套区祁北路127号",
+      "contact": "杨小姐",
+      "phone": "15906178209"
+    },
+    "customer": "范颖晰",
+    "shipper_company": null,
+    "shipper_agent": null,
+    "recipient": "上海捷阳国际货物运输代理有限公司",
+    "doc_date": null,
+    "sender": null,
+    "sender_contact": "范颖晰",
+    "remark": "3*40HC；HLCUSHA2111JWDA1: 809CTNS, 3300.9KGS, 33.277CBM(PO#D0483/0908)-博特装柜；HLCUSHA2111JWDA1A: 927CTNS, 3337.5KGS, 31.679CBM(进仓编号HLCUSHA2111JWDA1A)-合本内装；HLCUSHA2111JWDA1B:博特装柜 2150CTNS, 5375KGS, 64.518CBM；2149CTNS, 5372.5KGS, 64.487CBM；ADD/联系人：无锡市惠山区玉祁配套区祁北路127号；联系人：杨小姐 15906178209 李部长13400018802；RMB2500*2+300；请于1月2日上午9点提供箱封号",
+    "order_mapping": {
+      "c_sn": "WXHYC22010107",
+      "mbl_no": "HLCUSHA2111JWDA1",
+      "hbl_no": null,
+      "c_title": null,
+      "factory_name": null,
+      "c_note": "3*40HC；HLCUSHA2111JWDA1: 809CTNS, 3300.9KGS, 33.277CBM(PO#D0483/0908)-博特装柜；HLCUSHA2111JWDA1A: 927CTNS, 3337.5KGS, 31.679CBM(进仓编号HLCUSHA2111JWDA1A)-合本内装；HLCUSHA2111JWDA1B:博特装柜 2150CTNS, 5375KGS, 64.518CBM；2149CTNS, 5372.5KGS, 64.487CBM；ADD/联系人：无锡市惠山区玉祁配套区祁北路127号；联系人：杨小姐 15906178209 李部长13400018802；RMB2500*2+300；请于1月2日上午9点提供箱封号"
+    },
+    "review_issues": [
+      {
+        "code": "carrier_by_mbl",
+        "field": "carrier",
+        "message": "承运人并非原文明示值，而是由主提单号前缀推断，需人工确认",
+        "source_values": [
+          "HLCUSHA2111JWDA1",
+          "HLC"
+        ],
+        "blocking": true
+      },
+      {
+        "code": "conflicting_container_data",
+        "field": "containers[2].packages",
+        "message": "同一柜存在多组件数/重量/体积，需人工确认主值",
+        "source_values": [
+          "2150CTNS, 5375KGS, 64.518CBM",
+          "2149CTNS, 5372.5KGS, 64.487CBM"
+        ],
+        "blocking": true
+      }
+    ],
+    "ready_for_order": false,
+    "raw_text_snippet": "# 1-2 运输委托书 22010107 博特+时花内装+博特2X40.docx\n_format: docx_\n\n_p1_ 运输委托书\n\n_p2_ TO：上海捷阳国际货物运输代理有限公司\n\n_p3_ FM：范颖晰\n\n_p4: (empty)_\n\n_p5_ 我司编号：WXHYC22010107\n\n_p6_ 提单号：HLCUSHA2111JWDA1\n\n_p7_ 船名航次：HYUNDAI HOPE 04"
+  }
+}

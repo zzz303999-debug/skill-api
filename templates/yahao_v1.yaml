@@ -1,0 +1,127 @@
+# 实测表头某列为无表头空列（非合并单元格），直接忽略，不影响映射。
+template_id: yahao_v1
+family: yahao
+name: 利润明细表·亚灏家族
+match:
+  fingerprints:
+  - '91534182'
+  family_min_overlap: 0.85
+header:
+  row_anchor: 序号
+  two_row: true
+  section_fill: forward
+data:
+  row_filter: seq_numeric
+  stop_on:
+  - 合计
+fee_boundary: section_header
+required:
+- bl_no
+- box_type_qty
+year_source:
+- filename
+- settlement_row
+columns:
+  seq: 序号  # 一行一票去重键行序号兜底段（无箱号行）
+  order_date: 日期
+  biz_no: 业务编号
+  customer_name: 客户名称
+  customer_contact: 客户联系人
+  contact_phone: 联系电话
+  customer_no: 客户编号
+  biz_type: 业务类型
+  door_point: 门点
+  contact_person: 联系人
+  load_address: 装卸货地址
+  vessel: 船名
+  voyage: 航次
+  ship_date: 船期
+  discharge_port: 卸货港
+  delivery_place: 交货地
+  bl_no: 提单号
+  box_type_qty: 箱型箱量
+  container_no: 箱号
+  seal_no: 封条号
+  work_date: 做箱时间
+  port_area: 港区
+  port_open_time: 开港时间
+  port_cut_time: 截港时间
+  port_in_time: 进港时间
+  pickup_point: 提箱点
+  load_point: 装卸点
+  return_point: 还箱点
+  driver_name: 司机
+  plate_no: 车牌号
+  driver_phone: 司机手机
+normalizers:
+  order_date: date_flex
+  work_date: date_flex
+  ship_date: date_flex
+  port_open_time: date_flex
+  port_cut_time: date_flex
+  port_in_time: date_flex
+  bl_no: strip_float_tail
+  plate_no: strip_float_tail
+  biz_no: strip_float_tail
+  box_type_qty: box_parse
+# 费用段（T15）：亚灏四区块实测启用 应收/应付/车辆成本；公司成本→duo_get 语义
+# 未验证，一律注释掉不启用（验证后配置开启）；mapping 覆盖可映射标准码的高频费目，
+# 长尾（压车费/停车费/堆存费/疏港费/代办费等）走字典 → to_other
+fees:
+  channels:
+    应收: shou
+    应付: pay
+    车辆成本: cost
+    # 公司成本: duo_get
+  mapping:
+    应收.运费: freight
+    应收.洋山提空箱: yangshan
+    应收.空箱还洋山: yangshan
+    应收.预提费: pre_pick
+    应收.落箱费: drop_box
+    应收.预进港: pre_inport
+    应收.待时费: waiting
+    应收.打单费: amend
+    应收.超重费: overweight
+    应收.上下车费: lift
+    应收.搬移费: move
+    应收.坏/污箱费: damage_box
+    应收.动植场地费: inspect
+    应收.动检费: inspect
+    应收.动检掏箱费: inspect
+    应收.其它费: other
+    应收.理货费: tally
+    应收.港建费: port_misc
+    应收.港杂费: port_misc
+    应收.船公司坏污箱费: damage_box
+    应收.超期费: overdue
+    应收.过磅费: weigh
+    应付.运费: freight
+    应付.待时费: waiting
+    应付.上下车费: lift
+    应付.搬移费: move
+    应付.预提费: pre_pick
+    应付.坏/污箱费: damage_box
+    应付.预进港: pre_inport
+    应付.落箱费: drop_box
+    应付.动检费: inspect
+    应付.超重费: overweight
+    应付.其它费: other
+    车辆成本.出车费: trip
+    车辆成本.上下车费: lift
+    车辆成本.搬移费: move
+    车辆成本.坏/污箱费: damage_box
+    车辆成本.油费: fuel
+    车辆成本.落箱费: drop_box
+    车辆成本.预进港: pre_inport
+    车辆成本.其它费: other
+  unmapped_fee: to_other
+    # 2026-09-07：声明性冗余——yahao 为 two_row 家族，动态收录不生效（区块结构
+    # 严格界定费用区）；「公司利润」含锚点关键词已被 _is_anchor_column 兜底排除。
+    # 保留声明以备未来 two_row 放开收录时兜底（审查 S2：当前无消费路径）
+  ignore_headers:
+  - 公司利润
+  fee_defaults:
+    price_type: "1"
+    is_profit: "1"
+    dai_dian: "1"

@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 storage/
+.tmp/
+docs/
+.qoder/
+.github/
 .git/
 .idea/
 .vscode/

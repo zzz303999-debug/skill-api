@@ -12,3 +12,16 @@ build/
 ._*
 .idea/
 .vscode/
+
+.qoder/
+
+.github/workflows/
+
+.tmp/
+
+tests/golden/bill/**/*.xls
+tests/golden/bill/**/*.xlsx
+
+tests/golden/manifest/**/*.xlsx
+
+docs/

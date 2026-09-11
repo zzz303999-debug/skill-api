@@ -27,6 +27,7 @@ EN_TO_CN_TOP: dict[str, str] = {
     "si_cutoff": "截单时间",
     "customs_cutoff": "截关时间",
     "loading_time": "做箱时间",
+    "customer": "客户",
     "shipper_company": "托运人公司",
     "shipper_agent": "委托公司",
     "recipient": "收件方",

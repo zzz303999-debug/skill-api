@@ -37,7 +37,7 @@
     "contact": "杨会计",
     "phone": "13921910878"
   },
-  "shipper_company": null,
+  "shipper_company": "上海秉晟国际物流有限公司",
   "shipper_agent": "上海秉晟国际物流有限公司",
   "recipient": "上海运嘉货运代理有限公司",
   "doc_date": "2021-05-28",
@@ -48,7 +48,7 @@
     "c_sn": "BSSE2105280058",
     "mbl_no": "1SHA044022",
     "hbl_no": null,
-    "c_title": null,
+    "c_title": "上海秉晟国际物流有限公司",
     "factory_name": null,
     "c_note": "海运出口"
   },
@@ -58,13 +58,6 @@
       "field": "containers[0]",
       "message": "集装箱件数、毛重或体积包含非正数，已清空并需人工确认",
       "source_values": ["packages=0", "gross_weight_kg=0", "volume_cbm=0"],
-      "blocking": true
-    },
-    {
-      "code": "missing_shipper_company",
-      "field": "shipper_company",
-      "message": "缺少托运人公司，订单必填字段 c_title 需人工确认",
-      "source_values": [],
       "blocking": true
     },
     {

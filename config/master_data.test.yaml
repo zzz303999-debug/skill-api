@@ -1,0 +1,30 @@
+# 基础资料阈值建档配置——测试环境（APP_ENV=test 时加载，本地联调默认）。
+# 端点与生产同路径族、宿主切 test-s3；其余段（threshold/sn_prefix/defaults/
+# duplicate_markers）两环境保持一致。
+master_data:
+  enabled: true
+  threshold: 5
+  duplicate_markers:
+  - 已存在
+  - Duplicate entry
+  - 重复
+  sn_prefix:
+    client: CLT
+    factory: FAC
+    bailor: BAL
+    truck: TRK
+    driver: DRV
+  endpoints:
+    client_create: "https://test-s3.jxt56.com/Car/CarClient/AddCarClient"
+    factory_create: "https://test-s3.jxt56.com/Car/CarFactory/AddCarFactory"
+    bailor_create: "TODO"
+    truck_create: "https://test-s3.jxt56.com/Car/CarTruck/AddCarTruck"
+    driver_create: "https://test-s3.jxt56.com/Car/CarDriver/AddCarDriver"
+    price_create: "https://test-s3.jxt56.com/Car/CarPrice/AddCarPrice"
+  # 建档默认值（未配键不发送）；归属键（su_id/remind_id 等）由 TMS 按 sk 会话自动分发，不得写死。
+  defaults:
+    client:  { cg_id: "4", cg_name: 同行, sys_type: "1" }
+    truck:   { section_id: "6987", sys_type: "1", type: bill }
+    driver:  { sinout: 自做, sys_type: "1" }
+    factory: { sys_type: "1" }
+    bailor:  { sys_type: "1", is_involve: "1", is_quoted: "0" }

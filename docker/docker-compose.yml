@@ -1,0 +1,53 @@
+name: skill-api
+
+services:
+  skill-api:
+    build:
+      context: ..
+      dockerfile: docker/skill-api/Dockerfile
+    image: skill-api:latest
+    container_name: skill-api
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    env_file:
+      - ../.env
+    environment:
+      MINERU_BASE_URL: http://mineru:8888
+    depends_on:
+      mineru:
+        condition: service_healthy
+    volumes:
+      - ../storage:/app/storage
+      - ../templates:/app/templates
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mineru:
+    build:
+      context: ..
+      dockerfile: docker/mineru/Dockerfile
+      args:
+        MINERU_VERSION: ${MINERU_VERSION:-2.5.4}
+        MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+    image: ${MINERU_IMAGE:-skill-api-mineru:2.5.4}
+    container_name: mineru
+    restart: unless-stopped
+    command: ${MINERU_COMMAND:-mineru-api --host 0.0.0.0 --port 8888}
+    shm_size: ${MINERU_SHM_SIZE:-8g}
+    environment:
+      MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
+    expose:
+      - "8888"
+    ports:
+      - "8888:8888"
+    healthcheck:
+      test:
+        ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/docs', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s

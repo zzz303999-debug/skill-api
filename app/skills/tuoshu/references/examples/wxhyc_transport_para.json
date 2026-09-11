@@ -32,33 +32,7 @@
       "volume_cbm": 69.018,
       "po_no": null,
       "mbl_no": "292340329",
-      "remark": "柜1：A 工厂整柜"
-    },
-    {
-      "type": "40HC",
-      "qty": 1,
-      "container_no": null,
-      "seal_no": null,
-      "packages": 2300,
-      "packages_unit": "CTNS",
-      "gross_weight_kg": 5750,
-      "volume_cbm": 69.018,
-      "po_no": null,
-      "mbl_no": "292340329",
-      "remark": "柜2：A 工厂整柜"
-    },
-    {
-      "type": "40HC",
-      "qty": 1,
-      "container_no": null,
-      "seal_no": null,
-      "packages": 2300,
-      "packages_unit": "CTNS",
-      "gross_weight_kg": 5750,
-      "volume_cbm": 69.018,
-      "po_no": null,
-      "mbl_no": "292340329",
-      "remark": "柜3：A 工厂整柜"
+      "remark": "柜1-3：A 工厂整柜"
     },
     {
       "type": "40HC",
@@ -108,6 +82,7 @@
     "phone": "13800000002"
   },
 
+  "customer": "小张",
   "shipper_company": null,
   "shipper_agent": null,
 

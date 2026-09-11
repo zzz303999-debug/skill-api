@@ -1,9 +1,9 @@
 [project]
 name = "skill-api"
 version = "0.1.0"
-description = "Multi-skill extraction API service backed by OpenClaw gateway"
+description = "Multi-skill extraction API service backed by an OpenAI-compatible LLM"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -14,6 +14,8 @@ dependencies = [
     "openai>=1.54.0",
     "openpyxl>=3.1.5",
     "xlrd>=2.0.1",
+    "olefile>=0.47",  # 旧版 .doc LibreOffice 丢正文时 OLE WordDocument 流兜底提取
+    "pyyaml>=6.0",  # 账单模板库 templates/*.yaml 加载（template_store）
     "python-docx>=1.1.2",
     "pdfplumber>=0.11.4",
     "python-json-logger>=2.0.7",
@@ -24,6 +26,7 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.7.0",
+    "xlwt>=1.3.0",  # 测试构造小 .xls 账单（越界等 xlrd 引擎场景）
 ]
 
 [build-system]
@@ -41,6 +44,14 @@ extend-exclude = ["**/._*"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "helpers"]
+
+[tool.ruff.lint.per-file-ignores]
+# 迁移工具需兼容服务器宿主 python 3.6（无内置泛型注解，% 格式为同代写法）——
+# 与 target-version py311 风格规则冲突，按文件豁免；见 scripts/migrate_fee_registry_owners.py 头注释
+"scripts/migrate_fee_registry_owners.py" = ["UP006", "UP031", "UP035", "UP045"]
 
 [tool.pytest.ini_options]
 markers = [

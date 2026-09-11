@@ -2,7 +2,8 @@
 
 新增 skill 只需：
 1. 在 `app/skills/<name>/` 下建目录
-2. 定义 `class XxxSkill(SkillBase)` 并实现 `run()`
+2. 定义 `class XxxSkill(SkillBase)` 并实现 `async def run()`（2026-09 异步化
+   后契约统一为 async；CPU 密集段内部用 asyncio.to_thread 包裹）
 3. 在 `app/skills/__init__.py` 中 import 一次，或依赖 loader 自动发现
 4. framework 会自动挂载到 `POST /skills/{name}/extract`
 """
@@ -55,6 +56,10 @@ class SkillBase(ABC):
         )
 
     @abstractmethod
-    def run(self, *, file_bytes: bytes, filename: str, options: dict | None = None) -> dict:
-        """核心方法：给定文件字节 → 返回符合 `output_model` 的 dict。"""
+    async def run(self, *, file_bytes: bytes, filename: str, options: dict | None = None) -> dict:
+        """核心方法（异步契约）：给定文件字节 → 返回符合 `output_model` 的 dict。
+
+        CPU 密集段（文档转换/PDF 渲染）用 asyncio.to_thread 包裹，
+        网络 I/O 直接 await（LLM 走 achat_json）；MinerU 解析在转换段
+    to_thread 内调用同步客户端（async 版已提供，接入待后续）。"""
         raise NotImplementedError
