@@ -35,3 +35,32 @@ def _isolate_request_log(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "api_key", "")
     # 健康检查探测默认关闭，避免测试向真实 LLM/MinerU 网关发起网络请求
     monkeypatch.setattr(settings, "health_probe_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tms_write_slots():
+    """全局 TMS 写通道隔离（跨域共用：账单下单/建档、文本下单、舱单 addBill）。
+
+    信号量首次竞争等待时绑定运行事件循环（pytest-asyncio 每用例新 loop），
+    重建避免遗留 waiter 跨用例触发 "bound to a different event loop"。
+    """
+    import asyncio
+
+    import app.core.tms_gate as tms_gate_mod
+    import app.orders.bill.master_data.client as md_client_mod
+    import app.orders.bill.submission.client as bill_client_mod
+    import app.orders.manifest.submission.client as manifest_client_mod
+    import app.orders.text.client as text_client_mod
+
+    def _reset():
+        # 宽度恒 1 全串行（TMS 不支持并发写）；各消费模块引用同步重建为同一实例
+        slot = asyncio.Semaphore(1)
+        tms_gate_mod.tms_write_slots = slot
+        md_client_mod.tms_write_slots = slot
+        bill_client_mod._create_downstream_slots = slot
+        manifest_client_mod.tms_write_slots = slot
+        text_client_mod.tms_write_slots = slot
+
+    _reset()
+    yield
+    _reset()

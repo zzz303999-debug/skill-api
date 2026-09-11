@@ -218,21 +218,12 @@ async def build_result_async(
         else None
     )
 
-    # 文件级提单号缺失校验（用户拍板，语义对齐箱型连坐）：任一未决单
-    # 提单号缺失 → 全部未决单拒绝（一单不录，不调下游）。置于箱型校验之后：
-    # 两者同时存在时箱型先标记（路由 msg 优先级 unknown_box_type > missing_bl_no）。
-    # 双表示分组执行：既有语义路径 orders（BillRow 源）与 canonical_orders 同源
-    # 双份，各自组内自洽（缺失行数/行号不跨组重复计数）；标准字段路径 orders 空。
-    # preview 与 create 统一执行（纯内存标记，preview 响应消费 msg 提示）。
     reject_missing_bl_no([o for o in orders if o.create_result is None])
     reject_missing_bl_no(
         [o for o in canonical_orders if o.create_result is None]
     )
 
-    # 未决单（去重 + 箱型校验后真正待处理）：preview 时未预判即全量；
-    # 修正——必须在校验后重算，校验被拒单 create_result 已标记
-    # （非 None），自然排除，费目自举/建档只对可录单执行（被拒文件零下游副作用）；
-    # 校验前快照会让被拒单仍进入建档/自举（实测 AddCarClient 被误调）
+
     pending = [o for o in canonical_orders if o.create_result is None]
 
     fee_reconciliation = None
@@ -247,12 +238,6 @@ async def build_result_async(
             bootstrap_report=bootstrap_report,
         )
 
-    # BillRow 链（jinxin 直传名）模板外费用建档（用户拍板；建档段走
-    # create_archives_async）：订单费用以中文名直传可录，
-    # 但 TMS「费用管理」只有 AddCarPrice 建档过的费目——模板外新费目订单有、
-    # 费用管理无档案 → create 自动建档同名档案（复用费目自举配置/端点/registry）；
-    # preview 只出 planned 计划清单零副作用；建档失败不阻塞下单（直传不依赖
-    # price_id，仅报告下批重试）；已建档名跳过（幂等）。
     billrow_fee_bootstrap_report = None
     if orders and not output.canonical_rows:
         pending_legacy = [o for o in orders if o.create_result is None]
@@ -262,11 +247,7 @@ async def build_result_async(
             billrow_fee_bootstrap_report = await run_billrow_fee_bootstrap_async(
                 pending_legacy, create_order=create_order, sk=sk
             )
-    # canonical 链模板外费目建档（拍板废除 B2 孤儿建档）：模板外列
-    # 经 fee_map 按列名判定为独立动态码费目，建档已并入 run_fee_bootstrap（上述
-    # _build_fee_reports 内、apply 回填之前执行）→ 建档成功当批独立发射；
-    # 建档失败降级归并其它费保底（apply_price_map 内处理）。无独立 B2 挂点。
-    # （原 B2 在 apply 之后建档，档案永远赶不上当批——费用永远挂其它费）
+
 
     # 阶段三：基础资料阈值编排（create 建档网络；preview 只读探测）
     master_data_report = None
@@ -302,6 +283,10 @@ async def build_result_async(
         "template": output.template,
         "unmatched_headers": output.unmatched_headers,
     }
+    if not create_order and not (sk or "").strip():
+        # 预览无 sk：费用/建档按无归属保守展示（不判定账号归属）——显式标记，
+        # 引导调用方携带 sk 预览以获得与创建一致的判定（meta 自由结构，契约零变更）
+        meta["anonymous_preview"] = True
     if orders and not output.canonical_rows:
         meta["reconciliation"] = agg.reconciliation
     if fee_reconciliation is not None:
@@ -315,9 +300,7 @@ async def build_result_async(
     if output.new_template is not None:
         meta["l3_template"] = output.new_template
 
-    # R2（用户拍板）：响应只回实际下单那份——BillRow 源前端读
-    # orders（canonical_orders 置空；to_canonical 副本仅内部建档管线用，避免
-    # 双份不同步与 payload 翻倍）；标准字段源 orders 恒空、canonical_orders 全量
+
     response_canonical = canonical_orders if not orders else []
     return BillParseResult(
         file=filename,

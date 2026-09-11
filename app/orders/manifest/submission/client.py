@@ -17,6 +17,7 @@ import httpx
 from app.core.config import settings
 from app.core.http_client import post_json_async
 from app.core.logging_conf import get_logger
+from app.core.tms_gate import tms_write_slots
 
 from ..schema import CreateResult, OrderError
 
@@ -82,13 +83,15 @@ async def submit_manifest_async(payload: dict, sk: str) -> CreateResult:
     """submit_manifest（异步化改造后为生产唯一入口）：网络段走 post_json_async，
     响应判定/错误结构（复用 _parse_response）。网络异常按单记 error（不抛）。"""
     try:
-        response = await post_json_async(
-            settings.jxt_manifest_addbill_url,
-            payload,
-            name="addBill",
-            headers={"sk": sk},
-            timeout=settings.jxt_timeout_seconds,
-        )
+        # 全局 TMS 写通道：与账单链路写调用串行互斥（TMS 不支持并发写）
+        async with tms_write_slots:
+            response = await post_json_async(
+                settings.jxt_manifest_addbill_url,
+                payload,
+                name="addBill",
+                headers={"sk": sk},
+                timeout=settings.jxt_timeout_seconds,
+            )
     except (httpx.TimeoutException, httpx.RequestError) as exc:
         log.warning(
             "jxt_manifest_network_error",

@@ -235,7 +235,7 @@ class TestPriceFailures:
         assert report["failed"] and "费类不存在" in report["failed"][0]["reason"]
 
     async def test_failure_duplicate_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
-        """「已存在」拒单 → exists_external 登记（不再重试自举）。"""
+        """「已存在」拒单且响应无主键 → exists_external 登记（不再重试自举）。"""
         fake_http(lambda url, **kw: FakeResponse({"code": "204", "msg": "费用名称已存在"}))
         report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
         assert report["failed"] == []
@@ -244,6 +244,30 @@ class TestPriceFailures:
         assert get_fee_registry().lookup("waiting", _SK_OWNER) is None
         assert get_fee_registry().exists_external("waiting", _SK_OWNER) is True
         # 下批不再重试（exists_external 终态；无缺失码 → 不产生报告段）
+        assert await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token") is None
+
+    async def test_duplicate_with_price_id_recovers(self, price_cfg, md_endpoint, fake_http, real_archives):
+        """「已存在」且响应带 data.price_id（实测样本：AddCarPrice 回带已存在档案
+        主键）→ 直接登记自愈：registry 命中真实 id，不再无 id 卡死（费用每批
+        丢失根因的治本）；下批幂等不再触发。"""
+        fake_http(
+            lambda url, **kw: FakeResponse(
+                {"code": "204", "msg": "费用名称已存在", "data": {"price_id": 13767}}
+            )
+        )
+        report = await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token")
+        assert report["failed"] == []
+        ext = report["exists_external"]
+        # 报告带 price_id（可辨「已存在但取回 id」）
+        assert ext and ext[0]["code"] == "waiting" and ext[0]["price_id"] == 13767
+        # registry 登记真实 id（非 exists_external 终态）→ 当批回填命中
+        rec = get_fee_registry().lookup("waiting", _SK_OWNER)
+        assert rec and rec["price_id"] == 13767
+        assert get_fee_registry().exists_external("waiting", _SK_OWNER) is False
+        order = _make_order("waiting")
+        apply_price_map(order.fees, _SK_OWNER)
+        assert order.fees[0].price_id == 13767
+        # 下批无缺失码 → 不再触发建档（幂等自愈闭环）
         assert await run_fee_bootstrap_async([_make_order("waiting")], create_order=True, sk="sk-token") is None
 
     async def test_failure_no_primary_key_marks_external(self, price_cfg, md_endpoint, fake_http, real_archives):
@@ -374,11 +398,16 @@ class TestBillrowServiceIntegration:
         assert all(reg.lookup(c["code"], _SK_OWNER) is not None for c in created.values())
 
     async def test_preview_planned_only_zero_side_effect(self, price_cfg, md_endpoint):
+        """preview 带 sk：仅出 planned、零副作用；已建档名（运费）不重复进计划。
 
+        2026-09-10 口径修正：preview 无 sk 改为无归属保守判定（不挂 default 槽），
+        本用例补 sk 走会话槽以保留「已有 id 不重建」断言；无 sk 保守语义见
+        test_preview_without_sk_conservative。"""
         result = await build_result_async(
             filename="dyn.xlsx",
             file_bytes=self._bill_bytes(),
             create_order=False,
+            sk=_SK,
         )
         fb = (result.meta or {}).get("fee_bootstrap") or {}
         assert fb["mode"] == "preview"
@@ -387,6 +416,27 @@ class TestBillrowServiceIntegration:
         assert {"加班费", "报关费", "查验费"} <= planned
         assert "运费" not in planned
         assert fb["created"] == [] and fb["failed"] == []
+        assert (result.meta or {}).get("anonymous_preview") is None  # 带 sk 不标记
+
+    async def test_preview_without_sk_conservative(self, price_cfg, md_endpoint):
+        """preview 无 sk → 无归属保守：其批全部费目不可判定 id，全进计划 + 显式标记。
+
+        2026-09-10 修复回归：此前无 sk preview 落 default 测试槽 → 显示虚假
+        「运费已有 id」，与带 sk 创建结果不一致；现与 master_data preview 无 sk
+        口径统一（无归属不判定），并加 meta.anonymous_preview 引导带 sk 预览。"""
+        result = await build_result_async(
+            filename="dyn.xlsx",
+            file_bytes=self._bill_bytes(),
+            create_order=False,
+        )
+        fb = (result.meta or {}).get("fee_bootstrap") or {}
+        assert fb["mode"] == "preview"
+        planned = {p["tms_name"] for p in fb["planned"]}
+        # 无归属：运费（default 槽有 820 也不再命中）与模板外名一并进计划（保守）
+        assert "运费" in planned
+        assert {"加班费", "报关费", "查验费"} <= planned
+        assert fb["created"] == [] and fb["failed"] == []
+        assert (result.meta or {}).get("anonymous_preview") is True
 
 
 class TestTwoSkIsolationE2E:

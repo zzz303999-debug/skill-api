@@ -22,6 +22,7 @@ import httpx
 from app.core.config import settings
 from app.core.http_client import post_form_async, unpack_json
 from app.core.logging_conf import get_logger
+from app.core.tms_gate import tms_write_slots
 
 from .config import (
     KIND_BAILOR,
@@ -213,13 +214,17 @@ def _parse_archive_response(response: httpx.Response, kind: str) -> dict[str, An
         log.warning("master_data_create_rejected", extra={"kind": kind, "upstream_code": raw.get("code")})
         # T27b：唯一约束拒单（msg 命中 duplicate_markers，如「客户名已存在」）→
         # 档案已存在于 TMS（多半存量档案）——返回 duplicate 标记，调用方登记
-        # exists_external 后不再重试（无查询接口无法取 id，订单继续文本提交）
+        # exists_external 后不再重试（订单继续文本提交）；实测 204 响应 data 常
+        # 携带已存在档案主键（AddCarPrice 样本 data.price_id）→ 一并提取，调用方
+        # 有 id 即登记自愈（不再无 id 卡死）；无主键回值的端点维持原语义
         msg = str(raw.get("msg") or "")
         if _is_duplicate_message(msg):
             log.info("master_data_duplicate_external", extra={"kind": kind, "upstream_message": msg})
+            data = raw.get("data")
+            dup_id = data.get(_PRIMARY_KEY_MAP[kind]) if isinstance(data, dict) else None
             return {
                 "success": False,
-                "archive_id": None,
+                "archive_id": dup_id,
                 "duplicate": True,
                 "error": {
                     "code": "master_data_duplicate",
@@ -275,7 +280,8 @@ async def create_archives_async(
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """create_archives（异步化改造后为生产唯一入口）：网络段走 post_form_async，其余逻辑逐行一致。
 
-    档案间存在依赖（客户 → 工厂/司机），保持逐条串行；
+    档案间存在依赖（客户 → 工厂/司机），保持逐条串行；每条写请求经全局 TMS
+    写通道（core.tms_gate.tms_write_slots）与其余写链路互斥（TMS 侧不支持并发写）；
     单条失败不影响后续；任何情况不自动重试（防重复建档）。
     """
     if not forms_by_kind:
@@ -293,13 +299,15 @@ async def create_archives_async(
                 )
                 continue
             try:
-                response = await post_form_async(
-                    url,
-                    form,
-                    name=f"archive-{kind}",
-                    headers={"sk": sk},
-                    timeout=settings.jxt_timeout_seconds,
-                )
+                # 全局 TMS 写通道：建档/费目自举与下单串行互斥（TMS 不支持并发写）
+                async with tms_write_slots:
+                    response = await post_form_async(
+                        url,
+                        form,
+                        name=f"archive-{kind}",
+                        headers={"sk": sk},
+                        timeout=settings.jxt_timeout_seconds,
+                    )
             except (httpx.TimeoutException, httpx.RequestError) as exc:
                 log.warning(
                     "master_data_create_network_error",

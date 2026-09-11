@@ -111,25 +111,13 @@ def _no_real_archive_calls(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolate_concurrency_primitives():
-    """进程级并发原语隔离：每用例重建共享信号量并清空 per-key 异步锁。
+    """进程级并发原语隔离：清空 per-key 导入去重锁（防随用例历史无限累积）。
 
-    信号量首次竞争等待时绑定运行事件循环（pytest-asyncio 每用例新 loop）；
-    重建避免遗留 waiter 跨用例触发 "bound to a different event loop"；
-    锁字典清空防 per-bl_no 锁对象随用例历史无限累积。
+    全局 TMS 写通道的重建由 tests/conftest.py 统一负责（跨域共用）。
     """
-    import asyncio
-
-    import app.orders.bill.submission.client as bill_client_mod
     import app.orders.bill.submission.imported_registry as imported_registry_mod
-    from app.core.config import settings
 
     def _reset():
-        bill_client_mod._create_batch_guard = asyncio.Semaphore(
-            settings.bill_create_concurrency
-        )
-        bill_client_mod._create_downstream_slots = asyncio.Semaphore(
-            settings.bill_create_concurrency
-        )
         imported_registry_mod._ASYNC_LOCKS.clear()
 
     _reset()

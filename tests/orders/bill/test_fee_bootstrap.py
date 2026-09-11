@@ -395,6 +395,24 @@ class TestPreviewReadOnly:
         assert fake_create.calls == []  # 零建档请求
         assert get_fee_registry().snapshot() == {}  # 零 registry 写入
 
+    async def test_preview_without_sk_ignores_default_slot(
+        self, price_cfg, md_endpoint, fake_create
+    ):
+        """preview 无 sk → 无归属：default 测试槽的显式 id 不再命中（保守全列）。
+
+        2026-09-10 修复回归：此前无 sk preview 落 DEFAULT_OWNER 槽（注入表显式段
+        有 freight 820）→ 输出「无需建档」的乐观假象，与带 sk 创建不一致；
+        现与 master_data preview 无 sk 口径统一（不判定账号归属）。"""
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+        fake_create()
+        orders = [_make_order([_fee(code="freight", money="100.00")])]
+        report = await run_fee_bootstrap_async(orders, create_order=False)
+        assert report["mode"] == "preview"
+        assert report["planned"] == [{"code": "freight", "tms_name": "运费"}]
+        assert report["created"] == [] and report["failed"] == []
+        assert fake_create.calls == []
+
     async def test_preview_keeps_downgrade_semantics(self, price_cfg, md_endpoint, fake_create):
         """preview 不建档 → apply_price_map 仍按现状降级（dropped 非空）。"""
         price_cfg(_fee_map_yaml(BS_CFG))
@@ -459,6 +477,40 @@ class TestDuplicateExternal:
         report2 = await run_fee_bootstrap_async(orders, create_order=True)
         assert len(calls) == 1
         assert report2 is None or report2.get("exists_external") == []
+
+    async def test_duplicate_invalid_price_id_falls_back_external(
+        self, price_cfg, md_endpoint, monkeypatch
+    ):
+        """204 回传主键但非数字 → 不抛异常，退回 exists_external 终态（防异常穿透整请求）。"""
+        price_cfg(_fee_map_yaml(BS_CFG))
+        md_endpoint()
+
+        async def _fake(forms_by_kind, sk: str = ""):
+            return {
+                kind: {
+                    key: {
+                        "success": False,
+                        "archive_id": "not-a-number",
+                        "duplicate": True,
+                        "error": {
+                            "code": "master_data_duplicate",
+                            "message": "价格已存在,无法继续添加。",
+                        },
+                    }
+                    for key in forms
+                }
+                for kind, forms in forms_by_kind.items()
+            }
+
+        monkeypatch.setattr(md_client_module, "create_archives_async", _fake)
+        report = await run_fee_bootstrap_async(
+            [_make_order([_fee(code="waiting")])], create_order=True
+        )
+        # 非法主键不入 registry，维持 exists_external 终态（处理未抛异常）
+        assert report["exists_external"] and report["exists_external"][0]["code"] == "waiting"
+        assert "price_id" not in report["exists_external"][0]
+        assert get_fee_registry().lookup("waiting") is None
+        assert get_fee_registry().exists_external("waiting") is True
 
     async def test_duplicate_non_marker_keeps_failed(self, price_cfg, md_endpoint, monkeypatch):
         """非「已存在」语义拒单 → 维持 failed + registry 不记 → 下批重试。"""

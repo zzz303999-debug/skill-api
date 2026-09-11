@@ -4,8 +4,8 @@
 - preview 零副作用：create_order=false 只出 planned 计划清单（不发请求/查端点/
   写 registry）；建档失败不阻塞下单（canonical 链降级 skip_report / billrow 直传
   链仅报告，下批重试）；
-- 幂等：registry 命中复用、同批同码只调一次；TMS 已存在（204）→ exists_external
-  不再重试；registry 不记失败；
+- 幂等：registry 命中复用、同批同码只调一次；TMS 已存在（204）→ 响应带档案
+  主键则登记自愈复用，无主键 → exists_external 不再重试；registry 不记失败；
 - 环境开关：fee_bootstrap.enabled（test=true；prod 默认 false——生产价格表运维
   管控需显式开启）；建档端点复用 master_data endpoints（endpoint_key 引用）；
 - 双链（canonical 按 fee.code / BillRow 按 shou 键名收集）共享建档提交段
@@ -31,11 +31,14 @@ from .fee_registry import DEFAULT_OWNER, get_fee_registry
 log = get_logger(__name__)
 
 
-def _owner_for(sk: str) -> str:
+def _owner_for(sk: str, create_order: bool) -> str | None:
     """费目建档维度键（与 master_data 同口径，费目隔离拍板）：
-    有 sk → owner_key(sk)（sha256 前 16 hex）；无 sk（测试直调/异常路径）→
-    DEFAULT_OWNER 槽（preview planned 同槽只读判定，preview 仍零副作用）。"""
-    return owner_key(sk) if sk else DEFAULT_OWNER
+    有 sk → owner_key(sk)（sha256 前 16 hex）；无 sk：create（测试直调/异常
+    路径）→ DEFAULT_OWNER 槽；preview → None（无归属只读探测：不判定账号归属，
+    费用按「未配 id」保守展示，杜绝 default 槽造成的预览-创建不一致假象）。"""
+    if sk:
+        return owner_key(sk)
+    return DEFAULT_OWNER if create_order else None
 
 
 # 配置缺省（enabled 恒 False：未配置/配置错误 → 不自举，走现状降级语义）
@@ -172,6 +175,66 @@ def _failure_reason(outcome: dict[str, Any]) -> str:
     return master_failure_reason(outcome)
 
 
+def _record_duplicate(
+    code: str,
+    tms_name: str,
+    outcome: dict[str, Any],
+    owner: str,
+    exists_external: list[dict[str, Any]],
+    *,
+    kind: str | None = None,
+) -> None:
+    """204「已存在」建档结果处理（canonical/BillRow 双链共用）。
+
+    实测样本：TMS 204 响应 data 携带已存在档案主键（AddCarPrice →
+    data.price_id）→ 直接登记（幂等复用，本批 apply_price_map 即命中回填，
+    不再无 id 卡死；换登录会话场景由首探自愈）；响应无 data 主键（部分
+    端点）→ 维持 exists_external 终态（原语义）。登记进 exists_external
+    报告段（带 price_id 可辨「已存在但取回 id」）。
+    """
+    price_id = outcome.get("archive_id")
+    try:
+        # 上游 data.price_id 为外部输入：非数字/非正数一律按「无主键」处理
+        # （走下方 exists_external 终态），防异常值穿透整请求
+        price_id = int(price_id) if price_id is not None else None
+        if price_id is not None and price_id <= 0:
+            price_id = None
+    except (TypeError, ValueError):
+        price_id = None
+    if price_id is not None:
+        get_fee_registry().register(code, price_id, tms_name, owner)
+        log.info(
+            "fee_bootstrap_duplicate_recovered",
+            extra={
+                "code": code,
+                "price_id": price_id,
+                **({"kind": kind} if kind else {}),
+            },
+        )
+        exists_external.append(
+            {"code": code, "tms_name": tms_name, "price_id": price_id}
+        )
+        return
+    get_fee_registry().mark_exists_external(code, tms_name, owner)
+    log.info(
+        "fee_bootstrap_exists_external",
+        # 键名不能用 message（logging LogRecord 保留字，extra 冲突直接
+        # KeyError 使 204 已存在场景整请求 500——实弹发现）
+        extra={
+            "code": code,
+            "tms_message": (outcome.get("error") or {}).get("message"),
+            **({"kind": kind} if kind else {}),
+        },
+    )
+    exists_external.append(
+        {
+            "code": code,
+            "tms_name": tms_name,
+            "message": (outcome.get("error") or {}).get("message") or "已存在",
+        }
+    )
+
+
 async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -> dict[str, Any] | None:
     """canonical 链费目自举（建档提交段 _create_price_archives 共享）。
 
@@ -182,7 +245,7 @@ async def run_fee_bootstrap_async(orders, *, create_order: bool, sk: str = "") -
     if not config.get("enabled"):
         return None
     orders = _pending_orders(orders)
-    owner = _owner_for(sk)
+    owner = _owner_for(sk, create_order)
     missing = _collect_missing(orders, owner)
     if not missing:
         return None
@@ -218,9 +281,10 @@ async def _create_price_archives(
 ) -> dict[str, Any] | None:
     """建档提交与结果整理（canonical/BillRow 双链共享；kind 仅 billrow 报告带键）。
 
-    结果三态：success → registry 登记 + created；duplicate（204 已存在，T27b）
-    → mark_exists_external（不重试自举，按 owner 隔离）；其余 → failed（registry
-    不记失败，下批重试）；建档层意外异常不使订单丢失（防御，当批全 failed）。
+    结果三态：success → registry 登记 + created；duplicate（204 已存在）→ 响应
+    带档案主键则登记自愈（T27b 治本），无主键 → mark_exists_external（不重试
+    自举，按 owner 隔离）；其余 → failed（registry 不记失败，下批重试）；
+    建档层意外异常不使订单丢失（防御，当批全 failed）。
     """
     url = bootstrap_endpoint()
     if url is None:
@@ -278,27 +342,11 @@ async def _create_price_archives(
                 {"code": code, "tms_name": tms_name, "price_id": price_id}
             )
         elif outcome.get("duplicate"):
-            # T27b：费目在当前 owner 的 TMS 价格表已存在（204 拒单）→ 登记
-            # exists_external 不再重试自举；price_id 无（无查询接口），费用继续
-            # 降级不录入仅对账（按 owner 隔离：A 账号撞名不影响 B）
-            get_fee_registry().mark_exists_external(code, tms_name, owner)
-            log.info(
-                "fee_bootstrap_exists_external",
-                # 键名不能用 message（logging LogRecord 保留字，extra 冲突直接
-                # KeyError 使 204 已存在场景整请求 500——实弹发现）
-                extra={
-                    "code": code,
-                    "tms_message": (outcome.get("error") or {}).get("message"),
-                    **({"kind": kind} if kind else {}),
-                },
-            )
-            exists_external.append(
-                {
-                    "code": code,
-                    "tms_name": tms_name,
-                    "message": (outcome.get("error") or {}).get("message") or "已存在",
-                }
-            )
+            # T27b：费目在当前 owner 的 TMS 价格表已存在（204 拒单）——
+            # _record_duplicate 统一处理：响应带已存在档案 price_id → 登记自愈
+            # （当批 apply_price_map 即命中）；无 id → 维持 exists_external 终态
+            # 降级（不录入仅对账；按 owner 隔离：A 账号撞名不影响 B）
+            _record_duplicate(code, tms_name, outcome, owner, exists_external, kind=kind)
         else:
             failed.append(
                 {
@@ -365,7 +413,7 @@ async def run_billrow_fee_bootstrap_async(
     if not config.get("enabled"):
         return None
     orders = _pending_orders(orders)
-    owner = _owner_for(sk)
+    owner = _owner_for(sk, create_order)
     missing = _collect_billrow_missing(orders, owner)
     if extra_names:
         have = {name for _, name in missing}

@@ -109,6 +109,8 @@ def build_fee_reports(
     - 先对全部订单 apply_price_map（回填 tms_name/price_id，均限当前 sk 的
       owner 槽——订单费用只挂自己账号名下的档案，费目隔离拍板；
       price_id null 降级 excluded 并同步调整对账口径 recorded → excluded）；
+      preview 无 sk → 无归属槽（None）：不判定账号归属，费用一律按未配 id
+      保守降级（与 master_data preview 无 sk 口径一致）；
       merged_to_other（动态码归并其它费保底）仅报告不调整对账——金额已并入
       桶条目正常发射，仍在 recorded 口径内；
     - 恒等校验：bill_total − recorded_total = excluded_total，容差 0.01；
@@ -123,7 +125,7 @@ def build_fee_reports(
 
     from .fee_bootstrap import _owner_for as _fee_owner_for
 
-    owner = _fee_owner_for(sk)
+    owner = _fee_owner_for(sk, create_order)
     dropped, mismatch, to_other_counts, channel_stats = reconcile_order_fees(
         orders, owner
     )

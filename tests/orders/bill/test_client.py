@@ -16,8 +16,13 @@ import httpx
 import pytest
 
 import app.core.http_client as http_client_module
+import app.orders.bill.master_data.client as md_client_module
 import app.orders.bill.submission.client as client_module
 from app.orders.bill import BillOrder, BoxGroup, CanonicalOrder
+from app.orders.bill.master_data.client import (
+    create_archives_async as real_create_archives,
+)
+from app.orders.bill.master_data.config import KIND_CLIENT
 from app.orders.bill.submission.addwork_form import build_add_work_form, flatten_order
 from app.orders.bill.submission.client import (
     add_work_async,
@@ -559,6 +564,76 @@ class TestCreateOrders:
         assert orders[1].create_result.sn == "EX26080002"
         assert orders[1].create_result.upstream == {"sn": "EX26080002"}
 
+    async def test_credential_failures_abort_batch(self, urls, monkeypatch):
+        """连续凭证类失败（203 登录已过期）达阈值 → 熔断：前 N 笔真实提交，
+        其余单放弃提交标记 batch_aborted（未登记，重传自动续跑）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [{"code": "203", "msg": "您的登录已过期，请重新登录！"}] * 3,
+        )
+        # 熔断判据与提交顺序强相关：测试内锁定串行并发槽（生产写通道恒 1 全串行）
+        monkeypatch.setattr(
+            client_module, "_create_downstream_slots", asyncio.Semaphore(1)
+        )
+        orders = [
+            make_order({**ORDER_DATA, "order_num1": f"ABORT{i}"}) for i in range(6)
+        ]
+        await create_orders_async(orders, "sk")
+        assert calls["addwork"] == 3  # 阈值 3：第 4 笔起未提交
+        for order in orders[:3]:
+            assert order.create_result.success is False
+            assert order.create_result.error.details["upstream_code"] == "203"
+        for order in orders[3:]:
+            assert order.create_result.success is False
+            assert order.create_result.error.code == "batch_aborted"
+            assert "重新登录后重传" in order.create_result.error.message
+
+    async def test_non_credential_failures_do_not_abort(self, urls, monkeypatch):
+        """非凭证类失败（如 sn 竞态 204 Duplicate entry）连续出现 → 不熔断
+        （失败隔离语义不变，逐单继续提交）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "204", "msg": "添加失败 SQLSTATE[23000]: Duplicate entry"}
+            ]
+            * 5,
+        )
+        orders = [
+            make_order({**ORDER_DATA, "order_num1": f"RACE{i}"}) for i in range(5)
+        ]
+        await create_orders_async(orders, "sk")
+        assert calls["addwork"] == 5
+        assert all(
+            o.create_result.error and o.create_result.error.code == "order_upstream_error"
+            for o in orders
+        )
+
+    async def test_credential_streak_reset_by_success(self, urls, monkeypatch):
+        """成功打断连续计数：2 连败 → 成功 → 2 连败，从未连续 3 笔 → 不熔断。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "203", "msg": "您的登录已过期，请重新登录！"},
+                {"code": "203", "msg": "您的登录已过期，请重新登录！"},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX26080999"}]},
+                {"code": "203", "msg": "您的登录已过期，请重新登录！"},
+                {"code": "203", "msg": "您的登录已过期，请重新登录！"},
+            ],
+        )
+        monkeypatch.setattr(
+            client_module, "_create_downstream_slots", asyncio.Semaphore(1)
+        )
+        orders = [
+            make_order({**ORDER_DATA, "order_num1": f"RESET{i}"}) for i in range(5)
+        ]
+        await create_orders_async(orders, "sk")
+        assert calls["addwork"] == 5  # 连续计数被成功单打断，未触发
+        assert all(
+            o.create_result.error is None
+            or o.create_result.error.code != "batch_aborted"
+            for o in orders
+        )
+
     async def test_timeout_one_order_continues_next(self, urls, monkeypatch):
         """第一单超时 → error 不中断；第二单照常提交；各调用一次（不重试）。"""
         calls = {"n": 0}
@@ -778,6 +853,76 @@ class TestCreateOrders:
         assert sum(1 for r in results if r.success) == 2  # 1 新建 + 1 skipped
         assert sum(1 for r in results if r.skipped) == 1
 
+    async def test_dedup_same_batch_duplicate_rows_all_submitted(self, urls, monkeypatch):
+        """同批内同（提单号+箱号）重复行：两行全部提交（一行一票，2026-09-10 拍板）。
+
+        背景：生产出现 4669 行少录 12 条——12 组同键行的第二行被跳过且无报错。
+        修复后同批重复行经 batch_keys 放行；注册表 first-write-wins 兼记一条。
+        """
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX2"}]},
+            ],
+        )
+        a, b = make_order(), make_order()
+        a.container_no, a.row_seq = "TCLU1", "1"
+        b.container_no, b.row_seq = "TCLU1", "2"
+        await create_orders_async([a, b], "sk")
+        assert calls["addwork"] == 2  # 修复前第二行会被跳过（addwork==1）
+        assert a.create_result.success is True and a.create_result.skipped is False
+        assert b.create_result.success is True and b.create_result.skipped is False
+        snap = client_module.get_imported_registry().snapshot()
+        assert list(snap) == ["OOLU4044379500|TCLU1"]  # 同键仅登记一条（first-write-wins）
+        owners = snap["OOLU4044379500|TCLU1"]
+        assert len(owners) == 1 and next(iter(owners.values()))["sn"] == "EX1"
+
+    async def test_dedup_same_batch_duplicates_reupload_all_skipped(self, urls, monkeypatch):
+        """重传同文件（新批次）：同键两行均命中首建记录 → 全部跳过（下游 0 新增）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX2"}]},
+            ],
+        )
+
+        def twin():
+            a, b = make_order(), make_order()
+            a.container_no, a.row_seq = "TCLU1", "1"
+            b.container_no, b.row_seq = "TCLU1", "2"
+            return [a, b]
+
+        await create_orders_async(twin(), "sk")
+        assert calls["addwork"] == 2
+        second = twin()
+        await create_orders_async(second, "sk")
+        assert calls["addwork"] == 2  # 无新增调用
+        assert all(o.create_result.skipped is True for o in second)
+        assert all(o.create_result.sn == "EX1" for o in second)  # 回显首建 sn
+
+    async def test_dedup_cross_batch_existing_skipped_new_submitted(self, urls, monkeypatch):
+        """跨批：已建行跳过、新增行照常提交（修正文件重导语义保持）。"""
+        calls = self._patch_chain(
+            monkeypatch,
+            [
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX1"}]},
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "EX3"}]},
+            ],
+        )
+        first = make_order()
+        first.container_no, first.row_seq = "TCLU1", "1"
+        await create_orders_async([first], "sk")
+        assert calls["addwork"] == 1
+        again = make_order()  # 同键（已建）→ 跳过
+        again.container_no, again.row_seq = "TCLU1", "1"
+        fresh = make_order({**ORDER_DATA, "order_num1": "OOLU4044379999"})  # 新键 → 提交
+        await create_orders_async([again, fresh], "sk")
+        assert calls["addwork"] == 2
+        assert again.create_result.skipped is True
+        assert fresh.create_result.success is True and fresh.create_result.skipped is False
+
 
 class TestCreateCanonicalOrdersDedup:
     """create_canonical_orders_async 去重（TMS 通道，bl_no 键）。"""
@@ -867,21 +1012,23 @@ class TestCreateCanonicalOrdersDedup:
 class TestProcessSharedCreateSlots:
     """进程级共享下游槽（用户拍板）：修复"每请求新建 Semaphore 致 N×C 放大"。
 
-    两批并发 create（各 4 单、互异提单号）共享 _create_downstream_slots（4 槽）：
-    同时进入下游 fake_post 的任务峰值 ≤ bill_create_concurrency，而非 8 路全放。
+    两批并发 create（各 4 单、互异提单号）共享 _create_downstream_slots（恒 1 槽，
+    写全串行）：同时进入下游 fake_post 的任务峰值 ≤ 1，而非 8 路全放。
     """
 
     async def test_two_batches_cap_global_inflight(self, urls, monkeypatch):
         state = {"inflight": 0, "peak": 0, "entered": 0}
         blocker = asyncio.Event()  # 进入 fake_post 的任务挂起，放大观察窗口
-        fifth = asyncio.Event()  # 第 5 个并发进入 → 说明槽未生效（应永不 set）
+        first = asyncio.Event()  # 首个写任务进入（观察窗口有效性锚点）
+        second = asyncio.Event()  # 第 2 个并发进入 → 说明槽未生效（应永不 set）
 
         async def fake_post(url, **kwargs):
             state["inflight"] += 1
             state["entered"] += 1
             state["peak"] = max(state["peak"], state["inflight"])
-            if state["inflight"] > 4:
-                fifth.set()  # 超过共享槽上限，标记失败条件
+            if state["inflight"] > 1:
+                second.set()  # 超过串行槽上限，标记失败条件
+            first.set()
             await blocker.wait()
             state["inflight"] -= 1
             return FakeResponse({"code": "200", "msg": "添加成功", "data": [{"sn": "S1"}]})
@@ -898,11 +1045,108 @@ class TestProcessSharedCreateSlots:
             tasks = [one(batch("BL1-")), one(batch("BL2-"))]
             await asyncio.gather(*tasks)
 
+        task = asyncio.create_task(main())  # 先启动：观察窗口内才存在真实在跑任务
+        await asyncio.wait_for(first.wait(), timeout=1)  # 确认已进入下游（窗口有效）
         with pytest.raises(TimeoutError):
-            # 观察窗口（带超时自旋）：若共享槽未生效，第 5 个任务会并发进入并 set fifth
-            await asyncio.wait_for(fifth.wait(), timeout=0.5)
-        assert state["entered"] <= 4, f"下游并发突破共享槽：entered={state['entered']}"
-        assert state["peak"] <= 4, f"在飞峰值超过 bill_create_concurrency：peak={state['peak']}"
+            # 观察窗口（带超时自旋）：若共享槽未生效，第 2 个任务会并发进入并 set second
+            await asyncio.wait_for(second.wait(), timeout=0.5)
+        assert state["entered"] <= 1, f"下游并发突破串行槽：entered={state['entered']}"
+        assert state["peak"] <= 1, f"在飞峰值超过串行槽上限：peak={state['peak']}"
         blocker.set()  # 放行全部，完成批次
-        await asyncio.wait_for(main(), timeout=10)
+        await asyncio.wait_for(task, timeout=10)
         assert state["entered"] == 8  # 全部 8 单最终都提交（未丢单）
+
+
+class TestTmsWriteLane:
+    """全局 TMS 写通道（2026-09-10 拍板）：服务侧可异步接收、写请求不并发。
+
+    - 不设批位闸：首批在跑时，第二批正常接收（排队等待写通道，不拒绝）；
+    - 下单（AddWork）与建档（AddCar*）共用同一写通道：任意时刻至多 1 个在飞。
+    """
+
+    async def test_second_batch_accepted_while_first_running(self, urls, monkeypatch):
+        state = {"inflight": 0, "peak": 0}
+        overlap = asyncio.Event()
+        first_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_post(url, **kwargs):
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+            if state["inflight"] > 1:
+                overlap.set()
+            first_entered.set()
+            await release.wait()
+            state["inflight"] -= 1
+            return FakeResponse(
+                {"code": "200", "msg": "添加成功", "data": [{"sn": "S1"}]}
+            )
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+
+        batch_a = [make_order({**ORDER_DATA, "order_num1": f"DECA{i}"}) for i in range(2)]
+        batch_b = [make_order({**ORDER_DATA, "order_num1": "DECB0"})]
+        task_a = asyncio.create_task(create_orders_async(batch_a, "sk"))
+        await asyncio.wait_for(first_entered.wait(), timeout=1)
+
+        task_b = asyncio.create_task(create_orders_async(batch_b, "sk"))
+        # 观察窗：第二批排队等待写通道（不设批位闸）；两批写请求不得并发进入
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(overlap.wait(), timeout=0.6)
+        assert not task_b.done(), "第二批应排队等待写通道（写槽被首批占用）"
+
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task_a, task_b), timeout=10)
+        assert state["peak"] == 1  # 全程写请求串行
+        assert all(o.create_result.success for o in batch_a + batch_b)
+
+    async def test_archive_write_shares_lane_with_addwork(self, urls, monkeypatch):
+        """建档（AddCar*）与下单（AddWork）共用同一写通道：互斥不并发。"""
+        state = {"inflight": 0, "peak": 0}
+        overlap = asyncio.Event()
+        first_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_post(name, url, **kwargs):
+            state["inflight"] += 1
+            state["peak"] = max(state["peak"], state["inflight"])
+            if state["inflight"] > 1:
+                overlap.set()
+            first_entered.set()
+            await release.wait()
+            state["inflight"] -= 1
+            if name == "AddWork":
+                return FakeResponse(
+                    {"code": "200", "msg": "添加成功", "data": [{"sn": "S1"}]}
+                )
+            return FakeResponse(
+                {"code": "200", "msg": "添加成功", "data": {"client_id": "91001"}}
+            )
+
+        monkeypatch.setattr(http_client_module, "_post_async", fake_post)
+        monkeypatch.setattr(
+            md_client_module, "endpoint_for", lambda kind: "http://jxt.test/archive"
+        )
+
+        order = make_order({**ORDER_DATA, "order_num1": "LANE1"})
+        task_order = asyncio.create_task(create_orders_async([order], "sk"))
+        await asyncio.wait_for(first_entered.wait(), timeout=1)  # 下单写已占通道
+
+        task_archive = asyncio.create_task(
+            real_create_archives(
+                {KIND_CLIENT: {"通道测试客户": {"c_title": "通道测试客户"}}}, "sk"
+            )
+        )
+        # 建档写请求必须排队等待通道（未共用则会并发进入 → overlap 置位）
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(overlap.wait(), timeout=0.3)
+
+        release.set()
+        results = await asyncio.wait_for(
+            asyncio.gather(task_order, task_archive), timeout=10
+        )
+        assert state["peak"] == 1  # 全程写请求串行（含跨模块）
+        assert order.create_result.success is True
+        archive_out = results[1][KIND_CLIENT]["通道测试客户"]
+        assert archive_out["success"] is True
+        assert archive_out["archive_id"] == "91001"

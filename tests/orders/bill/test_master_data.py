@@ -550,8 +550,12 @@ class TestClientDirectURL:
 class TestDuplicateExternal:
     """T27b 建档 204「已存在」幂等标记：exists_external 登记后不再重试。"""
 
-    def _install_duplicate_create(self, md_config, monkeypatch, calls):
-        """建档 mock：客户建档返回 duplicate（TMS 已存在 204），其余成功。"""
+    def _install_duplicate_create(self, md_config, monkeypatch, calls, dup_id=None):
+        """建档 mock：客户建档返回 duplicate（TMS 已存在 204），其余成功。
+
+        dup_id：模拟 204 响应 data 携带的已存在档案主键（client 如实提取）；
+        实体建档 duplicate 判定优先，主键不改变 exists_external 终态。
+        """
         md_config(_default_cfg())
 
         async def _fake(forms_by_kind: dict[str, dict[str, dict[str, str]]], sk: str = ""):
@@ -563,7 +567,7 @@ class TestDuplicateExternal:
                     if kind == KIND_CLIENT:
                         results[kind][key] = {
                             "success": False,
-                            "archive_id": None,
+                            "archive_id": dup_id,
                             "duplicate": True,
                             "error": {
                                 "code": "master_data_duplicate",
@@ -606,6 +610,26 @@ class TestDuplicateExternal:
         assert all(p["kind"] != KIND_CLIENT for p in (report2.get("pending_top") or []))
         # 订单不标注客户未建档（已存在外部，仅无 id；司机降级标注不影响）
         assert "客户「锦煦」未建档" not in (orders[0].unmapped_note or "")
+
+    async def test_duplicate_with_archive_id_keeps_exists_external(
+        self, md_config, monkeypatch, tmp_path
+    ):
+        """duplicate 响应带已存在档案主键（费用链自愈消费）→ 实体建档维持
+        exists_external 终态（duplicate 判定优先于 archive_id，实体行为零变更）。"""
+        from app.orders.bill.master_data.store import reload_store
+
+        store = reload_store(tmp_path / "md.json")
+        calls: list[dict] = []
+        self._install_duplicate_create(md_config, monkeypatch, calls, dup_id="c-ext-1")
+        orders = [
+            _make_order(customer="锦煦", door=None, address=None, driver=None) for _ in range(5)
+        ]
+        report = await run_master_data_async(orders, create_order=True)
+        assert report["exists_external"] and report["exists_external"][0]["kind"] == KIND_CLIENT
+        assert report["failed"] == []
+        rec = store.get(KIND_CLIENT, client_key("锦煦"))
+        assert rec and rec.get("exists_external") is True
+        assert rec.get("archive_id") is None  # 主键不落实体 store（费用链自愈专用）
 
     async def test_truck_duplicate_marks_external_no_retry(
         self, md_config, monkeypatch, tmp_path

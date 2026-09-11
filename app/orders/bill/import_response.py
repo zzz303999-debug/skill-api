@@ -8,8 +8,9 @@
   明细使 820 单响应 ≈1.5MB，灌 DOM/日志落盘成本大，模型副本裁掉明细）；
   审计 error_code 保持旧口径 duplicate_bill（改为 "409" 会让按旧码匹配的
   监控/告警静默失效；外壳 code 仍 "409" 不冲突）；
-- create 有新建（含部分失败）→ "200/添加成功"；全部失败 → "204"（msg 按
-  error_code 优先级：unknown_box_type → missing_bl_no，均兜底「添加失败」）；
+- create 有新建（含部分失败）→ "200/添加成功"（凭证熔断中止时 msg 透出中止
+  原因）；全部失败 → "204"（msg 按 error_code 优先级：batch_aborted →
+  unknown_box_type → missing_bl_no，均兜底「添加失败」）；
 - preview（或 create 无 summary）→ "200"（整批文件级被拒时 msg 给具体原因，
   code 保持 "200"——未产生下游动作，语义不冲突）。
 """
@@ -21,8 +22,8 @@ from typing import Any
 
 from .schema import BillParseResult
 
-# 本地拦截文案扫描优先级（文件级连坐口径，提单号缺失对齐箱型）
-_MSG_CODES: tuple[str, ...] = ("unknown_box_type", "missing_bl_no")
+# 本地拦截文案扫描优先级（熔断中止最优先；文件级连坐口径，提单号缺失对齐箱型）
+_MSG_CODES: tuple[str, ...] = ("batch_aborted", "unknown_box_type", "missing_bl_no")
 
 
 @dataclass
@@ -73,8 +74,17 @@ def bill_import_outcome(
                 },
             )
         if summary.get("created", 0) > 0:
-            # 有新建（含部分失败，明细在 data.summary）→ 成功口径
-            return BillImportOutcome(code="200", msg="添加成功")
+            # 有新建（含部分失败，明细在 data.summary）→ 成功口径；凭证熔断
+            # 中止时 msg 透出中止原因（code 保持 200：本批确有新建）
+            aborted_msg = next(
+                (
+                    d.get("message")
+                    for d in (summary.get("failed_details") or [])
+                    if d.get("code") == "batch_aborted"
+                ),
+                None,
+            )
+            return BillImportOutcome(code="200", msg=aborted_msg or "添加成功")
         failed_msg = next(
             (
                 d.get("message")

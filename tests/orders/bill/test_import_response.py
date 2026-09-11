@@ -107,6 +107,23 @@ class TestDedupConflict:
         assert outcome.code == "200" and outcome.msg == "添加成功"
         assert outcome.status_code == 200
 
+    def test_created_with_batch_aborted_surfaces_msg(self):
+        """部分新建 + 熔断中止 → code 200（本批确有新建）但 msg 透出中止原因。"""
+        summary = _summary(
+            created=1,
+            failed=2,
+            failed_details=[
+                {
+                    "order_num": "B2",
+                    "code": "batch_aborted",
+                    "message": "批次已中止：连续多单凭证失效——重新登录后重传将自动续跑",
+                },
+            ],
+        )
+        outcome = bill_import_outcome(_result(summary=summary), create_order=True)
+        assert outcome.code == "200"
+        assert "批次已中止" in outcome.msg
+
 
 class TestAllFailedMsg:
     """204 文案：error_code 优先级 unknown_box_type → missing_bl_no → 兜底。"""
@@ -162,6 +179,27 @@ class TestAllFailedMsg:
         outcome = bill_import_outcome(_result(summary=summary), create_order=True)
         assert outcome.code == "204"
         assert outcome.msg == "添加失败"
+
+    def test_batch_aborted_msg_beats_other_failed_codes(self):
+        """凭证熔断中止（batch_aborted）→ 204 msg 取中止原因（最高优先级）。"""
+        summary = _summary(
+            failed=3,
+            failed_details=[
+                {
+                    "order_num": "B1",
+                    "code": "order_upstream_error",
+                    "message": "order API rejected the order: 您的登录已过期",
+                },
+                {
+                    "order_num": "B2",
+                    "code": "batch_aborted",
+                    "message": "批次已中止：连续多单凭证失效——重新登录后重传将自动续跑",
+                },
+            ],
+        )
+        outcome = bill_import_outcome(_result(summary=summary), create_order=True)
+        assert outcome.code == "204"
+        assert "批次已中止" in outcome.msg
 
 
 class TestPreviewShell:

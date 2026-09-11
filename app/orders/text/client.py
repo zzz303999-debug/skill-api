@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.errors import SkillAPIError
 from app.core.http_client import post_json_async, unpack_json
 from app.core.logging_conf import get_logger
+from app.core.tms_gate import tms_write_slots
 
 from .schema import OrderApiResponse
 
@@ -44,12 +45,14 @@ async def publish_create_order_async(
         "roomId": room_id,
     }
     try:
-        response = await post_json_async(
-            settings.order_api_url,
-            payload,
-            name="publishCreateOrder",
-            timeout=settings.order_api_timeout_seconds,
-        )
+        # 全局 TMS 写通道：与账单/建档/费目自举/舱单写调用串行互斥（TMS 不支持并发写）
+        async with tms_write_slots:
+            response = await post_json_async(
+                settings.order_api_url,
+                payload,
+                name="publishCreateOrder",
+                timeout=settings.order_api_timeout_seconds,
+            )
     except (httpx.TimeoutException, httpx.RequestError) as exc:
         log.warning("order_api_network_error", extra={"error_type": exc.__class__.__name__})
         raise OrderUpstreamError(
