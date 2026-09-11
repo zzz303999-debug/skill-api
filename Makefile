@@ -10,16 +10,16 @@ run:
 	uv run uvicorn app.main:app --host 0.0.0.0 --port 9000
 
 docker-build:
-	docker build -t skill-api:latest .
+	docker build -f docker/skill-api/Dockerfile -t skill-api:latest .
 
 docker-up:
-	docker compose up -d
+	docker compose --env-file .env -f docker/docker-compose.yml up -d
 
 docker-down:
-	docker compose down
+	docker compose --env-file .env -f docker/docker-compose.yml down
 
 docker-logs:
-	docker compose logs -f
+	docker compose --env-file .env -f docker/docker-compose.yml logs -f
 
 test:
 	uv run pytest -q

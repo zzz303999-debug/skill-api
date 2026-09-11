@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM ghcr.io/astral-sh/uv:0.11.7 AS uv
+# uv 二进制（南大镜像加速 ghcr.io；如需官方源改回 ghcr.io/astral-sh/uv:0.11.7）
+FROM ghcr.nju.edu.cn/astral-sh/uv:0.11.7 AS uv
 
 FROM python:3.12-slim AS base
 
@@ -19,17 +20,15 @@ COPY --from=uv /uv /uvx /bin/
 RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
         /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list 2>/dev/null || true
 
-# LibreOffice：.doc 转换需要；不装则 .doc 会走 SCAN_OR_IMAGE_HINT 分支
-# 如果确定不接 .doc 可去掉这段，镜像会小很多（~800MB）
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libreoffice-core libreoffice-writer libreoffice-calc \
-        fonts-noto-cjk \
+        libreoffice-core libreoffice-writer \
+        fonts-wqy-microhei \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 先按锁文件安装生产依赖，以便复用 Docker 缓存。
 COPY pyproject.toml uv.lock README.md /app/
 RUN uv sync --frozen --no-dev --no-install-project
 

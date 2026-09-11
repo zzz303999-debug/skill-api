@@ -1,23 +1,25 @@
+name: skill-api
+
 services:
   skill-api:
-    build: .
+    build:
+      context: ..
+      dockerfile: docker/skill-api/Dockerfile
     image: skill-api:latest
     container_name: skill-api
     restart: unless-stopped
     ports:
       - "9000:9000"
     env_file:
-      - .env
+      - ../.env
     environment:
       MINERU_BASE_URL: http://mineru:8888
     depends_on:
       mineru:
         condition: service_healthy
     volumes:
-      - ./storage:/app/storage
-      # L3 固化模板持久化（与 docker-compose.deploy.yml 同口径）：依赖部署
-      # 目录为 git 检出，勿用空目录覆盖
-      - ./templates:/app/templates
+      - ../storage:/app/storage
+      - ../templates:/app/templates
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
       interval: 30s
@@ -25,11 +27,9 @@ services:
       retries: 3
 
   mineru:
-    # MinerU is intentionally a separate container because its model/runtime
-    # is much larger than the API service and may require a GPU-enabled image.
     build:
-      context: .
-      dockerfile: deploy/mineru/Dockerfile
+      context: ..
+      dockerfile: docker/mineru/Dockerfile
       args:
         MINERU_VERSION: ${MINERU_VERSION:-2.5.4}
         MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}

@@ -1,25 +1,22 @@
+name: skill-api
+
 services:
   skill-api:
     image: ${SKILL_API_IMAGE:?SKILL_API_IMAGE must be set to a specific image tag (e.g. ghcr.io/zzz303999-debug/skill-api:v0.1.0). Production must not use latest}
     container_name: skill-api
     restart: unless-stopped
     ports:
-      # 只绑定回环地址：9000 仅允许本机反向代理（nginx）访问，
-      # 不直接暴露到宿主机网卡，避免无鉴权端口暴露到公网/内网
       - "127.0.0.1:9000:9000"
     env_file:
-      - .env
+      - ../.env
     environment:
       MINERU_BASE_URL: http://mineru:8888
     depends_on:
       mineru:
         condition: service_healthy
     volumes:
-      - ./storage:/app/storage
-      # L3 固化模板持久化：save_yaml_template 写 /app/templates，不挂载则
-      # 容器重启即丢（重新走 AI 映射，功能不坏但浪费 token）；挂载依赖
-      # 部署目录为 git 检出（templates/ 内容与镜像一致，勿用空目录覆盖）
-      - ./templates:/app/templates
+      - ../storage:/app/storage
+      - ../templates:/app/templates
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/healthz"]
       interval: 30s
@@ -28,8 +25,8 @@ services:
 
   mineru:
     build:
-      context: .
-      dockerfile: deploy/mineru/Dockerfile
+      context: ..
+      dockerfile: docker/mineru/Dockerfile
       args:
         MINERU_VERSION: ${MINERU_VERSION:-2.5.4}
         MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}

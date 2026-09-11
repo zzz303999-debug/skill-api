@@ -6,6 +6,7 @@ ARG MINERU_VERSION=2.5.4
 ARG MINERU_MODEL_SOURCE=modelscope
 ARG TORCH_VERSION=2.6.0
 ARG TORCHVISION_VERSION=0.21.0
+ARG TORCH_INDEX_URL=https://mirror.nju.edu.cn/pytorch/whl/cpu
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -13,9 +14,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     MINERU_MODEL_SOURCE=${MINERU_MODEL_SOURCE}
 
-# MinerU pipeline needs OpenCV/PDF runtime libraries and CJK fonts. This is a
-# CPU-compatible base; production GPU hosts can replace this base/runtime with
-# a CUDA image while keeping the same mineru-api command.
 RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/debian|g' \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
@@ -28,12 +26,11 @@ RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.tuna.tsinghua.edu.cn/
     && rm -rf /var/lib/apt/lists/*
 
 RUN python -m pip install --no-cache-dir \
-        "torch==${TORCH_VERSION}" \
-        "torchvision==${TORCHVISION_VERSION}" \
+        "torch==${TORCH_VERSION}+cpu" \
+        "torchvision==${TORCHVISION_VERSION}+cpu" \
+        --index-url "${TORCH_INDEX_URL}" \
     && python -m pip install --no-cache-dir "mineru[core]==${MINERU_VERSION}"
 
-# Bake the pipeline models into the image so the first production request does
-# not spend its API timeout downloading model weights.
 RUN mineru-models-download -s "${MINERU_MODEL_SOURCE}" -m pipeline
 
 EXPOSE 8888

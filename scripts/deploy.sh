@@ -6,12 +6,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 ACTION="${1:-deploy}"
-COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker/docker-compose.yml}"
 SERVICE="${SERVICE:-skill-api}"
 CONTAINER_NAME="${CONTAINER_NAME:-skill-api}"
 IMAGE_NAME="${SKILL_API_IMAGE:-${IMAGE_NAME:-skill-api:latest}}"
 GIT_REMOTE="${GIT_REMOTE:-origin}"
-DEPLOY_BRANCH="${DEPLOY_BRANCH:-dev}"
+# 生产部署分支（默认 main；可用环境变量 DEPLOY_BRANCH 覆盖）
+DEPLOY_BRANCH="${DEPLOY_BRANCH:-main}"
 MINERU_CONTAINER_NAME="${MINERU_CONTAINER_NAME:-mineru}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-300}"
 LOG_TAIL="${LOG_TAIL:-200}"
@@ -28,7 +29,8 @@ die() {
 }
 
 compose() {
-    docker compose -f "${COMPOSE_FILE}" "$@"
+    # compose 位于 docker/，根 .env 需显式传入（${SKILL_API_IMAGE} 等插值变量）
+    docker compose --env-file .env -f "${COMPOSE_FILE}" "$@"
 }
 
 require_command() {
@@ -41,10 +43,11 @@ validate_common() {
     [[ -f .env ]] || die ".env not found. Create it from .env.example and fill production secrets."
     docker info >/dev/null 2>&1 || die "Docker daemon is unavailable or current user has no permission"
     compose config --quiet
-    # 生产安全基线（fail-closed）：deploy 版 compose 必须携带鉴权配置，
-    # 否则拒绝部署，避免无鉴权端口暴露。限流暂不强制（RATE_LIMIT_ENABLED 仍可自行开启）。
-    case "${COMPOSE_FILE}" in
-        *deploy*)
+    # 生产安全基线（fail-closed）：镜像部署模式（docker-compose.deploy.yml）必须携带
+    # 鉴权配置，否则拒绝部署，避免无鉴权端口暴露（按文件名精确匹配，避免路径前缀
+    # 干扰）。限流暂不强制（RATE_LIMIT_ENABLED 仍可自行开启）。
+    case "$(basename -- "${COMPOSE_FILE}")" in
+        docker-compose.deploy.yml)
             if ! grep -qE '^[[:space:]]*API_KEY=[^[:space:]]' .env; then
                 die "API_KEY is not set in .env; refusing to deploy an unauthenticated service"
             fi
